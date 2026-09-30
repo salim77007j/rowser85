@@ -55,7 +55,7 @@ impl Frame {
     pub fn save_png(&self, path: &str) -> std::io::Result<()> {
         let rgba = self.to_straight_rgba();
         image::save_buffer(path, &rgba, self.width, self.height, image::ColorType::Rgba8)
-            .map_err(|e| std::io::Error::other(e))
+            .map_err(std::io::Error::other)
     }
 
     /// Approximate memory footprint in bytes.
