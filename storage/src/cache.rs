@@ -120,11 +120,11 @@ impl<'a> HttpCache<'a> {
         for entry in meta_table
             .iter()
             .map_err(|e| StorageError::Backend(e.to_string()))?
+            .flatten()
         {
-            if let Ok((_, raw)) = entry {
-                if let Ok(meta) = serde_json::from_str::<CacheEntryMeta>(raw.value()) {
-                    total += meta.len;
-                }
+            let raw = entry.1;
+            if let Ok(meta) = serde_json::from_str::<CacheEntryMeta>(raw.value()) {
+                total += meta.len;
             }
         }
         Ok(total)
