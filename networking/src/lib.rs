@@ -231,7 +231,19 @@ pub async fn fetch(ctx: &NetworkContext, request: FetchRequest) -> Result<FetchR
                 })
             }
             "http" => {
-                if ctx.settings.read().map(|s| s.https_upgrade).unwrap_or(true) {
+                // Localhost is treated as a secure context (matching
+                // browser norms), so it is exempt from upgrade.
+                let is_local = url
+                    .host_str()
+                    .map(|h| {
+                        h.eq_ignore_ascii_case("localhost")
+                            || h.starts_with("127.")
+                            || h.starts_with("[::1]")
+                    })
+                    .unwrap_or(false);
+                if !is_local
+                    && ctx.settings.read().map(|s| s.https_upgrade).unwrap_or(true)
+                {
                     url.set_scheme("https").ok();
                     current.url = url.to_string();
                 }

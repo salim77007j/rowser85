@@ -36,22 +36,8 @@ use rowser_engine::{
 use rowser_privacy::PrivacySettings;
 use rowser_rendering::Frame;
 
-/// Re-exported engine events (serde-serializable for IPC-style UIs).
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(transparent)]
-pub struct EngineEvent(InnerEvent);
-
-impl std::fmt::Display for EngineEvent {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:?}", self.0)
-    }
-}
-
-impl From<InnerEvent> for EngineEvent {
-    fn from(event: InnerEvent) -> Self {
-        EngineEvent(event)
-    }
-}
+/// Re-exported engine events.
+pub type EngineEvent = InnerEvent;
 
 /// A view of the latest rendered frame for a tab.
 #[derive(Clone)]
