@@ -131,7 +131,7 @@ impl SnapshotWriter {
 }
 
 /// Runs the page thread.
-pub fn run(state: Arc<PageState>, rx: Receiver<Message>) {
+pub(crate) fn run(state: Arc<PageState>, rx: Receiver<Message>) {
     let (js_tx, js_rx) = std::sync::mpsc::channel::<JsCommand>();
     let mut page = Page::new(Arc::clone(&state), js_tx, js_rx);
     loop {
@@ -285,7 +285,7 @@ impl Page {
     }
 
     fn handle_js_command(&mut self, command: JsCommand) {
-        let quit = match command {
+        match command {
             JsCommand::WorkerEgress { id, message } => {
                 if let Some(js) = &self.js {
                     js.dispatch(JsEngineEvent::WorkerMessage { id, message });
@@ -313,7 +313,7 @@ impl Page {
                     command: other,
                 }));
             }
-        };
+        }
     }
 
     fn navigate(&mut self, url: String) {

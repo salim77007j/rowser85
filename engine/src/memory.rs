@@ -4,8 +4,6 @@
 //! memory pressure instead of OOM.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-
 use crate::{EngineEvent, EngineLoop};
 
 /// Static state for the current memory tick (shared with page threads
@@ -13,7 +11,7 @@ use crate::{EngineEvent, EngineLoop};
 static PRESSURE: AtomicBool = AtomicBool::new(false);
 
 /// One memory-management pass.
-pub fn tick(state: &EngineLoop) {
+pub(crate) fn tick(state: &EngineLoop) {
     let total = state.total_tab_memory();
     let total_ram = total_system_memory();
     let budget = (total_ram as f64 * state.config.memory_budget_fraction as f64) as u64;
@@ -33,10 +31,11 @@ pub fn tick(state: &EngineLoop) {
         let mut tabs = state.pages().lock().unwrap();
         let mut largest: Option<(u64, crate::TabId)> = None;
         for (tab, handle) in tabs.iter() {
-            if !handle.focused && !handle.suspended {
-                if largest.map(|(mem, _)| handle.memory > mem).unwrap_or(true) {
-                    largest = Some((handle.memory, *tab));
-                }
+            let candidate = !handle.focused
+                && !handle.suspended
+                && largest.map(|(mem, _)| handle.memory > mem).unwrap_or(true);
+            if candidate {
+                largest = Some((handle.memory, *tab));
             }
         }
         if let Some((_, tab)) = largest {

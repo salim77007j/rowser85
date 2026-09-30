@@ -333,14 +333,15 @@ enum Cmd {
 }
 
 /// Shared state handed to the page thread.
-pub struct PageState {
+pub(crate) struct PageState {
     /// Tab id.
     pub tab: TabId,
     /// Engine command channel.
     pub engine_tx: std::sync::mpsc::Sender<Cmd>,
     /// Profile storage.
     pub storage: Arc<Storage>,
-    /// Network context.
+    /// Network context (kept for future direct page-thread use).
+    #[allow(dead_code)]
     pub network: Arc<rowser_networking::NetworkContext>,
     /// JS runtime limits.
     pub js_config: JsConfig,
@@ -812,8 +813,8 @@ fn handle_page_command(state: &EngineLoop, tab: TabId, command: JsCommand) {
             // timers are ignored by the JS prelude.
         }
         JsCommand::FetchStart { id, url, init } => {
-            let request = js_fetch_request(state, tab, id, url, init);
-            if let RequestVerdict::Block(reason) = blocklist_check(state, tab, &request) {
+            let request = js_fetch_request(state, tab, url, init);
+            if let RequestVerdict::Block(reason) = blocklist_check(state, &request) {
                 let _ = state
                     .event_tx
                     .send(EngineEvent::BlockedRequest { tab, url: request.url, reason });
@@ -910,7 +911,6 @@ fn send_page_direct(
 fn js_fetch_request(
     state: &EngineLoop,
     tab: TabId,
-    id: u64,
     url: String,
     init: String,
 ) -> rowser_networking::FetchRequest {
@@ -936,7 +936,6 @@ fn js_fetch_request(
             request.body = Some(bytes::Bytes::copy_from_slice(body.as_bytes()));
         }
     }
-    let _ = id;
     request
 }
 
@@ -948,7 +947,6 @@ fn spawn_js_fetch(
 ) {
     let network = Arc::clone(&state.network);
     let cmd_tx = state.cmd_tx.clone();
-    let url = request.url.clone();
     state.runtime.spawn(async move {
         match rowser_networking::fetch(&network, request).await {
             Ok(response) => {
@@ -956,7 +954,7 @@ fn spawn_js_fetch(
                 let body_b64 = base64::engine::general_purpose::STANDARD
                     .encode(response.body.as_ref());
                 let headers = serde_json::to_string(
-                    &response.headers.iter().cloned().collect::<Vec<_>>(),
+                    &response.headers,
                 )
                 .unwrap_or_else(|_| "[]".to_owned());
                 let _ = cmd_tx.send(Cmd::Internal(Internal::JsFetchDone {
@@ -985,17 +983,17 @@ fn spawn_subresource_fetch(
 ) {
     let network = Arc::clone(&state.network);
     let cmd_tx = state.cmd_tx.clone();
-    let url = request.url.clone();
+    let request_url = request.url.clone();
     state.runtime.spawn(async move {
         match rowser_networking::fetch(&network, request).await {
             Ok(response) => {
                 let headers = serde_json::to_string(
-                    &response.headers.iter().cloned().collect::<Vec<_>>(),
+                    &response.headers,
                 )
                 .unwrap_or_else(|_| "[]".to_owned());
                 let _ = cmd_tx.send(Cmd::Internal(Internal::FetchDone {
                     tab,
-                    url,
+                    url: request_url,
                     status: response.status,
                     headers,
                     body: response.body.to_vec(),
@@ -1004,7 +1002,7 @@ fn spawn_subresource_fetch(
             Err(err) => {
                 let _ = cmd_tx.send(Cmd::Internal(Internal::FetchFailed {
                     tab,
-                    url,
+                    url: request_url,
                     error: err.to_string(),
                 }));
             }
@@ -1125,7 +1123,6 @@ fn cname_gate_thread(
 /// Runs the sync blocklist gate; returns the verdict.
 fn blocklist_check(
     state: &EngineLoop,
-    tab: TabId,
     request: &rowser_networking::FetchRequest,
 ) -> RequestVerdict {
     if !state.network.settings.read().map(|s| s.block_ads).unwrap_or(true) {
@@ -1154,7 +1151,7 @@ fn blocklist_check(
 /// Full gate: blocklist (sync) + CNAME (async gate thread for third-party).
 /// Returns true when the request was blocked/queued (caller does nothing).
 fn gate_fetch(state: &EngineLoop, tab: TabId, request: rowser_networking::FetchRequest) -> bool {
-    if let RequestVerdict::Block(reason) = blocklist_check(state, tab, &request) {
+    if let RequestVerdict::Block(reason) = blocklist_check(state, &request) {
         let _ = state
             .event_tx
             .send(EngineEvent::BlockedRequest { tab, url: request.url.clone(), reason });
