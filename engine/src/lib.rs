@@ -417,7 +417,6 @@ impl Engine {
             event_tx,
             snapshots: Arc::clone(&snapshots),
             tabs: Mutex::new(HashMap::new()),
-            next_tab: AtomicU64::new(1),
         });
 
         std::thread::Builder::new()
@@ -479,14 +478,9 @@ struct EngineLoop {
     event_tx: tokio::sync::broadcast::Sender<EngineEvent>,
     snapshots: Arc<Mutex<HashMap<TabId, TabSnapshot>>>,
     tabs: Mutex<HashMap<TabId, PageHandle>>,
-    next_tab: AtomicU64,
 }
 
 impl EngineLoop {
-    fn next_tab_id(&self) -> TabId {
-        self.next_tab.fetch_add(1, Ordering::Relaxed)
-    }
-
     fn broadcast(&self, event: EngineEvent) {
         let _ = self.event_tx.send(event);
     }
