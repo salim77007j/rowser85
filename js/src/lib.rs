@@ -930,7 +930,7 @@ mod tests {
         let doc = parse_html(html);
         let dom = Rc::new(RefCell::new(doc.dom));
         let (tx, _rx) = std::sync::mpsc::channel();
-        let mut probe = dom.borrow_mut();
+        let probe = dom.borrow_mut();
         let body = probe
             .subtree_elements(probe.document())
             .find(|n| probe.element(*n).map(|e| &*e.name.local == "body").unwrap_or(false))
@@ -1015,7 +1015,7 @@ mod tests {
             body_b64: "aGVsbG8=".to_owned(),
         });
         assert_eq!(runtime.eval("state", "test.js").unwrap(), "done:200");
-        assert_eq!(runtime.eval("fetchDone", "check.js").unwrap_err().to_string().len() > 0, true);
+        assert!(!runtime.eval("fetchDone", "check.js").unwrap_err().to_string().is_empty());
     }
 
     #[test]
