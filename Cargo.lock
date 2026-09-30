@@ -3157,9 +3157,14 @@ version = "0.1.0"
 dependencies = [
  "base64 0.23.1",
  "rowser-dom",
+ "rowser-parsing",
+ "rowser-privacy",
+ "rowser-storage",
  "rquickjs",
  "serde_json",
  "thiserror 2.0.21",
+ "tracing",
+ "url",
 ]
 
 [[package]]
