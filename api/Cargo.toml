@@ -8,6 +8,9 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+anyhow = "1.0.104"
+rowser-privacy = { path = "../privacy" }
+rowser-rendering = { path = "../rendering" }
 rowser-engine = { path = "../engine" }
 serde = { version = "1.0.229", features = ["derive"] }
 thiserror = "2.0.21"
