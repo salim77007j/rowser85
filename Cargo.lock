@@ -3125,9 +3125,11 @@ dependencies = [
 name = "rowser-dom"
 version = "0.1.0"
 dependencies = [
+ "cssparser 0.38.0",
  "markup5ever",
+ "precomputed-hash",
  "selectors",
- "string_cache",
+ "web_atoms",
 ]
 
 [[package]]
@@ -3206,6 +3208,7 @@ dependencies = [
  "html5ever",
  "lightningcss",
  "rowser-dom",
+ "tracing",
 ]
 
 [[package]]
@@ -3736,7 +3739,6 @@ dependencies = [
  "parking_lot",
  "phf_shared 0.14.0",
  "precomputed-hash",
- "serde",
 ]
 
 [[package]]

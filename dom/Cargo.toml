@@ -8,6 +8,8 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+cssparser = "0.38"
 markup5ever = "0.40.0"
+precomputed-hash = "0.1.1"
 selectors = "0.41.0"
-string_cache = "0.11.0"
+web_atoms = "0.3.0"

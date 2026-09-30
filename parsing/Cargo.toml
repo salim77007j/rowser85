@@ -12,3 +12,4 @@ encoding_rs = "0.8.35"
 html5ever = "0.40.1"
 lightningcss = "1.0.0-alpha.72"
 rowser-dom = { path = "../dom" }
+tracing = "0.1.44"
