@@ -3227,6 +3227,7 @@ dependencies = [
 name = "rowser-rendering"
 version = "0.1.0"
 dependencies = [
+ "cosmic-text",
  "image",
  "rowser-dom",
  "rowser-layout",
