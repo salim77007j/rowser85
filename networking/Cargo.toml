@@ -28,5 +28,7 @@ rustls = { version = "0.23.45", default-features = false, features = ["std", "ri
 thiserror = "2.0.21"
 tokio = { version = "1.53.1", features = ["full"] }
 tokio-tungstenite = { version = "0.30.0", features = ["connect", "rustls-tls-webpki-roots"] }
+tower-service = "0.3.3"
 tracing = "0.1.44"
 url = "2.5.8"
+webpki-roots = "1.0.9"

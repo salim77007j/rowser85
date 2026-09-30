@@ -15,6 +15,14 @@ pub mod fingerprint;
 pub mod psl;
 pub mod safe_browsing;
 
+/// Global PSL-backed registrable domain helper (cached process-wide).
+pub fn psl_registrable(host: &str) -> String {
+    static PSL: std::sync::OnceLock<psl::Psl> = std::sync::OnceLock::new();
+    PSL.get_or_init(psl::Psl::new)
+        .registrable_domain(host)
+        .unwrap_or_else(|| host.to_ascii_lowercase())
+}
+
 /// Global privacy settings, applied by the engine to every request and
 /// script environment.
 #[derive(Debug, Clone, PartialEq, Eq)]

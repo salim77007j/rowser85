@@ -1,1 +1,510 @@
-//! Rrowser networking: HTTP/1.1, HTTP/2, HTTP/3 (QUIC), TLS 1.3, DoH/DoT, WebSockets.
+//! Rrowser networking: the fetch pipeline.
+//!
+//! * HTTP/1.1 + HTTP/2 over **hyper** with **rustls** (TLS 1.3 default)
+//! * HTTP/3 over **quinn** (QUIC) with graceful TCP fallback
+//! * DNS via **hickory** with DNS-over-HTTPS / DNS-over-TLS / DoQ support
+//! * WebSocket via **tokio-tungstenite**
+//! * Brave-adblock request filtering, CNAME-cloaking checks, HTTPS upgrade,
+//!   CHIPS-aware cookie handling and redirect re-verification
+//!
+//! Every request passes the same privacy pipeline (see [`fetch`]) before a
+//! socket is opened: blocklist → HTTPS upgrade → DNS (+ CNAME guard) →
+//! transport. Redirects re-run the full pipeline so trackers cannot smuggle
+//! requests through 3xx hops.
+
+pub mod client;
+pub mod h3;
+pub mod scheduler;
+pub mod ws;
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use bytes::Bytes;
+use http::header::{HeaderName, HeaderValue};
+use url::Url;
+
+pub use client::HickoryDnsConfig;
+pub use h3::H3Settings;
+pub use scheduler::{ResourcePriority, ResourceScheduler};
+
+use rowser_privacy::blocklist::{Blocklist, ResourceType as PrivacyResourceType};
+use rowser_privacy::cname::CnameGuard;
+use rowser_privacy::{PrivacySettings, RequestVerdict};
+use rowser_storage::cookies::{CookieJar, ThirdPartyPolicy};
+use rowser_storage::Storage;
+
+/// Network-layer errors.
+#[derive(Debug, thiserror::Error)]
+pub enum NetError {
+    /// The request was blocked by the privacy engine.
+    #[error("blocked: {0}")]
+    Blocked(String),
+    /// The URL could not be parsed.
+    #[error("invalid URL: {0}")]
+    InvalidUrl(String),
+    /// DNS resolution failed.
+    #[error("dns: {0}")]
+    Dns(String),
+    /// TLS failed.
+    #[error("tls: {0}")]
+    Tls(String),
+    /// The connection failed.
+    #[error("connect: {0}")]
+    Connect(String),
+    /// The HTTP exchange failed.
+    #[error("http: {0}")]
+    Http(String),
+    /// The response body could not be read.
+    #[error("body: {0}")]
+    Body(String),
+    /// Too many redirects.
+    #[error("too many redirects")]
+    TooManyRedirects,
+    /// Request timed out.
+    #[error("timeout after {0:?}")]
+    Timeout(Duration),
+    /// Unsupported scheme.
+    #[error("unsupported scheme: {0}")]
+    UnsupportedScheme(String),
+    /// Storage (cookies/cache) failure.
+    #[error("storage: {0}")]
+    Storage(String),
+}
+
+impl From<rowser_storage::StorageError> for NetError {
+    fn from(err: rowser_storage::StorageError) -> Self {
+        NetError::Storage(err.to_string())
+    }
+}
+
+/// A fetch request.
+#[derive(Debug, Clone)]
+pub struct FetchRequest {
+    /// Target URL.
+    pub url: String,
+    /// HTTP method.
+    pub method: String,
+    /// Extra headers.
+    pub headers: Vec<(String, String)>,
+    /// Request body (None for GET/HEAD).
+    pub body: Option<Bytes>,
+    /// Resource classification for filter matching.
+    pub resource_type: ResourceKind,
+    /// Initiating document URL (empty for main frames).
+    pub source_url: String,
+    /// Top-level site (registrable domain) for cookie partitioning.
+    pub top_site: Option<String>,
+}
+
+impl Default for FetchRequest {
+    fn default() -> Self {
+        FetchRequest {
+            url: String::new(),
+            method: "GET".to_owned(),
+            headers: Vec::new(),
+            body: None,
+            resource_type: ResourceKind::Document,
+            source_url: String::new(),
+            top_site: None,
+        }
+    }
+}
+
+/// Resource classification (maps to EasyList request types).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ResourceKind {
+    /// Main frame.
+    #[default]
+    Document,
+    /// Sub-frame.
+    SubDocument,
+    /// Stylesheet.
+    Stylesheet,
+    /// Script.
+    Script,
+    /// Image.
+    Image,
+    /// Font.
+    Font,
+    /// XHR/fetch.
+    Xhr,
+    /// WebSocket.
+    WebSocket,
+    /// Media.
+    Media,
+    /// Anything else.
+    Other,
+}
+
+impl ResourceKind {
+    fn to_filter(self) -> PrivacyResourceType {
+        match self {
+            ResourceKind::Document => PrivacyResourceType::Document,
+            ResourceKind::SubDocument => PrivacyResourceType::SubDocument,
+            ResourceKind::Stylesheet => PrivacyResourceType::Stylesheet,
+            ResourceKind::Script => PrivacyResourceType::Script,
+            ResourceKind::Image => PrivacyResourceType::Image,
+            ResourceKind::Font => PrivacyResourceType::Font,
+            ResourceKind::Xhr => PrivacyResourceType::Xhr,
+            ResourceKind::WebSocket => PrivacyResourceType::WebSocket,
+            ResourceKind::Media => PrivacyResourceType::Media,
+            ResourceKind::Other => PrivacyResourceType::Other,
+        }
+    }
+}
+
+/// A fetch response.
+#[derive(Debug, Clone)]
+pub struct FetchResponse {
+    /// Final URL (after redirects).
+    pub url: String,
+    /// Status code.
+    pub status: u16,
+    /// Response headers (name, value) in order.
+    pub headers: Vec<(String, String)>,
+    /// Body bytes.
+    pub body: Bytes,
+    /// Transport used ("h1", "h2" or "h3").
+    pub transport: &'static str,
+}
+
+impl FetchResponse {
+    /// Case-insensitive header lookup.
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.as_str())
+    }
+
+    /// Value of `Content-Type`.
+    pub fn content_type(&self) -> &str {
+        self.header("content-type").unwrap_or("text/plain")
+    }
+
+    /// True for 2xx statuses.
+    pub fn is_success(&self) -> bool {
+        (200..300).contains(&self.status)
+    }
+}
+
+/// Shared, thread-safe network state.
+pub struct NetworkContext {
+    /// HTTP/1.1 + HTTP/2 client.
+    pub http: client::HttpClient,
+    /// DNS resolver (DoH/DoT capable).
+    pub resolver: hickory_resolver::TokioResolver,
+    /// HTTP/3 pool.
+    pub h3: h3::H3Pool,
+    /// Privacy settings.
+    pub settings: PrivacySettings,
+    /// Ad/tracker blocklist.
+    pub blocklist: std::sync::Mutex<Blocklist>,
+    /// CNAME-cloaking guard.
+    pub cname_guard: std::sync::Mutex<CnameGuard>,
+    /// Persistent storage (cookies + cache).
+    pub storage: Arc<Storage>,
+    /// HTTP cache budget.
+    pub cache_budget: u64,
+    /// Per-request timeout.
+    pub request_timeout: Duration,
+}
+
+/// Builds the default network context for a profile.
+pub async fn build_context(
+    storage: Arc<Storage>,
+    settings: PrivacySettings,
+    dns: HickoryDnsConfig,
+    h3_settings: H3Settings,
+) -> Result<NetworkContext, NetError> {
+    let resolver = client::build_resolver(&dns).await?;
+    let http = client::build_http_client(&resolver);
+    let h3_pool = h3::H3Pool::new(h3_settings);
+    Ok(NetworkContext {
+        http,
+        resolver,
+        h3: h3_pool,
+        settings,
+        blocklist: std::sync::Mutex::new(Blocklist::with_builtin_rules()),
+        cname_guard: std::sync::Mutex::new(CnameGuard::new()),
+        storage,
+        cache_budget: 32 * 1024 * 1024,
+        request_timeout: Duration::from_secs(30),
+    })
+}
+
+/// Runs the full fetch pipeline.
+pub async fn fetch(ctx: &NetworkContext, request: FetchRequest) -> Result<FetchResponse, NetError> {
+    let mut current = request.clone();
+    let mut redirects = 0;
+    loop {
+        // 1. Parse + scheme dispatch.
+        let mut url =
+            Url::parse(&current.url).map_err(|e| NetError::InvalidUrl(e.to_string()))?;
+        match url.scheme() {
+            "data" => return fetch_data_url(&current),
+            "about" => {
+                return Ok(FetchResponse {
+                    url: current.url,
+                    status: 200,
+                    headers: vec![("content-type".into(), "text/html".into())],
+                    body: Bytes::new(),
+                    transport: "internal",
+                })
+            }
+            "http" => {
+                if ctx.settings.https_upgrade {
+                    url.set_scheme("https").ok();
+                    current.url = url.to_string();
+                }
+            }
+            "https" => {}
+            "ws" | "wss" => {
+                return Err(NetError::UnsupportedScheme(
+                    "use ws::connect for websockets".into(),
+                ))
+            }
+            other => return Err(NetError::UnsupportedScheme(other.to_owned())),
+        }
+
+        // 2. Privacy pipeline (also applied to redirect targets).
+        if ctx.settings.block_ads {
+            let source = if current.source_url.is_empty() {
+                current.url.clone()
+            } else {
+                current.source_url.clone()
+            };
+            let verdict = ctx.blocklist.lock().unwrap().check(
+                &current.url,
+                &source,
+                current.resource_type.to_filter(),
+            );
+            if let RequestVerdict::Block(reason) = verdict {
+                tracing::debug!(target: "rowser::net", "blocked {} ({})", current.url, reason);
+                return Err(NetError::Blocked(reason));
+            }
+        }
+
+        // 3. Cookies (CHIPS-aware request cookies).
+        let jar: CookieJar = ctx.storage.cookies();
+        let policy = if ctx.settings.block_third_party_cookies {
+            ThirdPartyPolicy::Partitioned
+        } else {
+            ThirdPartyPolicy::AllowAll
+        };
+        if let Some(cookie_header) = jar.cookie_header(&url, current.top_site.as_deref(), policy)? {
+            current
+                .headers
+                .retain(|(n, _)| !n.eq_ignore_ascii_case("cookie"));
+            current.headers.push(("cookie".into(), cookie_header));
+        }
+
+        // 4. Dispatch.
+        let response = dispatch(ctx, &current, &url).await?;
+
+        // 5. Set-Cookie handling.
+        let mut set_cookies: Vec<String> = Vec::new();
+        let mut kept_headers: Vec<(String, String)> = Vec::new();
+        for (name, value) in response.headers.clone() {
+            if name.eq_ignore_ascii_case("set-cookie") {
+                set_cookies.push(value);
+            } else {
+                kept_headers.push((name, value));
+            }
+        }
+        for raw in set_cookies {
+            jar.set_cookie(&raw, &url, current.top_site.as_deref(), policy)?;
+        }
+
+        // 6. Redirects.
+        if (301..400).contains(&response.status) && redirects < 20 {
+            redirects += 1;
+            if let Some(location) = response.header("location") {
+                let joined = url.join(location.trim()).map(|u| u.to_string()).map_err(
+                    |e| NetError::InvalidUrl(e.to_string()),
+                )?;
+                current.url = joined;
+                current.source_url = request.source_url.clone();
+                // Preserve partition context across redirects.
+                continue;
+            }
+        }
+        if redirects >= 20 {
+            return Err(NetError::TooManyRedirects);
+        }
+
+        // 7. HTTP cache store for cacheable subresources.
+        if response.is_success()
+            && matches!(
+                current.resource_type,
+                ResourceKind::Stylesheet | ResourceKind::Script | ResourceKind::Font | ResourceKind::Image
+            )
+        {
+            let cacheable = response
+                .header("cache-control")
+                .map(|c| !c.contains("no-store"))
+                .unwrap_or(true);
+            if cacheable {
+                let cache = ctx.storage.http_cache(ctx.cache_budget);
+                let _ = cache.put(
+                    &response.url,
+                    response.status,
+                    response.headers.clone(),
+                    response.body.to_vec(),
+                );
+            }
+        }
+
+        let final_response = FetchResponse {
+            url: response.url,
+            status: response.status,
+            headers: kept_headers,
+            body: response.body,
+            transport: response.transport,
+        };
+        // Alt-svc learning (HTTP/3 advertisement over HTTP/2).
+        if let Some(alt_svc) = final_response.header("alt-svc") {
+            let host = url.host_str().unwrap_or_default().to_owned();
+            let port = url.port_or_known_default().unwrap_or(443);
+            ctx.h3.note_alt_svc(&host, port, alt_svc);
+        }
+        return Ok(final_response);
+    }
+}
+
+async fn dispatch(
+    ctx: &NetworkContext,
+    request: &FetchRequest,
+    url: &Url,
+) -> Result<FetchResponse, NetError> {
+    // Resolve DNS once (shared by both transports + CNAME guard).
+    let host = url.host_str().unwrap_or_default().to_owned();
+    let port = url.port_or_known_default().unwrap_or(443);
+
+    if ctx.settings.anti_fingerprinting || ctx.settings.block_ads {
+        // CNAME-cloaking check on third-party hosts.
+        let source_site = registrable(&request.source_url);
+        let target_site = registrable(&request.url);
+        if !source_site.is_empty() && source_site != target_site {
+            let chain = client::cname_chain(&ctx.resolver, &host).await;
+            if let Some(resolved) = chain.last() {
+                let source = if request.source_url.is_empty() {
+                    request.url.clone()
+                } else {
+                    request.source_url.clone()
+                };
+                if ctx.cname_guard.lock().unwrap().is_cloaked(&host, resolved, &source) {
+                    tracing::debug!(target: "rowser::net", "CNAME cloaking: {host} -> {resolved}");
+                    return Err(NetError::Blocked("cname-cloaking".into()));
+                }
+            }
+        }
+    }
+
+    // Prefer HTTP/3 for known-h3 origins (learned via alt-svc), fall back to
+    // TCP (hyper) on any QUIC failure.
+    if url.scheme() == "https" && ctx.h3.prefers_h3(&host, port) {
+        match ctx.h3.fetch(ctx, request, url).await {
+            Ok(response) => return Ok(response),
+            Err(err) => {
+                tracing::debug!(target: "rowser::net", "h3 fallback to tcp: {err}");
+            }
+        }
+    }
+    client::fetch_http(ctx, request, url).await
+}
+
+fn registrable(url: &str) -> String {
+    let Ok(parsed) = Url::parse(url) else {
+        return String::new();
+    };
+    parsed.host_str().map(rowser_privacy::psl_registrable).unwrap_or_default()
+}
+
+/// `data:` URL scheme support.
+fn fetch_data_url(request: &FetchRequest) -> Result<FetchResponse, NetError> {
+    let rest = request
+        .url
+        .strip_prefix("data:")
+        .ok_or_else(|| NetError::InvalidUrl("not a data URL".into()))?;
+    let (meta, payload) = match rest.split_once(',') {
+        Some((m, p)) => (m, p),
+        None => return Err(NetError::InvalidUrl("malformed data URL".into())),
+    };
+    let is_base64 = meta.to_ascii_lowercase().ends_with(";base64");
+    let mime = meta.trim_end_matches(";base64");
+    let mime = if mime.is_empty() { "text/plain" } else { mime };
+    let body: Vec<u8> = if is_base64 {
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD
+            .decode(payload)
+            .map_err(|e| NetError::Body(e.to_string()))?
+    } else {
+        percent_encoding::percent_decode_str(payload)
+            .decode_utf8()
+            .map_err(|e| NetError::Body(e.to_string()))?
+            .as_bytes()
+            .to_vec()
+    };
+    Ok(FetchResponse {
+        url: request.url.clone(),
+        status: 200,
+        headers: vec![("content-type".to_owned(), mime.to_owned())],
+        body: Bytes::from(body),
+        transport: "internal",
+    })
+}
+
+/// Builds a standard header list for a request (user agent etc.).
+pub fn default_headers(profile: &rowser_privacy::fingerprint::SpoofProfile) -> Vec<(String, String)> {
+    vec![
+        ("user-agent".to_owned(), profile.user_agent.clone()),
+        ("accept".to_owned(),
+         "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8".to_owned()),
+        ("accept-language".to_owned(), "en-US,en;q=0.9".to_owned()),
+        ("sec-fetch-mode".to_owned(), "navigate".to_owned()),
+    ]
+}
+
+/// Converts our header pairs to `http` crate types.
+pub(crate) fn to_header_map(headers: &[(String, String)]) -> http::HeaderMap {
+    let mut map = http::HeaderMap::with_capacity(headers.len());
+    for (name, value) in headers {
+        let Ok(name) = HeaderName::from_bytes(name.as_bytes()) else {
+            continue;
+        };
+        let Ok(value) = HeaderValue::from_str(value) else {
+            continue;
+        };
+        map.insert(name, value);
+    }
+    map
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn data_url_base64() {
+        let request = FetchRequest {
+            url: "data:text/html;base64,PGI+aGk8L2I+".to_owned(),
+            ..FetchRequest::default()
+        };
+        let response = fetch_data_url(&request).unwrap();
+        assert_eq!(response.status, 200);
+        assert_eq!(response.header("content-type"), Some("text/html"));
+        assert_eq!(response.body.as_ref(), b"<b>hi</b>");
+    }
+
+    #[test]
+    fn data_url_percent_encoded() {
+        let request = FetchRequest {
+            url: "data:text/plain,Hello%20World".to_owned(),
+            ..FetchRequest::default()
+        };
+        let response = fetch_data_url(&request).unwrap();
+        assert_eq!(response.body.as_ref(), b"Hello World");
+    }
+}
