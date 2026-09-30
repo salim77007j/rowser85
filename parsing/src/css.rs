@@ -23,7 +23,9 @@ use lightningcss::rules::CssRule;
 use lightningcss::stylesheet::{ParserOptions, PrinterOptions, StyleSheet};
 use lightningcss::traits::ToCss;
 use lightningcss::values::color::{CssColor, LABColor, RGBA};
-use lightningcss::values::length::{Length, LengthPercentage, LengthPercentageOrAuto, LengthValue};
+use lightningcss::values::length::{
+    Length as LcLength, LengthPercentage, LengthPercentageOrAuto, LengthValue,
+};
 use rowser_dom::{parse_selector_list, SelectorList};
 
 use crate::cascade::{
@@ -432,7 +434,7 @@ enum Side {
 
 fn border_from_width(value: &BorderSideWidth) -> BorderEdgeRaw {
     let width = match value {
-        BorderSideWidth::Length(Length::Value(v)) => convert_length_value(v),
+        BorderSideWidth::Length(LcLength::Value(v)) => convert_length_value(v),
         BorderSideWidth::Length(_) => Length::Px(0.0),
         BorderSideWidth::Thin => Length::Px(1.0),
         BorderSideWidth::Medium => Length::Px(3.0),
