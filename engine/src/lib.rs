@@ -39,7 +39,7 @@ pub use page::SubresourceKind;
 pub type TabId = u64;
 
 /// Engine events broadcast to the UI layer.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum EngineEvent {
     /// A tab was created.
     TabCreated(TabId),
@@ -131,8 +131,8 @@ pub struct TabSnapshot {
 /// Commands accepted by the engine.
 #[derive(Debug)]
 pub enum Command {
-    /// Create a tab (optionally navigating to `url`).
-    CreateTab(Option<String>),
+    /// Create a tab with a caller-assigned id (optionally navigating).
+    CreateTab(TabId, Option<String>),
     /// Navigate a tab.
     Navigate(TabId, String),
     /// Close a tab.
@@ -325,6 +325,7 @@ pub struct Engine {
     cmd_tx: std::sync::mpsc::Sender<Cmd>,
     snapshots: Arc<Mutex<HashMap<TabId, TabSnapshot>>>,
     event_tx: tokio::sync::broadcast::Sender<EngineEvent>,
+    next_tab: Arc<AtomicU64>,
 }
 
 enum Cmd {
@@ -369,6 +370,7 @@ impl Engine {
             cmd_tx: cmd_tx.clone(),
             snapshots: Arc::clone(&snapshots),
             event_tx: event_tx.clone(),
+            next_tab: Arc::new(AtomicU64::new(1)),
         };
 
         let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -428,6 +430,18 @@ impl Engine {
     /// Sends a user command.
     pub fn send(&self, command: Command) {
         let _ = self.cmd_tx.send(Cmd::User(command));
+    }
+
+    /// Allocates a tab id.
+    pub fn next_tab_id(&self) -> TabId {
+        self.next_tab.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// Creates a tab (id allocated here, creation processed on the loop).
+    pub fn new_tab(&self, url: Option<String>) -> TabId {
+        let id = self.next_tab_id();
+        let _ = self.cmd_tx.send(Cmd::User(Command::CreateTab(id, url)));
+        id
     }
 
     /// Subscribes to engine events.
@@ -545,7 +559,7 @@ fn engine_loop(state: Arc<EngineLoop>, cmd_rx: std::sync::mpsc::Receiver<Cmd>) {
 fn handle_user(state: &EngineLoop, command: Command) -> bool {
     match command {
         Command::Shutdown => return true,
-        Command::CreateTab(url) => create_tab(state, url),
+        Command::CreateTab(tab, url) => create_tab(state, tab, url),
         Command::Navigate(tab, url) => {
             if let Some(handle) = state.tabs.lock().unwrap().get(&tab) {
                 let _ = handle.tx.send(page::Message::Navigate(url.clone()));
@@ -594,8 +608,8 @@ fn handle_user(state: &EngineLoop, command: Command) -> bool {
     false
 }
 
-fn create_tab(state: &EngineLoop, url: Option<String>) {
-    let tab = state.next_tab_id();
+fn create_tab(state: &EngineLoop, requested: TabId, url: Option<String>) {
+    let tab = requested;
     let (page_tx, page_rx) = std::sync::mpsc::channel::<page::Message>();
     let seed = blake3::hash(format!("tab-{tab}").as_bytes());
     let spoof = SpoofProfile::from_seed(*seed.as_bytes());
