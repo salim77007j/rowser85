@@ -406,6 +406,11 @@ fn apply_property(props: &mut StyleProps, property: &Property<'_>) {
         P::FontStyle(value) => props.font_style = Some(convert_font_style(value)),
         P::LineHeight(value) => props.line_height = Some(convert_line_height(value)),
         P::TextAlign(value) => props.text_align = Some(convert_text_align(value)),
+        P::Flex(value, _) => {
+            props.flex_grow = Some(value.grow);
+            props.flex_shrink = Some(value.shrink);
+            props.flex_basis = Some(convert_lpa(&value.basis));
+        }
         P::FlexDirection(value, _) => props.flex_direction = Some(convert_flex_direction(value)),
         P::FlexWrap(value, _) => props.flex_wrap = Some(convert_flex_wrap(value)),
         P::FlexGrow(value, _) => props.flex_grow = Some(*value),
