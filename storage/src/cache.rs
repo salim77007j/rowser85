@@ -139,11 +139,11 @@ impl<'a> HttpCache<'a> {
             for entry in meta_table
                 .iter()
                 .map_err(|e| StorageError::Backend(e.to_string()))?
+                .flatten()
             {
-                if let Ok((url, raw)) = entry {
-                    if let Ok(meta) = serde_json::from_str::<CacheEntryMeta>(raw.value()) {
-                        entries.push((url.value().to_owned(), meta));
-                    }
+                let (url, raw) = (entry.0, entry.1);
+                if let Ok(meta) = serde_json::from_str::<CacheEntryMeta>(raw.value()) {
+                    entries.push((url.value().to_owned(), meta));
                 }
             }
         }

@@ -173,10 +173,8 @@ impl<'a> CookieJar<'a> {
         // Expiry: Max-Age wins, then Expires, else session cookie.
         let expires_at = if let Some(max_age) = parsed.max_age() {
             Some(Timestamp::now().as_second() + max_age.whole_seconds().max(0))
-        } else if let Some(expiration) = parsed.expires_datetime() {
-            Some(expiration.unix_timestamp())
         } else {
-            None
+            parsed.expires_datetime().map(|e| e.unix_timestamp())
         };
         if let Some(expiry) = expires_at {
             if expiry <= Timestamp::now().as_second() {
