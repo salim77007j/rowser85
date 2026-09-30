@@ -387,11 +387,9 @@ fn path_matches(request_path: &str, cookie_path: &str) -> bool {
     if request_path == cookie_path {
         return true;
     }
-    if request_path.starts_with(cookie_path) {
-        return cookie_path.ends_with('/')
-            || request_path[cookie_path.len()..].starts_with('/');
-    }
-    false
+    request_path.strip_prefix(cookie_path).is_some_and(|rest| {
+        cookie_path.ends_with('/') || rest.starts_with('/')
+    })
 }
 
 
