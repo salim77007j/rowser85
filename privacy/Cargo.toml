@@ -1,0 +1,16 @@
+[package]
+name = "rowser-privacy"
+description = "Rrowser privacy: network-layer blocking, CNAME protection, anti-fingerprinting, safe browsing."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+adblock = "0.13.3"
+blake3 = "1.8.7"
+serde_json = "1.0.151"
+sha2 = "0.11.0"
+thiserror = "2.0.21"
+url = "2.5.8"

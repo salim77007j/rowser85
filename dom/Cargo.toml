@@ -1,0 +1,13 @@
+[package]
+name = "rowser-dom"
+description = "Rrowser DOM: arena-based document object model with CSS selector matching."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+markup5ever = "0.40.0"
+selectors = "0.41.0"
+string_cache = "0.11.0"

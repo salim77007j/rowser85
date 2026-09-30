@@ -1,0 +1,30 @@
+[workspace]
+resolver = "2"
+members = [
+    "dom",
+    "parsing",
+    "layout",
+    "rendering",
+    "js",
+    "networking",
+    "storage",
+    "privacy",
+    "engine",
+    "api",
+    "tests",
+    "benchmarks",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/salim77007j/rowser85"
+rust-version = "1.87"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+[profile.release.package."*"]
+opt-level = 3

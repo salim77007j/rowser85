@@ -1,0 +1,24 @@
+[package]
+name = "rowser-benchmarks"
+description = "Rrowser benchmark suite (criterion) and comparison harnesses."
+publish = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+rowser-dom = { path = "../dom" }
+rowser-parsing = { path = "../parsing" }
+rowser-layout = { path = "../layout" }
+rowser-rendering = { path = "../rendering" }
+rowser-js = { path = "../js" }
+rowser-privacy = { path = "../privacy" }
+rowser-networking = { path = "../networking" }
+criterion = "0.7.0"
+tracing = "0.1.44"
+
+[[bench]]
+name = "pipeline"
+harness = false

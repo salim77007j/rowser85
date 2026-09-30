@@ -1,0 +1,24 @@
+[package]
+name = "rowser-tests"
+description = "Rrowser integration, fuzz and property test suites."
+publish = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+rowser-dom = { path = "../dom" }
+rowser-parsing = { path = "../parsing" }
+rowser-layout = { path = "../layout" }
+rowser-rendering = { path = "../rendering" }
+rowser-js = { path = "../js" }
+rowser-networking = { path = "../networking" }
+rowser-storage = { path = "../storage" }
+rowser-privacy = { path = "../privacy" }
+rowser-engine = { path = "../engine" }
+rowser-api = { path = "../api" }
+proptest = "1.11.0"
+tempfile = "3.27.0"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }

@@ -1,0 +1,23 @@
+[package]
+name = "rowser-engine"
+description = "Rrowser engine core: tabs, page threads, navigation pipeline, memory manager."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+rowser-dom = { path = "../dom" }
+rowser-parsing = { path = "../parsing" }
+rowser-layout = { path = "../layout" }
+rowser-rendering = { path = "../rendering" }
+rowser-js = { path = "../js" }
+rowser-networking = { path = "../networking" }
+rowser-storage = { path = "../storage" }
+rowser-privacy = { path = "../privacy" }
+tokio = { version = "1.53.1", default-features = false, features = ["full"] }
+sysinfo = { version = "0.36.1", default-features = false, features = ["system"] }
+tracing = "0.1.44"
+anyhow = "1.0.104"
+thiserror = "2.0.21"
