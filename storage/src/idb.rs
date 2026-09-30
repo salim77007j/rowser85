@@ -5,7 +5,7 @@
 //! full W3C event/transaction model lives in the JS binding layer
 //! (see `js` crate and `docs/ROADMAP`).
 
-use redb::{Database, ReadableTable, ReadableTableMetadata};
+use redb::{Database, ReadableTable};
 use serde::{Deserialize, Serialize};
 
 use crate::{IDB_DB_TABLE, IDB_RECORD_TABLE, StorageError};
@@ -86,7 +86,7 @@ impl<'a> IndexedDb<'a> {
         let txn = self.db.begin_write()?;
         {
             let mut dbs = txn.open_table(IDB_DB_TABLE)?;
-            let stores = dbs
+            let _stores = dbs
                 .get(name)?
                 .and_then(|v| serde_json::from_str::<IdbDatabaseMeta>(v.value()).ok())
                 .map(|meta| meta.stores)
@@ -169,7 +169,6 @@ impl<'a> IndexedDb<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::Storage;
 
     #[test]

@@ -172,7 +172,6 @@ impl<'a> HttpCache<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::Storage;
 
     #[test]

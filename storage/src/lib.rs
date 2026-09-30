@@ -115,10 +115,6 @@ impl Storage {
         Storage::open("/tmp/rowser-in-memory.redb")
     }
 
-    pub(crate) fn db(&self) -> &Database {
-        &self.db
-    }
-
     /// The cookie jar.
     pub fn cookies(&self) -> cookies::CookieJar<'_> {
         cookies::CookieJar::new(&self.db)
