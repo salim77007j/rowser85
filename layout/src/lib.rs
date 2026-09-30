@@ -60,7 +60,7 @@ pub struct Rect {
 }
 
 /// Result of laying out a document.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct LayoutResult {
     /// Element border-box rectangles in document coordinates.
     pub rects: HashMap<NodeId, Rect>,

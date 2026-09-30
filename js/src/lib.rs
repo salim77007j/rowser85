@@ -21,6 +21,24 @@
 pub mod prelude {
     /// The JS-side Web API prelude, evaluated before any page script.
     pub const PRELUDE_JS: &str = include_str!("prelude.js");
+
+    /// The minimal prelude for worker contexts (message passing only).
+    pub const WORKER_PRELUDE_JS: &str = r#"
+(function () {
+  'use strict';
+  globalThis.onmessage = null;
+  globalThis.postMessage = function (msg) { __native_worker_post_message(JSON.stringify(msg)); };
+  globalThis.close = function () {};
+  globalThis.__onWorkerMessage = function (json) {
+    const cb = globalThis.onmessage;
+    if (cb) { try { cb({ data: JSON.parse(json) }); } catch (e) {} }
+  };
+  globalThis.console = {
+    log: (...a) => __native_console('log', a.join(' ')),
+    error: (...a) => __native_console('error', a.join(' ')),
+  };
+})();
+"#;
 }
 
 use std::cell::{Cell, RefCell};
@@ -108,6 +126,14 @@ pub enum JsCommand {
     },
     /// The DOM was mutated; re-style/layout/render after the script task.
     MarkDirty,
+    /// A worker context posted a message to its owning page (local routing;
+    /// never forwarded to the engine).
+    WorkerEgress {
+        /// Worker id.
+        id: u64,
+        /// JSON message.
+        message: String,
+    },
 }
 
 /// Events the engine dispatches **into** JavaScript.
@@ -330,6 +356,24 @@ impl JsRuntime {
     /// Runs a full GC pass (called by the memory manager on idle tabs).
     pub fn run_gc(&self) {
         self.runtime.run_gc();
+    }
+
+    /// Installs `__native_worker_post_message` for a worker context: the
+    /// closure captures the worker id and the page-loop command channel.
+    pub fn set_worker_post_message(
+        &self,
+        worker_id: u64,
+        sender: Sender<JsCommand>,
+    ) -> Result<(), JsError> {
+        self.context.with(|ctx| {
+            let globals = ctx.globals();
+            let func = Function::new(ctx.clone(), move |message: String| {
+                let _ = sender.send(JsCommand::WorkerEgress { id: worker_id, message });
+            })?;
+            globals.set("__native_worker_post_message", func)?;
+            Ok::<(), rquickjs::Error>(())
+        })?;
+        Ok(())
     }
 
     /// Live timer count (for memory accounting).

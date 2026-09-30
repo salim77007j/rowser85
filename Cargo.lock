@@ -3137,6 +3137,11 @@ name = "rowser-engine"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.23.1",
+ "blake3",
+ "bytes",
+ "hickory-resolver",
+ "percent-encoding",
  "rowser-dom",
  "rowser-js",
  "rowser-layout",
@@ -3145,10 +3150,12 @@ dependencies = [
  "rowser-privacy",
  "rowser-rendering",
  "rowser-storage",
+ "serde_json",
  "sysinfo",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
+ "url",
 ]
 
 [[package]]

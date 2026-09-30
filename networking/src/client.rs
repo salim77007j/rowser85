@@ -54,7 +54,7 @@ impl tower_service::Service<Name> for HickoryDnsResolver {
 }
 
 /// DNS configuration.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct HickoryDnsConfig {
     /// Secure DNS mode.
     pub mode: DnsMode,

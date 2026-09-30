@@ -500,7 +500,7 @@ impl Default for ComputedStyle {
 }
 
 /// Computed styles for every element in a document.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct StyleMap {
     /// Node id → computed style.
     pub styles: HashMap<NodeId, ComputedStyle>,

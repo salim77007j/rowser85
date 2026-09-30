@@ -28,9 +28,7 @@ pub use client::HickoryDnsConfig;
 pub use h3::H3Settings;
 pub use scheduler::{ResourcePriority, ResourceScheduler};
 
-use rowser_privacy::blocklist::{Blocklist, ResourceType as PrivacyResourceType};
-use rowser_privacy::cname::CnameGuard;
-use rowser_privacy::{PrivacySettings, RequestVerdict};
+use rowser_privacy::PrivacySettings;
 use rowser_storage::cookies::{CookieJar, ThirdPartyPolicy};
 use rowser_storage::Storage;
 
@@ -137,22 +135,7 @@ pub enum ResourceKind {
     Other,
 }
 
-impl ResourceKind {
-    fn to_filter(self) -> PrivacyResourceType {
-        match self {
-            ResourceKind::Document => PrivacyResourceType::Document,
-            ResourceKind::SubDocument => PrivacyResourceType::SubDocument,
-            ResourceKind::Stylesheet => PrivacyResourceType::Stylesheet,
-            ResourceKind::Script => PrivacyResourceType::Script,
-            ResourceKind::Image => PrivacyResourceType::Image,
-            ResourceKind::Font => PrivacyResourceType::Font,
-            ResourceKind::Xhr => PrivacyResourceType::Xhr,
-            ResourceKind::WebSocket => PrivacyResourceType::WebSocket,
-            ResourceKind::Media => PrivacyResourceType::Media,
-            ResourceKind::Other => PrivacyResourceType::Other,
-        }
-    }
-}
+
 
 /// A fetch response.
 #[derive(Debug, Clone)]
@@ -197,12 +180,8 @@ pub struct NetworkContext {
     pub resolver: hickory_resolver::TokioResolver,
     /// HTTP/3 pool.
     pub h3: h3::H3Pool,
-    /// Privacy settings.
-    pub settings: PrivacySettings,
-    /// Ad/tracker blocklist.
-    pub blocklist: std::sync::Mutex<Blocklist>,
-    /// CNAME-cloaking guard.
-    pub cname_guard: std::sync::Mutex<CnameGuard>,
+    /// Privacy settings (HTTPS upgrade, third-party cookie policy).
+    pub settings: std::sync::RwLock<PrivacySettings>,
     /// Persistent storage (cookies + cache).
     pub storage: Arc<Storage>,
     /// HTTP cache budget.
@@ -225,9 +204,7 @@ pub async fn build_context(
         http,
         resolver,
         h3: h3_pool,
-        settings,
-        blocklist: std::sync::Mutex::new(Blocklist::with_builtin_rules()),
-        cname_guard: std::sync::Mutex::new(CnameGuard::new()),
+        settings: std::sync::RwLock::new(settings),
         storage,
         cache_budget: 32 * 1024 * 1024,
         request_timeout: Duration::from_secs(30),
@@ -254,7 +231,7 @@ pub async fn fetch(ctx: &NetworkContext, request: FetchRequest) -> Result<FetchR
                 })
             }
             "http" => {
-                if ctx.settings.https_upgrade {
+                if ctx.settings.read().map(|s| s.https_upgrade).unwrap_or(true) {
                     url.set_scheme("https").ok();
                     current.url = url.to_string();
                 }
@@ -268,27 +245,16 @@ pub async fn fetch(ctx: &NetworkContext, request: FetchRequest) -> Result<FetchR
             other => return Err(NetError::UnsupportedScheme(other.to_owned())),
         }
 
-        // 2. Privacy pipeline (also applied to redirect targets).
-        if ctx.settings.block_ads {
-            let source = if current.source_url.is_empty() {
-                current.url.clone()
-            } else {
-                current.source_url.clone()
-            };
-            let verdict = ctx.blocklist.lock().unwrap().check(
-                &current.url,
-                &source,
-                current.resource_type.to_filter(),
-            );
-            if let RequestVerdict::Block(reason) = verdict {
-                tracing::debug!(target: "rowser::net", "blocked {} ({})", current.url, reason);
-                return Err(NetError::Blocked(reason));
-            }
-        }
-
-        // 3. Cookies (CHIPS-aware request cookies).
+        // 2. Cookies (CHIPS-aware request cookies).
+        // (Request blocking + CNAME cloaking run on the engine loop before
+        // the fetch is spawned — see the engine crate.)
         let jar: CookieJar = ctx.storage.cookies();
-        let policy = if ctx.settings.block_third_party_cookies {
+        let policy = if ctx
+            .settings
+            .read()
+            .map(|s| s.block_third_party_cookies)
+            .unwrap_or(true)
+        {
             ThirdPartyPolicy::Partitioned
         } else {
             ThirdPartyPolicy::AllowAll
@@ -378,29 +344,8 @@ async fn dispatch(
     request: &FetchRequest,
     url: &Url,
 ) -> Result<FetchResponse, NetError> {
-    // Resolve DNS once (shared by both transports + CNAME guard).
     let host = url.host_str().unwrap_or_default().to_owned();
     let port = url.port_or_known_default().unwrap_or(443);
-
-    if ctx.settings.anti_fingerprinting || ctx.settings.block_ads {
-        // CNAME-cloaking check on third-party hosts.
-        let source_site = registrable(&request.source_url);
-        let target_site = registrable(&request.url);
-        if !source_site.is_empty() && source_site != target_site {
-            let chain = client::cname_chain(&ctx.resolver, &host).await;
-            if let Some(resolved) = chain.last() {
-                let source = if request.source_url.is_empty() {
-                    request.url.clone()
-                } else {
-                    request.source_url.clone()
-                };
-                if ctx.cname_guard.lock().unwrap().is_cloaked(&host, resolved, &source) {
-                    tracing::debug!(target: "rowser::net", "CNAME cloaking: {host} -> {resolved}");
-                    return Err(NetError::Blocked("cname-cloaking".into()));
-                }
-            }
-        }
-    }
 
     // Prefer HTTP/3 for known-h3 origins (learned via alt-svc), fall back to
     // TCP (hyper) on any QUIC failure.
@@ -413,13 +358,6 @@ async fn dispatch(
         }
     }
     client::fetch_http(ctx, request, url).await
-}
-
-fn registrable(url: &str) -> String {
-    let Ok(parsed) = Url::parse(url) else {
-        return String::new();
-    };
-    parsed.host_str().map(rowser_privacy::psl_registrable).unwrap_or_default()
 }
 
 /// `data:` URL scheme support.
