@@ -89,7 +89,9 @@ impl Storage {
         if let Some(parent) = path.as_ref().parent() {
             std::fs::create_dir_all(parent).map_err(StorageError::Profile)?;
         }
-        let file_len = std::fs::metadata(path.as_ref()).map(|m| m.len()).unwrap_or(0);
+        let file_len = std::fs::metadata(path.as_ref())
+            .map(|m| m.len())
+            .unwrap_or(0);
         let db = Database::create(path)?;
         // Create all tables eagerly so later transactions cannot fail on
         // first use.
@@ -137,6 +139,8 @@ impl Storage {
 
     /// Estimated on-disk size in bytes; tracked by the storage path.
     pub fn disk_usage(&self) -> Result<u64, StorageError> {
-        Ok(self.disk_path_len.load(std::sync::atomic::Ordering::Relaxed))
+        Ok(self
+            .disk_path_len
+            .load(std::sync::atomic::Ordering::Relaxed))
     }
 }

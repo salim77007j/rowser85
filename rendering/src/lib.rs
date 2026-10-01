@@ -54,8 +54,14 @@ impl Frame {
     /// Saves the frame as a PNG file.
     pub fn save_png(&self, path: &str) -> std::io::Result<()> {
         let rgba = self.to_straight_rgba();
-        image::save_buffer(path, &rgba, self.width, self.height, image::ColorType::Rgba8)
-            .map_err(std::io::Error::other)
+        image::save_buffer(
+            path,
+            &rgba,
+            self.width,
+            self.height,
+            image::ColorType::Rgba8,
+        )
+        .map_err(std::io::Error::other)
     }
 
     /// Approximate memory footprint in bytes.
@@ -159,7 +165,10 @@ mod tests {
             &doc.dom,
             &[author],
             &MediaContext::default(),
-            Viewport { width: 800.0, height: 600.0 },
+            Viewport {
+                width: 800.0,
+                height: 600.0,
+            },
         );
         let list = build_display_list(&doc.dom, &styles, &layout, &Default::default());
         let mut painter = Painter::new();

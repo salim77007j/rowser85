@@ -9,7 +9,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rowser_dom::Dom;
-use rowser_js::{prelude, EngineEvent as JsEngineEvent, JsCommand, JsConfig, JsRuntime, PageBridge};
+use rowser_js::{
+    prelude, EngineEvent as JsEngineEvent, JsCommand, JsConfig, JsRuntime, PageBridge,
+};
 use rowser_layout::{LayoutEngine, LayoutResult, Viewport};
 use rowser_parsing::cascade::StyleMap;
 use rowser_parsing::css::{parse_stylesheet, MediaContext, ParsedStylesheet};
@@ -219,7 +221,9 @@ impl Page {
         match message {
             Message::Shutdown => return true,
             Message::Navigate(url) => self.navigate(url),
-            Message::SubresourceFetched { url, body, pending, .. } => {
+            Message::SubresourceFetched {
+                url, body, pending, ..
+            } => {
                 self.subresource_fetched(url, body);
                 if pending == 0 {
                     self.subresources_complete();
@@ -242,7 +246,10 @@ impl Page {
             }
             Message::WorkerEgress { worker, message } => {
                 if let Some(js) = &self.js {
-                    js.dispatch(JsEngineEvent::WorkerMessage { id: worker, message });
+                    js.dispatch(JsEngineEvent::WorkerMessage {
+                        id: worker,
+                        message,
+                    });
                 }
             }
             Message::JsCommand(command) => {
@@ -326,10 +333,7 @@ impl Page {
             snapshot.loading = true;
         });
         self.pending.insert(url.clone(), SubresourceKind::Document);
-        self.request_subresources(&[(
-            url,
-            SubresourceKind::Document,
-        )]);
+        self.request_subresources(&[(url, SubresourceKind::Document)]);
     }
 
     fn reset_page(&mut self) {
@@ -362,10 +366,12 @@ impl Page {
         if fetch_requests.is_empty() {
             return;
         }
-        let _ = self.engine_tx.send(Cmd::Internal(Internal::FetchSubresources {
-            tab: self.state.tab,
-            requests: fetch_requests,
-        }));
+        let _ = self
+            .engine_tx
+            .send(Cmd::Internal(Internal::FetchSubresources {
+                tab: self.state.tab,
+                requests: fetch_requests,
+            }));
     }
 
     fn top_site(&self) -> Option<String> {
@@ -377,7 +383,9 @@ impl Page {
     }
 
     fn subresource_fetched(&mut self, url: String, body: Vec<u8>) {
-        let Some(kind) = self.pending.remove(&url) else { return };
+        let Some(kind) = self.pending.remove(&url) else {
+            return;
+        };
         match kind {
             SubresourceKind::Document => self.document_fetched(url, body),
             SubresourceKind::Stylesheet => {
@@ -398,8 +406,7 @@ impl Page {
                                 if &*el.name.local == "img"
                                     && dom.get_attr(node, "src") == Some(url.as_str())
                                 {
-                                    self.images
-                                        .insert(node, Arc::new(image));
+                                    self.images.insert(node, Arc::new(image));
                                     break;
                                 }
                             }
@@ -423,7 +430,9 @@ impl Page {
         let mut css_texts: Vec<String> = self.css_texts.clone();
         let mut scripts: Vec<(Option<String>, String)> = Vec::new();
         for node in dom_ref.subtree_elements(dom_ref.document()) {
-            let Some(element) = dom_ref.element(node) else { continue };
+            let Some(element) = dom_ref.element(node) else {
+                continue;
+            };
             let tag = element.local_name().to_string();
             match tag.as_str() {
                 "style" => css_texts.push(dom_ref.text_content(node)),
@@ -512,10 +521,11 @@ impl Page {
             snapshot.loading = false;
             snapshot.title = title.clone();
         });
-        let _ = self
-            .state
-            .event_tx
-            .send(EngineEvent::PageLoaded { tab: self.state.tab, url, title });
+        let _ = self.state.event_tx.send(EngineEvent::PageLoaded {
+            tab: self.state.tab,
+            url,
+            title,
+        });
     }
 
     /// Style → layout → display list → paint.
@@ -533,9 +543,9 @@ impl Page {
             .iter()
             .map(|css| parse_stylesheet(css, &media))
             .collect();
-        let (styles, layout) = self
-            .layout_engine
-            .layout_document(&dom.borrow(), &sheets, &media, self.viewport);
+        let (styles, layout) =
+            self.layout_engine
+                .layout_document(&dom.borrow(), &sheets, &media, self.viewport);
         self.style_map = Some(styles);
         self.layout = Some(layout);
         self.rendered_dom_version = dom.borrow().version;
@@ -548,8 +558,12 @@ impl Page {
         if self.suspended || self.dom.is_none() {
             return;
         }
-        let Some(layout) = self.layout.clone() else { return };
-        let Some(styles) = self.style_map.clone() else { return };
+        let Some(layout) = self.layout.clone() else {
+            return;
+        };
+        let Some(styles) = self.style_map.clone() else {
+            return;
+        };
         let Some(dom) = self.dom.clone() else { return };
         let list = build_display_list(&dom.borrow(), &styles, &layout, &self.images);
         self.display_list = Some(list.clone());
@@ -560,9 +574,9 @@ impl Page {
             scroll_y: self.scroll_y,
             background,
         };
-        if let Some(frame) = self
-            .painter
-            .render(&list, options, &mut self.layout_engine.font_system)
+        if let Some(frame) =
+            self.painter
+                .render(&list, options, &mut self.layout_engine.font_system)
         {
             let frame = Arc::new(frame);
             let content_size = layout.content_size;
@@ -582,7 +596,11 @@ impl Page {
             let dom = dom.borrow();
             let find = |tag: &str| {
                 dom.subtree_elements(dom.document())
-                    .find(|n| dom.element(*n).map(|e| &*e.name.local == tag).unwrap_or(false))
+                    .find(|n| {
+                        dom.element(*n)
+                            .map(|e| &*e.name.local == tag)
+                            .unwrap_or(false)
+                    })
                     .unwrap_or(0)
             };
             (find("body"), find("html"))
@@ -610,9 +628,7 @@ impl Page {
         let scripts = std::mem::take(&mut self.scripts);
         if let Some(js) = &self.js {
             for (i, (src, code)) in scripts.iter().enumerate() {
-                let name = src
-                    .clone()
-                    .unwrap_or_else(|| format!("inline-{i}.js"));
+                let name = src.clone().unwrap_or_else(|| format!("inline-{i}.js"));
                 if let Err(err) = js.eval(code, &name) {
                     let _ = self.state.event_tx.send(EngineEvent::ConsoleMessage {
                         tab: self.state.tab,
@@ -640,7 +656,9 @@ impl Page {
             outgoing: Some(self.js_tx.clone()),
         };
         if let Ok(runtime) = JsRuntime::new(JsConfig::default(), bridge) {
-            runtime.set_worker_post_message(worker, self.js_tx.clone()).ok();
+            runtime
+                .set_worker_post_message(worker, self.js_tx.clone())
+                .ok();
             let _ = runtime.eval(prelude::WORKER_PRELUDE_JS, "worker-prelude.js");
             let _ = runtime.eval(&code, "worker.js");
             self.workers.insert(worker, runtime);
@@ -678,7 +696,11 @@ impl Page {
             .as_ref()
             .map(|dom| (dom.borrow().node_count() as u64) * 220)
             .unwrap_or(0);
-        let js_bytes = self.js.as_ref().map(|j| j.memory_usage().max(0) as u64).unwrap_or(0);
+        let js_bytes = self
+            .js
+            .as_ref()
+            .map(|j| j.memory_usage().max(0) as u64)
+            .unwrap_or(0);
         let worker_bytes: i64 = self.workers.values().map(|w| w.memory_usage()).sum();
         let frame_bytes = self
             .display_list
@@ -698,7 +720,9 @@ impl Page {
     }
 
     fn shutdown_report(&self) {
-        let _ = self.engine_tx.send(Cmd::Internal(Internal::PageExited(self.state.tab)));
+        let _ = self
+            .engine_tx
+            .send(Cmd::Internal(Internal::PageExited(self.state.tab)));
     }
 }
 
@@ -733,4 +757,3 @@ fn extract_data_payload(data_url: &str) -> String {
         None => String::new(),
     }
 }
-

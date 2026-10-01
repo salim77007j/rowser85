@@ -3,7 +3,7 @@
 use redb::{Database, ReadableTable};
 use url::Url;
 
-use crate::{LS_TABLE, StorageError};
+use crate::{StorageError, LS_TABLE};
 
 /// localStorage access for one profile.
 #[derive(Debug)]
@@ -31,7 +31,9 @@ impl<'a> LocalStorage<'a> {
         let storage_key = format!("{}\u{0}{}", Self::origin(url), key);
         let txn = self.db.begin_read()?;
         let table = txn.open_table(LS_TABLE)?;
-        Ok(table.get(storage_key.as_str())?.map(|v| v.value().to_owned()))
+        Ok(table
+            .get(storage_key.as_str())?
+            .map(|v| v.value().to_owned()))
     }
 
     /// `localStorage.setItem`.
@@ -109,7 +111,12 @@ mod tests {
 
     #[test]
     fn roundtrip_and_origin_isolation() {
-        let store = Storage::open(format!("/tmp/rowser-ls-{}-{}.redb", std::process::id(), line!())).unwrap();
+        let store = Storage::open(format!(
+            "/tmp/rowser-ls-{}-{}.redb",
+            std::process::id(),
+            line!()
+        ))
+        .unwrap();
         let ls = store.local_storage();
         let a = Url::parse("https://a.example/").unwrap();
         let b = Url::parse("https://b.example/").unwrap();

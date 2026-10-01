@@ -2,11 +2,14 @@
 
 #![allow(dead_code)]
 
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+
+/// Route table: path → (status, content_type, body).
+type Routes = Arc<HashMap<String, (u16, String, Vec<u8>)>>;
 
 /// A tiny local HTTP/1.1 server for engine tests.
 ///
@@ -15,7 +18,7 @@ use std::sync::Arc;
 /// `Drop`'s join forever).
 pub struct LocalServer {
     listener: TcpListener,
-    routes: Arc<HashMap<String, (u16, String, Vec<u8>)>>,
+    routes: Routes,
     hits: Arc<AtomicU64>,
     running: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
@@ -25,21 +28,21 @@ impl LocalServer {
     /// Starts the server; routes map path → (status, content_type, body).
     pub fn start(routes: HashMap<String, (u16, String, Vec<u8>)>) -> LocalServer {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
-        let routes = Arc::new(routes);
-        let hits = Arc::new(AtomicU64::new(0));
-        let server = LocalServer {
+        LocalServer {
             listener,
-            routes: Arc::clone(&routes),
-            hits: Arc::clone(&hits),
+            routes: Arc::new(routes),
+            hits: Arc::new(AtomicU64::new(0)),
             running: Arc::new(AtomicBool::new(true)),
             thread: None,
-        };
-        server
+        }
     }
 
     /// The server base URL.
     pub fn url(&self) -> String {
-        format!("http://127.0.0.1:{}", self.listener.local_addr().unwrap().port())
+        format!(
+            "http://127.0.0.1:{}",
+            self.listener.local_addr().unwrap().port()
+        )
     }
 
     /// Total requests served.
@@ -86,10 +89,7 @@ impl Drop for LocalServer {
     }
 }
 
-fn serve_one(
-    stream: &mut TcpStream,
-    routes: &HashMap<String, (u16, String, Vec<u8>)>,
-) -> Option<(u16, String, Vec<u8>)> {
+fn serve_one(stream: &mut TcpStream, routes: &Routes) -> Option<(u16, String, Vec<u8>)> {
     let mut buffer = [0u8; 8192];
     let mut read = 0usize;
     // Read until end of headers.

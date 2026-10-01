@@ -130,5 +130,8 @@ fn scan_ident(bytes: &[u8], mut pos: usize) -> (String, usize) {
             break;
         }
     }
-    (String::from_utf8_lossy(&bytes[start..pos]).into_owned(), pos)
+    (
+        String::from_utf8_lossy(&bytes[start..pos]).into_owned(),
+        pos,
+    )
 }

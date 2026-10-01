@@ -87,27 +87,31 @@ fn bench_cascade_and_layout(c: &mut Criterion) {
         // Warm the shaping cache once.
         let _ = engine.layout_document(
             &doc.dom,
-            &[sheet.clone()],
+            std::slice::from_ref(&sheet),
             &media,
-            Viewport { width: 1280.0, height: 800.0 },
+            Viewport {
+                width: 1280.0,
+                height: 800.0,
+            },
         );
         group.throughput(Throughput::Elements(items as u64));
         group.bench_function(label, |b| {
             b.iter(|| {
                 engine.layout_document(
                     &doc.dom,
-                    &[sheet.clone()],
+                    std::slice::from_ref(&sheet),
                     &media,
-                    Viewport { width: 1280.0, height: 800.0 },
+                    Viewport {
+                        width: 1280.0,
+                        height: 800.0,
+                    },
                 )
             })
         });
     }
     group.finish();
     // Cold engine creation (font system init) as its own cost line.
-    c.bench_function("engine-cold-init", |b| {
-        b.iter(|| LayoutEngine::new())
-    });
+    c.bench_function("engine-cold-init", |b| b.iter(LayoutEngine::new));
 }
 
 fn bench_display_list(c: &mut Criterion) {
@@ -117,8 +121,15 @@ fn bench_display_list(c: &mut Criterion) {
     let doc = parse_html(&html);
     let sheet = parse_stylesheet(&css, &media);
     let mut engine = LayoutEngine::new();
-    let (styles, layout) =
-        engine.layout_document(&doc.dom, &[sheet], &media, Viewport { width: 1280.0, height: 800.0 });
+    let (styles, layout) = engine.layout_document(
+        &doc.dom,
+        &[sheet],
+        &media,
+        Viewport {
+            width: 1280.0,
+            height: 800.0,
+        },
+    );
     c.bench_function("display-list/2k-nodes", |b| {
         b.iter(|| build_display_list(&doc.dom, &styles, &layout, &Default::default()))
     });
@@ -131,8 +142,15 @@ fn bench_paint(c: &mut Criterion) {
     let doc = parse_html(&html);
     let sheet = parse_stylesheet(&css, &media);
     let mut engine = LayoutEngine::new();
-    let (styles, layout) =
-        engine.layout_document(&doc.dom, &[sheet], &media, Viewport { width: 1280.0, height: 800.0 });
+    let (styles, layout) = engine.layout_document(
+        &doc.dom,
+        &[sheet],
+        &media,
+        Viewport {
+            width: 1280.0,
+            height: 800.0,
+        },
+    );
     let list = build_display_list(&doc.dom, &styles, &layout, &Default::default());
     // Steady-state paint: warm painter (glyph mask caches alive, the
     // scrolling case) against a warm font system.
@@ -178,7 +196,10 @@ fn bench_full_pipeline(c: &mut Criterion) {
                     &doc.dom,
                     &[sheet],
                     &media,
-                    Viewport { width: 1280.0, height: 800.0 },
+                    Viewport {
+                        width: 1280.0,
+                        height: 800.0,
+                    },
                 );
                 let list = build_display_list(&doc.dom, &styles, &layout, &Default::default());
                 painter

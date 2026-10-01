@@ -15,7 +15,7 @@ use selectors::context::{
     MatchingContext, MatchingForInvalidation, MatchingMode, NeedsSelectorFlags, QuirksMode,
     SelectorCaches,
 };
-use selectors::matching::{ElementSelectorFlags, matches_selector_list};
+use selectors::matching::{matches_selector_list, ElementSelectorFlags};
 use selectors::parser::{
     NonTSPseudoClass, ParseRelative, Parser, PseudoElement as PseudoElementTrait, SelectorImpl,
     SelectorList as InnerSelectorList, SelectorParseErrorKind,
@@ -148,7 +148,9 @@ pub struct ElementRef<'a> {
 impl<'a> ElementRef<'a> {
     /// Borrows `node` as an element reference; `None` for non-elements.
     pub fn new(dom: &'a Dom, node: NodeId) -> Option<Self> {
-        dom.element(node).is_some().then_some(ElementRef { dom, node })
+        dom.element(node)
+            .is_some()
+            .then_some(ElementRef { dom, node })
     }
 }
 
@@ -182,7 +184,9 @@ impl<'a> Element for ElementRef<'a> {
     }
 
     fn parent_element(&self) -> Option<Self> {
-        self.dom.parent_element(self.node).and_then(|p| ElementRef::new(self.dom, p))
+        self.dom
+            .parent_element(self.node)
+            .and_then(|p| ElementRef::new(self.dom, p))
     }
 
     fn parent_node_is_shadow_root(&self) -> bool {
@@ -198,15 +202,21 @@ impl<'a> Element for ElementRef<'a> {
     }
 
     fn prev_sibling_element(&self) -> Option<Self> {
-        self.dom.prev_sibling_element(self.node).and_then(|p| ElementRef::new(self.dom, p))
+        self.dom
+            .prev_sibling_element(self.node)
+            .and_then(|p| ElementRef::new(self.dom, p))
     }
 
     fn next_sibling_element(&self) -> Option<Self> {
-        self.dom.next_sibling_element(self.node).and_then(|p| ElementRef::new(self.dom, p))
+        self.dom
+            .next_sibling_element(self.node)
+            .and_then(|p| ElementRef::new(self.dom, p))
     }
 
     fn first_element_child(&self) -> Option<Self> {
-        self.dom.first_element_child(self.node).and_then(|c| ElementRef::new(self.dom, c))
+        self.dom
+            .first_element_child(self.node)
+            .and_then(|c| ElementRef::new(self.dom, c))
     }
 
     fn is_html_element_in_html_document(&self) -> bool {
@@ -224,7 +234,10 @@ impl<'a> Element for ElementRef<'a> {
     }
 
     fn has_namespace(&self, ns: &Namespace) -> bool {
-        self.dom.element(self.node).map(|e| &e.name.ns == ns).unwrap_or(false)
+        self.dom
+            .element(self.node)
+            .map(|e| &e.name.ns == ns)
+            .unwrap_or(false)
     }
 
     fn is_same_type(&self, other: &Self) -> bool {
@@ -240,7 +253,9 @@ impl<'a> Element for ElementRef<'a> {
         local_name: &DomName,
         operation: &AttrSelectorOperation<&DomName>,
     ) -> bool {
-        let Some(el) = self.dom.element(self.node) else { return false };
+        let Some(el) = self.dom.element(self.node) else {
+            return false;
+        };
         if let NamespaceConstraint::Specific(specific) = ns {
             // Attributes are stored without namespace; only the empty
             // namespace matches.
@@ -282,8 +297,12 @@ impl<'a> Element for ElementRef<'a> {
     }
 
     fn has_id(&self, id: &DomName, case_sensitivity: CaseSensitivity) -> bool {
-        let Some(el) = self.dom.element(self.node) else { return false };
-        let Some(actual) = el.id.as_deref() else { return false };
+        let Some(el) = self.dom.element(self.node) else {
+            return false;
+        };
+        let Some(actual) = el.id.as_deref() else {
+            return false;
+        };
         match case_sensitivity {
             CaseSensitivity::CaseSensitive => actual == &**id,
             CaseSensitivity::AsciiCaseInsensitive => actual.eq_ignore_ascii_case(id),
@@ -291,11 +310,11 @@ impl<'a> Element for ElementRef<'a> {
     }
 
     fn has_class(&self, name: &DomName, case_sensitivity: CaseSensitivity) -> bool {
-        let Some(el) = self.dom.element(self.node) else { return false };
+        let Some(el) = self.dom.element(self.node) else {
+            return false;
+        };
         match case_sensitivity {
-            CaseSensitivity::CaseSensitive => {
-                el.classes.iter().any(|c| c.as_str() == &**name)
-            }
+            CaseSensitivity::CaseSensitive => el.classes.iter().any(|c| c.as_str() == &**name),
             CaseSensitivity::AsciiCaseInsensitive => {
                 el.classes.iter().any(|c| c.eq_ignore_ascii_case(name))
             }
@@ -322,7 +341,10 @@ impl<'a> Element for ElementRef<'a> {
     }
 
     fn is_root(&self) -> bool {
-        self.dom.parent(self.node).map(|p| p == self.dom.document()).unwrap_or(false)
+        self.dom
+            .parent(self.node)
+            .map(|p| p == self.dom.document())
+            .unwrap_or(false)
     }
 
     fn add_element_unique_hashes(&self, _filter: &mut selectors::bloom::BloomFilter) -> bool {
@@ -351,7 +373,9 @@ impl Dom {
     pub fn query_selector(&self, root: NodeId, selector: &str) -> Option<NodeId> {
         let list = parse_selector_list(selector)?;
         self.subtree_elements(root).find(|node| {
-            ElementRef::new(self, *node).map(|e| matches(&list, &e)).unwrap_or(false)
+            ElementRef::new(self, *node)
+                .map(|e| matches(&list, &e))
+                .unwrap_or(false)
         })
     }
 }

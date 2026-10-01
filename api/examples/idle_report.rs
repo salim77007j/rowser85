@@ -19,7 +19,12 @@ fn rss_kb() -> u64 {
     if let Ok(status) = std::fs::read_to_string("/proc/self/status") {
         for line in status.lines() {
             if let Some(rest) = line.strip_prefix("VmRSS:") {
-                return rest.trim().trim_end_matches("kB").trim().parse().unwrap_or(0);
+                return rest
+                    .trim()
+                    .trim_end_matches("kB")
+                    .trim()
+                    .parse()
+                    .unwrap_or(0);
             }
         }
     }
@@ -40,9 +45,17 @@ fn cpu_seconds() -> f64 {
 }
 
 fn main() {
-    let tabs: usize = std::env::args().nth(1).and_then(|v| v.parse().ok()).unwrap_or(8);
-    let settle: u64 = std::env::args().nth(2).and_then(|v| v.parse().ok()).unwrap_or(10);
-    let url = std::env::args().nth(3).unwrap_or_else(|| "about:blank".into());
+    let tabs: usize = std::env::args()
+        .nth(1)
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(8);
+    let settle: u64 = std::env::args()
+        .nth(2)
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(10);
+    let url = std::env::args()
+        .nth(3)
+        .unwrap_or_else(|| "about:blank".into());
 
     let start = Instant::now();
     let profile = std::env::temp_dir().join(format!("rowser-idle-{}", std::process::id()));

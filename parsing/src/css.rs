@@ -11,8 +11,8 @@ use lightningcss::properties::border::{BorderSideWidth, LineStyle};
 use lightningcss::properties::display::{Display, DisplayInside, DisplayKeyword, DisplayOutside};
 use lightningcss::properties::flex::{FlexDirection as LcFlexDirection, FlexWrap as LcFlexWrap};
 use lightningcss::properties::font::{
-    AbsoluteFontWeight, FontFamily as LcFontFamily, FontSize as LcFontSize, FontStyle as LcFontStyle,
-    FontWeight as LcFontWeight, GenericFontFamily,
+    AbsoluteFontWeight, FontFamily as LcFontFamily, FontSize as LcFontSize,
+    FontStyle as LcFontStyle, FontWeight as LcFontWeight, GenericFontFamily,
 };
 use lightningcss::properties::position::Position;
 use lightningcss::properties::size::{MaxSize, Size};
@@ -30,7 +30,7 @@ use rowser_dom::{parse_selector_list, SelectorList};
 
 use crate::cascade::{
     AlignItemsMode, BorderEdgeRaw, DisplayMode, FlexDirectionMode, FlexWrapMode, FontSizeRaw,
-    FontWeightRaw, FontStyleMode, JustifyContentMode, Length, LengthOrAuto, LineHeightRaw,
+    FontStyleMode, FontWeightRaw, JustifyContentMode, Length, LengthOrAuto, LineHeightRaw,
     LineStyleMode, PositionMode, Rgba, StyleProps, TextAlignMode,
 };
 
@@ -71,7 +71,11 @@ pub struct MediaContext {
 
 impl Default for MediaContext {
     fn default() -> Self {
-        MediaContext { width: 1280.0, height: 800.0, dark_mode: false }
+        MediaContext {
+            width: 1280.0,
+            height: 800.0,
+            dark_mode: false,
+        }
     }
 }
 
@@ -101,7 +105,11 @@ fn collect_rules(
                 }
             }
             CssRule::Supports(supports_rule) => {
-                if supports_rule.condition.to_css_string(PrinterOptions::default()).is_ok() {
+                if supports_rule
+                    .condition
+                    .to_css_string(PrinterOptions::default())
+                    .is_ok()
+                {
                     collect_rules(&supports_rule.rules.0, media, out, order);
                 }
             }
@@ -330,9 +338,7 @@ fn convert_font_family(list: &[LcFontFamily<'_>]) -> String {
     match list.first() {
         Some(LcFontFamily::Generic(generic)) => match generic {
             GenericFontFamily::Serif | GenericFontFamily::UISerif => "serif".to_owned(),
-            GenericFontFamily::Monospace | GenericFontFamily::UIMonospace => {
-                "monospace".to_owned()
-            }
+            GenericFontFamily::Monospace | GenericFontFamily::UIMonospace => "monospace".to_owned(),
             GenericFontFamily::Cursive => "cursive".to_owned(),
             GenericFontFamily::Fantasy => "fantasy".to_owned(),
             _ => "sans-serif".to_owned(),
@@ -397,8 +403,12 @@ fn apply_property(props: &mut StyleProps, property: &Property<'_>) {
         P::BorderBottomColor(value) => set_border_color(props, Side::Bottom, convert_color(value)),
         P::BorderLeftColor(value) => set_border_color(props, Side::Left, convert_color(value)),
         P::BorderTopStyle(value) => set_border_style(props, Side::Top, convert_line_style(value)),
-        P::BorderRightStyle(value) => set_border_style(props, Side::Right, convert_line_style(value)),
-        P::BorderBottomStyle(value) => set_border_style(props, Side::Bottom, convert_line_style(value)),
+        P::BorderRightStyle(value) => {
+            set_border_style(props, Side::Right, convert_line_style(value))
+        }
+        P::BorderBottomStyle(value) => {
+            set_border_style(props, Side::Bottom, convert_line_style(value))
+        }
         P::BorderLeftStyle(value) => set_border_style(props, Side::Left, convert_line_style(value)),
         P::FontFamily(value) => props.font_family = Some(convert_font_family(value)),
         P::FontSize(value) => props.font_size = Some(convert_font_size(value)),
@@ -445,7 +455,11 @@ fn border_from_width(value: &BorderSideWidth) -> BorderEdgeRaw {
         BorderSideWidth::Medium => Length::Px(3.0),
         BorderSideWidth::Thick => Length::Px(5.0),
     };
-    BorderEdgeRaw { width, color: None, style: LineStyleMode::Solid }
+    BorderEdgeRaw {
+        width,
+        color: None,
+        style: LineStyleMode::Solid,
+    }
 }
 
 fn set_border_color(props: &mut StyleProps, side: Side, color: Rgba) {
@@ -501,17 +515,15 @@ fn convert_display(value: &Display) -> DisplayMode {
             DisplayKeyword::Contents => DisplayMode::Inline,
             _ => DisplayMode::Block,
         },
-        Display::Pair(pair) => {
-            match pair.inside {
-                DisplayInside::Flex(_) => DisplayMode::Flex,
-                DisplayInside::Grid => DisplayMode::Grid,
-                DisplayInside::Box(_) => DisplayMode::Flex,
-                _ => match pair.outside {
-                    DisplayOutside::Inline => DisplayMode::Inline,
-                    _ => DisplayMode::Block,
-                },
-            }
-        }
+        Display::Pair(pair) => match pair.inside {
+            DisplayInside::Flex(_) => DisplayMode::Flex,
+            DisplayInside::Grid => DisplayMode::Grid,
+            DisplayInside::Box(_) => DisplayMode::Flex,
+            _ => match pair.outside {
+                DisplayOutside::Inline => DisplayMode::Inline,
+                _ => DisplayMode::Block,
+            },
+        },
     }
 }
 

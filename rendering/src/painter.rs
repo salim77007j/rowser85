@@ -7,7 +7,7 @@ use tiny_skia::{Paint, Pixmap, Transform};
 use rowser_layout::text::TextRun;
 
 use crate::display_list::{DisplayList, DrawCmd};
-use crate::{Rect, to_skia_color};
+use crate::{to_skia_color, Rect};
 
 /// Options for one render pass.
 #[derive(Debug, Clone, Copy)]
@@ -92,7 +92,11 @@ impl Painter {
                     }
                     fill_rect(pixmap, &rect, *color);
                 }
-                DrawCmd::Border { rect, widths, colors } => {
+                DrawCmd::Border {
+                    rect,
+                    widths,
+                    colors,
+                } => {
                     let rect = translate(rect, scroll);
                     paint_border(pixmap, &rect, *widths, *colors, viewport);
                 }
@@ -176,19 +180,39 @@ fn paint_border(
     let (t, r, b, l) = (widths[0], widths[1], widths[2], widths[3]);
     let edges = [
         (
-            Rect { x: rect.x, y: rect.y, w: rect.w, h: t },
+            Rect {
+                x: rect.x,
+                y: rect.y,
+                w: rect.w,
+                h: t,
+            },
             colors[0],
         ),
         (
-            Rect { x: rect.right() - r, y: rect.y, w: r, h: rect.h },
+            Rect {
+                x: rect.right() - r,
+                y: rect.y,
+                w: r,
+                h: rect.h,
+            },
             colors[1],
         ),
         (
-            Rect { x: rect.x, y: rect.bottom() - b, w: rect.w, h: b },
+            Rect {
+                x: rect.x,
+                y: rect.bottom() - b,
+                w: rect.w,
+                h: b,
+            },
             colors[2],
         ),
         (
-            Rect { x: rect.x, y: rect.y, w: l, h: rect.h },
+            Rect {
+                x: rect.x,
+                y: rect.y,
+                w: l,
+                h: rect.h,
+            },
             colors[3],
         ),
     ];
@@ -225,7 +249,8 @@ fn paint_image(pixmap: &mut Pixmap, rect: &Rect, image: &crate::DecodedImage) {
     }
     let Some(src) = Pixmap::from_vec(
         premul,
-        tiny_skia::IntSize::from_wh(image.width, image.height).unwrap_or(tiny_skia::IntSize::from_wh(1, 1).unwrap()),
+        tiny_skia::IntSize::from_wh(image.width, image.height)
+            .unwrap_or(tiny_skia::IntSize::from_wh(1, 1).unwrap()),
     ) else {
         return;
     };
@@ -266,7 +291,14 @@ fn blit_glyph(
                     if alpha > 0 {
                         let px = base_x + off_x;
                         if px >= 0 && px < w {
-                            blend_pixel(pixmap, py as usize * stride + px as usize * 4, color.r, color.g, color.b, alpha);
+                            blend_pixel(
+                                pixmap,
+                                py as usize * stride + px as usize * 4,
+                                color.r,
+                                color.g,
+                                color.b,
+                                alpha,
+                            );
                         }
                     }
                     i += 1;

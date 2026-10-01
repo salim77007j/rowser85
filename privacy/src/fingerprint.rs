@@ -87,8 +87,12 @@ impl SpoofProfile {
             "Mozilla (Rrowser)"
         };
         let webgl_renderer = "ANGLE (Rrowser, Rrowser SW Renderer, OpenGL)";
-        let canvas_noise = *blake3::derive_key("canvas-noise", &seed).first_chunk().unwrap();
-        let audio_noise = *blake3::derive_key("audio-noise", &seed).first_chunk().unwrap();
+        let canvas_noise = *blake3::derive_key("canvas-noise", &seed)
+            .first_chunk()
+            .unwrap();
+        let audio_noise = *blake3::derive_key("audio-noise", &seed)
+            .first_chunk()
+            .unwrap();
 
         SpoofProfile {
             platform: "Win32".to_owned(),
@@ -114,10 +118,7 @@ impl SpoofProfile {
     /// session, while differing from other sessions.
     pub fn noised_canvas_bytes(&self, pixels: &mut [u8]) {
         for (i, px) in pixels.iter_mut().enumerate() {
-            let key = blake3::derive_key(
-                "canvas",
-                &self.canvas_noise,
-            );
+            let key = blake3::derive_key("canvas", &self.canvas_noise);
             let bucket = key[i % key.len()] as u32;
             // ±2 units of noise, deterministic per byte position.
             let noise = (bucket % 5) as i32 - 2;

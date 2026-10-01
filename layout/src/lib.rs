@@ -21,12 +21,12 @@ use rowser_parsing::css::{MediaContext, ParsedStylesheet};
 use taffy::geometry::{Rect as TaffyRect, Size as TaffySize};
 use taffy::style::{
     AlignContent as TaffyAlignContent, AlignItems as TaffyAlignItems, AlignSelf, AvailableSpace,
-    Dimension, Display as TaffyDisplay, FlexDirection as TaffyFlexDirection, FlexWrap as TaffyFlexWrap,
-    JustifyContent as TaffyJustify, LengthPercentage, LengthPercentageAuto,
-    Position as TaffyPosition, Style,
+    Dimension, Display as TaffyDisplay, FlexDirection as TaffyFlexDirection,
+    FlexWrap as TaffyFlexWrap, JustifyContent as TaffyJustify, LengthPercentage,
+    LengthPercentageAuto, Position as TaffyPosition, Style,
 };
-use taffy::tree::{CollapsibleMarginSet, LayoutInput, LayoutOutput, TaffyTree};
 use taffy::style_helpers::TaffyAuto;
+use taffy::tree::{CollapsibleMarginSet, LayoutInput, LayoutOutput, TaffyTree};
 use taffy::{Baselines, NodeId as TaffyNode};
 
 pub use text::{PlacedGlyph, SpanStyle, TextRun};
@@ -42,7 +42,10 @@ pub struct Viewport {
 
 impl Default for Viewport {
     fn default() -> Self {
-        Viewport { width: 1280.0, height: 800.0 }
+        Viewport {
+            width: 1280.0,
+            height: 800.0,
+        }
     }
 }
 
@@ -130,7 +133,14 @@ impl LayoutEngine {
             return LayoutResult::default();
         };
 
-        let taffy_root = build_box(dom, styles, &mut tree, root, &mut dom_to_taffy, &mut taffy_to_dom);
+        let taffy_root = build_box(
+            dom,
+            styles,
+            &mut tree,
+            root,
+            &mut dom_to_taffy,
+            &mut taffy_to_dom,
+        );
         let Some(taffy_root) = taffy_root else {
             return LayoutResult::default();
         };
@@ -157,7 +167,16 @@ impl LayoutEngine {
         // Extract results.
         let mut result = LayoutResult::default();
         let abs = (0.0f32, 0.0f32);
-        extract(dom, &tree, taffy_root, root, &taffy_to_dom, abs, &mut result, font_system);
+        extract(
+            dom,
+            &tree,
+            taffy_root,
+            root,
+            &taffy_to_dom,
+            abs,
+            &mut result,
+            font_system,
+        );
         result
     }
 }
@@ -180,15 +199,11 @@ fn taffy_style(cs: &ComputedStyle) -> Style {
         match l {
             LengthOrAuto::Auto => LengthPercentageAuto::AUTO,
             LengthOrAuto::Length(Length::Px(n)) => LengthPercentageAuto::length(n),
-            LengthOrAuto::Length(Length::Em(n)) => {
-                LengthPercentageAuto::length(n * cs.font_size)
-            }
+            LengthOrAuto::Length(Length::Em(n)) => LengthPercentageAuto::length(n * cs.font_size),
             LengthOrAuto::Length(Length::Rem(n)) => {
                 LengthPercentageAuto::length(n * rowser_parsing::cascade::ROOT_FONT_SIZE)
             }
-            LengthOrAuto::Length(Length::Percent(n)) => {
-                LengthPercentageAuto::percent(n / 100.0)
-            }
+            LengthOrAuto::Length(Length::Percent(n)) => LengthPercentageAuto::percent(n / 100.0),
         }
     };
     let dim = |l: rowser_parsing::cascade::LengthOrAuto| -> Dimension {
@@ -216,9 +231,18 @@ fn taffy_style(cs: &ComputedStyle) -> Style {
             rowser_parsing::cascade::PositionMode::Absolute => TaffyPosition::Absolute,
             _ => TaffyPosition::Relative,
         },
-        size: TaffySize { width: dim(cs.width), height: dim(cs.height) },
-        min_size: TaffySize { width: lp(cs.min_width), height: lp(cs.min_height) },
-        max_size: TaffySize { width: lp(cs.max_width), height: lp(cs.max_height) },
+        size: TaffySize {
+            width: dim(cs.width),
+            height: dim(cs.height),
+        },
+        min_size: TaffySize {
+            width: lp(cs.min_width),
+            height: lp(cs.min_height),
+        },
+        max_size: TaffySize {
+            width: lp(cs.max_width),
+            height: lp(cs.max_height),
+        },
         margin: TaffyRect {
             top: lp(cs.margins.top),
             right: lp(cs.margins.right),
@@ -234,7 +258,9 @@ fn taffy_style(cs: &ComputedStyle) -> Style {
         border,
         flex_direction: match cs.flex_direction {
             rowser_parsing::cascade::FlexDirectionMode::Row => TaffyFlexDirection::Row,
-            rowser_parsing::cascade::FlexDirectionMode::RowReverse => TaffyFlexDirection::RowReverse,
+            rowser_parsing::cascade::FlexDirectionMode::RowReverse => {
+                TaffyFlexDirection::RowReverse
+            }
             rowser_parsing::cascade::FlexDirectionMode::Column => TaffyFlexDirection::Column,
             rowser_parsing::cascade::FlexDirectionMode::ColumnReverse => {
                 TaffyFlexDirection::ColumnReverse
@@ -255,9 +281,7 @@ fn taffy_style(cs: &ComputedStyle) -> Style {
             rowser_parsing::cascade::JustifyContentMode::SpaceBetween => {
                 TaffyJustify::SPACE_BETWEEN
             }
-            rowser_parsing::cascade::JustifyContentMode::SpaceAround => {
-                TaffyJustify::SPACE_AROUND
-            }
+            rowser_parsing::cascade::JustifyContentMode::SpaceAround => TaffyJustify::SPACE_AROUND,
             rowser_parsing::cascade::JustifyContentMode::SpaceEvenly => TaffyJustify::SPACE_EVENLY,
         }),
         align_items: Some(match cs.align_items {
@@ -271,7 +295,9 @@ fn taffy_style(cs: &ComputedStyle) -> Style {
             rowser_parsing::cascade::AlignItemsMode::Center => TaffyAlignContent::CENTER,
             rowser_parsing::cascade::AlignItemsMode::End => TaffyAlignContent::FLEX_END,
             rowser_parsing::cascade::AlignItemsMode::Stretch => TaffyAlignContent::STRETCH,
-            rowser_parsing::cascade::AlignItemsMode::SpaceBetween => TaffyAlignContent::SPACE_BETWEEN,
+            rowser_parsing::cascade::AlignItemsMode::SpaceBetween => {
+                TaffyAlignContent::SPACE_BETWEEN
+            }
             rowser_parsing::cascade::AlignItemsMode::SpaceAround => TaffyAlignContent::SPACE_AROUND,
             rowser_parsing::cascade::AlignItemsMode::SpaceEvenly => TaffyAlignContent::SPACE_EVENLY,
         }),
@@ -324,7 +350,9 @@ fn build_box(
             }
             rowser_dom::NodeKind::Element(_) => {
                 let child_style = styles.get(child);
-                let display = child_style.map(|s| s.display).unwrap_or(DisplayMode::Inline);
+                let display = child_style
+                    .map(|s| s.display)
+                    .unwrap_or(DisplayMode::Inline);
                 match display {
                     DisplayMode::Inline => {
                         let mut inner = ctx.clone();
@@ -391,7 +419,9 @@ fn collect_inline(
             }
             rowser_dom::NodeKind::Element(_) => {
                 let child_style = styles.get(child);
-                let display = child_style.map(|s| s.display).unwrap_or(DisplayMode::Inline);
+                let display = child_style
+                    .map(|s| s.display)
+                    .unwrap_or(DisplayMode::Inline);
                 match display {
                     DisplayMode::None => {}
                     _ => {
@@ -419,11 +449,20 @@ fn append_collapsed_text(
     if raw.is_empty() {
         return;
     }
-    let needs_space = text.chars().last().map(|c| c.is_whitespace()).unwrap_or(false);
+    let needs_space = text
+        .chars()
+        .last()
+        .map(|c| c.is_whitespace())
+        .unwrap_or(false);
     let collapsed: String = if needs_space {
         raw.trim_start().chars().fold(String::new(), |mut acc, c| {
             if c.is_whitespace() {
-                if acc.chars().last().map(|l| !l.is_whitespace()).unwrap_or(false) {
+                if acc
+                    .chars()
+                    .last()
+                    .map(|l| !l.is_whitespace())
+                    .unwrap_or(false)
+                {
                     acc.push(' ');
                 }
             } else {
@@ -434,7 +473,12 @@ fn append_collapsed_text(
     } else {
         raw.chars().fold(String::new(), |mut acc, c| {
             if c.is_whitespace() {
-                if acc.chars().last().map(|l| !l.is_whitespace()).unwrap_or(false) {
+                if acc
+                    .chars()
+                    .last()
+                    .map(|l| !l.is_whitespace())
+                    .unwrap_or(false)
+                {
                     acc.push(' ');
                 }
             } else {
@@ -478,7 +522,10 @@ fn measure_leaf(
         .max(0.0);
     let total_w = lines.iter().map(|l| l.w).fold(0.0f32, f32::max).max(0.0);
     LayoutOutput {
-        size: TaffySize { width: total_w, height: total_h },
+        size: TaffySize {
+            width: total_w,
+            height: total_h,
+        },
         scrollable_overflow_rect: taffy::geometry::Rect::ZERO,
         baselines: Baselines::NONE,
         top_margin: CollapsibleMarginSet::ZERO,
@@ -500,7 +547,9 @@ fn extract(
     font_system: &mut cosmic_text::FontSystem,
 ) {
     let _ = dom;
-    let Ok(layout) = tree.layout(taffy_node) else { return };
+    let Ok(layout) = tree.layout(taffy_node) else {
+        return;
+    };
     let node_abs = (abs.0 + layout.location.x, abs.1 + layout.location.y);
     out.rects.insert(
         dom_node,
@@ -532,7 +581,16 @@ fn extract(
             }
         } else if let Some(&child_dom) = taffy_to_dom.get(&child) {
             if child_dom != dom_node {
-                extract(dom, tree, child, child_dom, taffy_to_dom, node_abs, out, font_system);
+                extract(
+                    dom,
+                    tree,
+                    child,
+                    child_dom,
+                    taffy_to_dom,
+                    node_abs,
+                    out,
+                    font_system,
+                );
             }
         }
     }
@@ -550,17 +608,33 @@ mod tests {
         let doc = parse_html(html);
         let author = parse_stylesheet("", &MediaContext::default());
         let mut engine = LayoutEngine::new();
-        let (styles, layout) =
-            engine.layout_document(&doc.dom, &[author], &MediaContext::default(), Viewport { width: 800.0, height: 600.0 });
+        let (styles, layout) = engine.layout_document(
+            &doc.dom,
+            &[author],
+            &MediaContext::default(),
+            Viewport {
+                width: 800.0,
+                height: 600.0,
+            },
+        );
         assert!(!layout.rects.is_empty());
         // body rect spans full width
         let body = doc
             .dom
             .subtree_elements(doc.dom.document())
-            .find(|n| doc.dom.element(*n).map(|e| &*e.name.local == "body").unwrap_or(false))
+            .find(|n| {
+                doc.dom
+                    .element(*n)
+                    .map(|e| &*e.name.local == "body")
+                    .unwrap_or(false)
+            })
             .unwrap();
         let body_rect = layout.rects.get(&body).cloned().unwrap();
-        assert!((body_rect.w - 800.0).abs() < 1.0, "body width {}", body_rect.w);
+        assert!(
+            (body_rect.w - 800.0).abs() < 1.0,
+            "body width {}",
+            body_rect.w
+        );
         assert!(body_rect.h > 50.0);
         // text present with glyphs
         assert!(!layout.text.is_empty(), "no text runs");
@@ -582,8 +656,15 @@ mod tests {
         let html = br#"<html><body><div style="display: flex; width: 600px;"><div style="flex: 1; height: 40px;"></div><div style="flex: 1; height: 40px;"></div></div></body></html>"#;
         let doc = parse_html(html);
         let mut engine = LayoutEngine::new();
-        let (_, layout) =
-            engine.layout_document(&doc.dom, &[], &MediaContext::default(), Viewport { width: 800.0, height: 600.0 });
+        let (_, layout) = engine.layout_document(
+            &doc.dom,
+            &[],
+            &MediaContext::default(),
+            Viewport {
+                width: 800.0,
+                height: 600.0,
+            },
+        );
         let rects: Vec<_> = doc
             .dom
             .subtree_elements(doc.dom.document())

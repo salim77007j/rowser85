@@ -119,11 +119,20 @@ mod tests {
             psl.registrable_domain("www.example.com").as_deref(),
             Some("example.com")
         );
-        assert_eq!(psl.registrable_domain("example.co.uk").as_deref(), Some("example.co.uk"));
-        assert_eq!(psl.registrable_domain("deep.a.example.co.uk").as_deref(), Some("example.co.uk"));
+        assert_eq!(
+            psl.registrable_domain("example.co.uk").as_deref(),
+            Some("example.co.uk")
+        );
+        assert_eq!(
+            psl.registrable_domain("deep.a.example.co.uk").as_deref(),
+            Some("example.co.uk")
+        );
         assert_eq!(psl.registrable_domain("co.uk"), None);
         assert!(psl.same_site("a.example.com", "b.example.com"));
         assert!(!psl.same_site("example.com", "example.org"));
-        assert_eq!(psl.registrable_domain("192.168.1.4").as_deref(), Some("192.168.1.4"));
+        assert_eq!(
+            psl.registrable_domain("192.168.1.4").as_deref(),
+            Some("192.168.1.4")
+        );
     }
 }

@@ -474,10 +474,26 @@ impl Default for ComputedStyle {
                 left: LengthOrAuto::Length(Length::Px(0.0)),
             },
             borders: Edges {
-                top: BorderInfo { width: 0.0, color: Rgba::TRANSPARENT, style: LineStyleMode::None },
-                right: BorderInfo { width: 0.0, color: Rgba::TRANSPARENT, style: LineStyleMode::None },
-                bottom: BorderInfo { width: 0.0, color: Rgba::TRANSPARENT, style: LineStyleMode::None },
-                left: BorderInfo { width: 0.0, color: Rgba::TRANSPARENT, style: LineStyleMode::None },
+                top: BorderInfo {
+                    width: 0.0,
+                    color: Rgba::TRANSPARENT,
+                    style: LineStyleMode::None,
+                },
+                right: BorderInfo {
+                    width: 0.0,
+                    color: Rgba::TRANSPARENT,
+                    style: LineStyleMode::None,
+                },
+                bottom: BorderInfo {
+                    width: 0.0,
+                    color: Rgba::TRANSPARENT,
+                    style: LineStyleMode::None,
+                },
+                left: BorderInfo {
+                    width: 0.0,
+                    color: Rgba::TRANSPARENT,
+                    style: LineStyleMode::None,
+                },
             },
             width: LengthOrAuto::Auto,
             height: LengthOrAuto::Auto,
@@ -550,11 +566,15 @@ pub fn compute_styles(dom: &Dom, author: &[ParsedStylesheet], media: &MediaConte
             .and_then(|p| map.styles.get(&p))
             .cloned()
             .unwrap_or_default();
-        let inline = dom
-            .get_attr(node, "style")
-            .map(parse_style_attribute);
-        let style =
-            cascade_element(dom, node, &rules, inline.as_ref(), &parent_style, &mut caches);
+        let inline = dom.get_attr(node, "style").map(parse_style_attribute);
+        let style = cascade_element(
+            dom,
+            node,
+            &rules,
+            inline.as_ref(),
+            &parent_style,
+            &mut caches,
+        );
         map.styles.insert(node, style);
     }
     map
@@ -718,10 +738,7 @@ fn cascade_element(
         .collect();
 
     // Sort by (specificity, source order).
-    let mut matched: Vec<&StyleRuleEntry> = candidates
-        .iter()
-        .map(|&i| &rules.entries[i])
-        .collect();
+    let mut matched: Vec<&StyleRuleEntry> = candidates.iter().map(|&i| &rules.entries[i]).collect();
     matched.sort_by_key(|entry| (entry.specificity, entry.order));
 
     let sources = Sources {
@@ -799,7 +816,13 @@ fn cascade_element(
         if let Some(raw) = raw {
             let color = raw
                 .color
-                .map(|c| if c == Rgba::CURRENT_COLOR { style.color } else { c })
+                .map(|c| {
+                    if c == Rgba::CURRENT_COLOR {
+                        style.color
+                    } else {
+                        c
+                    }
+                })
                 .unwrap_or(style.color);
             *slot = BorderInfo {
                 width: raw.width.resolve(fs).max(0.0),
@@ -886,7 +909,12 @@ mod tests {
         let p = doc
             .dom
             .subtree_elements(doc.dom.document())
-            .find(|n| doc.dom.element(*n).map(|e| &*e.name.local == "p").unwrap_or(false))
+            .find(|n| {
+                doc.dom
+                    .element(*n)
+                    .map(|e| &*e.name.local == "p")
+                    .unwrap_or(false)
+            })
             .expect("p element");
         let style = map.get(p).expect("p style");
         assert_eq!(style.color, Rgba::new_opaque(255, 0, 0));
@@ -906,14 +934,28 @@ mod tests {
         let find = |tag: &str| {
             doc.dom
                 .subtree_elements(doc.dom.document())
-                .find(|n| doc.dom.element(*n).map(|e| &*e.name.local == tag).unwrap_or(false))
+                .find(|n| {
+                    doc.dom
+                        .element(*n)
+                        .map(|e| &*e.name.local == tag)
+                        .unwrap_or(false)
+                })
                 .unwrap()
         };
         let div = find("div");
         let em = find("em");
-        assert_eq!(map.get(div).unwrap().color, Rgba::new_opaque(0x10, 0x10, 0x10));
+        assert_eq!(
+            map.get(div).unwrap().color,
+            Rgba::new_opaque(0x10, 0x10, 0x10)
+        );
         // em inherits the winning color from div.
-        assert_eq!(map.get(em).unwrap().color, Rgba::new_opaque(0x10, 0x10, 0x10));
-        assert_eq!(map.get(find("body")).unwrap().color, Rgba::new_opaque(0x33, 0x33, 0x33));
+        assert_eq!(
+            map.get(em).unwrap().color,
+            Rgba::new_opaque(0x10, 0x10, 0x10)
+        );
+        assert_eq!(
+            map.get(find("body")).unwrap().color,
+            Rgba::new_opaque(0x33, 0x33, 0x33)
+        );
     }
 }

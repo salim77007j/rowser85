@@ -65,6 +65,10 @@ mod tests {
     #[test]
     fn ua_stylesheet_parses() {
         let rules = ua_rules(&MediaContext::default());
-        assert!(rules.len() >= 20, "UA stylesheet produced {} rules", rules.len());
+        assert!(
+            rules.len() >= 20,
+            "UA stylesheet produced {} rules",
+            rules.len()
+        );
     }
 }

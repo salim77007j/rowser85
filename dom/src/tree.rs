@@ -475,7 +475,8 @@ impl Dom {
     /// Iterates all element descendants of `root` (excluding `root` unless it
     /// is an element itself passed via [`Dom::subtree_elements`]).
     pub fn elements(&self, root: NodeId) -> impl Iterator<Item = NodeId> + '_ {
-        self.descendants(root).filter(|id| self.element(*id).is_some())
+        self.descendants(root)
+            .filter(|id| self.element(*id).is_some())
     }
 
     /// Iterates the element subtree of `root` **including** `root` itself.
@@ -528,7 +529,11 @@ impl Dom {
 
     /// Looks up an attribute value by name.
     pub fn get_attr(&self, id: NodeId, name: &str) -> Option<&str> {
-        self.element(id)?.attrs.iter().find(|a| &*a.name == name).map(|a| a.value.as_str())
+        self.element(id)?
+            .attrs
+            .iter()
+            .find(|a| &*a.name == name)
+            .map(|a| a.value.as_str())
     }
 
     /// Sets an attribute (creating it when missing), refreshing caches.
@@ -608,9 +613,11 @@ impl Dom {
     pub fn sweep(&mut self, pins: &[NodeId]) {
         let mut reachable = vec![false; self.slots.len()];
         let mut stack = vec![self.document];
-        stack.extend(pins.iter().copied().chain(
-            pins.iter().flat_map(|p| self.first_child(*p).into_iter()),
-        ));
+        stack.extend(
+            pins.iter()
+                .copied()
+                .chain(pins.iter().flat_map(|p| self.first_child(*p).into_iter())),
+        );
         // Pin whole pinned subtrees.
         for &pin in pins {
             if self.is_valid(pin) && (pin as usize) < reachable.len() {

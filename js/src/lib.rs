@@ -47,10 +47,10 @@ use std::sync::mpsc::Sender;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use rquickjs::{Context, Function, Runtime};
 use rowser_dom::{Dom, NodeId};
 use rowser_privacy::fingerprint::SpoofProfile;
 use rowser_storage::Storage;
+use rquickjs::{Context, Function, Runtime};
 
 /// Commands the runtime sends to the owning engine (timers, fetches, ...).
 #[derive(Debug, Clone)]
@@ -70,8 +70,8 @@ pub enum JsCommand {
         id: u64,
     },
     /// Start a fetch; completion arrives as
-        /// [`EngineEvent::FetchCompleted`].
-        FetchStart {
+    /// [`EngineEvent::FetchCompleted`].
+    FetchStart {
         /// Fetch id (JS-assigned).
         id: u64,
         /// Target URL.
@@ -285,7 +285,8 @@ impl JsRuntime {
             timer_count: Rc::new(Cell::new(0)),
         };
         js.install_natives(bridge)?;
-        js.context.with(|ctx| ctx.eval::<(), _>(prelude::PRELUDE_JS))?;
+        js.context
+            .with(|ctx| ctx.eval::<(), _>(prelude::PRELUDE_JS))?;
         Ok(js)
     }
 
@@ -310,7 +311,12 @@ impl JsRuntime {
     pub fn dispatch(&self, event: EngineEvent) {
         let call = match event {
             EngineEvent::TimerFired(id) => format!("__onTimerFired({id})"),
-            EngineEvent::FetchCompleted { id, status, headers, body_b64 } => format!(
+            EngineEvent::FetchCompleted {
+                id,
+                status,
+                headers,
+                body_b64,
+            } => format!(
                 "__onFetchCompleted({id},{status},{},{})",
                 json_str(&headers),
                 json_str(&body_b64)
@@ -368,7 +374,10 @@ impl JsRuntime {
         self.context.with(|ctx| {
             let globals = ctx.globals();
             let func = Function::new(ctx.clone(), move |message: String| {
-                let _ = sender.send(JsCommand::WorkerEgress { id: worker_id, message });
+                let _ = sender.send(JsCommand::WorkerEgress {
+                    id: worker_id,
+                    message,
+                });
             })?;
             globals.set("__native_worker_post_message", func)?;
             Ok::<(), rquickjs::Error>(())
@@ -548,9 +557,7 @@ impl JsRuntime {
             let b = Rc::clone(&bridge);
             globals.set(
                 "__native_env_info",
-                Function::new(ctx.clone(), move || -> String {
-                    env_info_json(&b)
-                })?,
+                Function::new(ctx.clone(), move || -> String { env_info_json(&b) })?,
             )?;
 
             // --- base64 helpers ---
@@ -578,7 +585,6 @@ impl JsRuntime {
         })?;
         Ok(())
     }
-
 }
 
 fn dom_natives<'js>(
@@ -600,7 +606,8 @@ fn dom_natives<'js>(
         "__native_dom_querySelector",
         Function::new(ctx.clone(), move |selector: String| -> Option<u64> {
             let dom = b.dom.borrow();
-            dom.query_selector(dom.document(), &selector).map(|n| n as u64)
+            dom.query_selector(dom.document(), &selector)
+                .map(|n| n as u64)
         })?,
     )?;
 
@@ -669,20 +676,26 @@ fn dom_natives<'js>(
     let b = Rc::clone(bridge);
     globals.set(
         "__native_dom_getAttr",
-        Function::new(ctx.clone(), move |node: u64, name: String| -> Option<String> {
-            let dom = b.dom.borrow();
-            dom.get_attr(node as NodeId, &name).map(str::to_owned)
-        })?,
+        Function::new(
+            ctx.clone(),
+            move |node: u64, name: String| -> Option<String> {
+                let dom = b.dom.borrow();
+                dom.get_attr(node as NodeId, &name).map(str::to_owned)
+            },
+        )?,
     )?;
 
     let b = Rc::clone(bridge);
     globals.set(
         "__native_dom_setAttr",
-        Function::new(ctx.clone(), move |node: u64, name: String, value: String| {
-            let mut dom = b.dom.borrow_mut();
-            dom.set_attr(node as NodeId, &name, &value);
-            mark_dirty(&b);
-        })?,
+        Function::new(
+            ctx.clone(),
+            move |node: u64, name: String, value: String| {
+                let mut dom = b.dom.borrow_mut();
+                dom.set_attr(node as NodeId, &name, &value);
+                mark_dirty(&b);
+            },
+        )?,
     )?;
 
     let b = Rc::clone(bridge);
@@ -730,26 +743,32 @@ fn dom_natives<'js>(
     let b = Rc::clone(bridge);
     globals.set(
         "__native_dom_style_get",
-        Function::new(ctx.clone(), move |node: u64, prop: String| -> Option<String> {
-            let dom = b.dom.borrow();
-            let style = dom.get_attr(node as NodeId, "style")?;
-            find_style_property(style, &prop)
-        })?,
+        Function::new(
+            ctx.clone(),
+            move |node: u64, prop: String| -> Option<String> {
+                let dom = b.dom.borrow();
+                let style = dom.get_attr(node as NodeId, "style")?;
+                find_style_property(style, &prop)
+            },
+        )?,
     )?;
 
     let b = Rc::clone(bridge);
     globals.set(
         "__native_dom_style_set",
-        Function::new(ctx.clone(), move |node: u64, prop: String, value: String| {
-            let node = node as NodeId;
-            let mut dom = b.dom.borrow_mut();
-            if dom.is_valid(node) {
-                let current = dom.get_attr(node, "style").unwrap_or("").to_owned();
-                let merged = merge_style_property(&current, &prop, &value);
-                dom.set_attr(node, "style", &merged);
-                mark_dirty(&b);
-            }
-        })?,
+        Function::new(
+            ctx.clone(),
+            move |node: u64, prop: String, value: String| {
+                let node = node as NodeId;
+                let mut dom = b.dom.borrow_mut();
+                if dom.is_valid(node) {
+                    let current = dom.get_attr(node, "style").unwrap_or("").to_owned();
+                    let merged = merge_style_property(&current, &prop, &value);
+                    dom.set_attr(node, "style", &merged);
+                    mark_dirty(&b);
+                }
+            },
+        )?,
     )?;
 
     let _b = Rc::clone(bridge);
@@ -942,9 +961,7 @@ fn stringify_value<'js>(
             .as_float()
             .map(|f| f.to_string())
             .ok_or(rquickjs::Error::Unknown),
-        rquickjs::Type::String => {
-            Ok(value.as_string().unwrap().to_string().unwrap_or_default())
-        }
+        rquickjs::Type::String => Ok(value.as_string().unwrap().to_string().unwrap_or_default()),
         _ => {
             let json: String = ctx
                 .eval("JSON.stringify")
@@ -977,11 +994,21 @@ mod tests {
         let probe = dom.borrow_mut();
         let body = probe
             .subtree_elements(probe.document())
-            .find(|n| probe.element(*n).map(|e| &*e.name.local == "body").unwrap_or(false))
+            .find(|n| {
+                probe
+                    .element(*n)
+                    .map(|e| &*e.name.local == "body")
+                    .unwrap_or(false)
+            })
             .unwrap_or(0);
         let html_node = probe
             .subtree_elements(probe.document())
-            .find(|n| probe.element(*n).map(|e| &*e.name.local == "html").unwrap_or(false))
+            .find(|n| {
+                probe
+                    .element(*n)
+                    .map(|e| &*e.name.local == "html")
+                    .unwrap_or(false)
+            })
             .unwrap_or(0);
         drop(probe);
         let runtime = JsRuntime::new(
@@ -1006,16 +1033,17 @@ mod tests {
     fn eval_basics() {
         let (runtime, _dom) = runtime_with_dom(b"<html><body><p id='x'>hi</p></body></html>");
         assert_eq!(runtime.eval("1 + 1", "test.js").unwrap(), "2");
+        assert_eq!(runtime.eval("'a' + 'b' + 2", "test.js").unwrap(), "ab2");
         assert_eq!(
-            runtime.eval("'a' + 'b' + 2", "test.js").unwrap(),
-            "ab2"
+            runtime.eval("JSON.stringify({a: 1})", "test.js").unwrap(),
+            "{\"a\":1}"
         );
-        assert_eq!(runtime.eval("JSON.stringify({a: 1})", "test.js").unwrap(), "{\"a\":1}");
     }
 
     #[test]
     fn dom_manipulation() {
-        let (runtime, dom) = runtime_with_dom(b"<html><body><p id='target'>before</p></body></html>");
+        let (runtime, dom) =
+            runtime_with_dom(b"<html><body><p id='target'>before</p></body></html>");
         runtime
             .eval(
                 "const p = document.getElementById('target'); p.textContent = 'after'; p.setAttribute('data-x', '1');",
@@ -1059,7 +1087,11 @@ mod tests {
             body_b64: "aGVsbG8=".to_owned(),
         });
         assert_eq!(runtime.eval("state", "test.js").unwrap(), "done:200");
-        assert!(!runtime.eval("fetchDone", "check.js").unwrap_err().to_string().is_empty());
+        assert!(!runtime
+            .eval("fetchDone", "check.js")
+            .unwrap_err()
+            .to_string()
+            .is_empty());
     }
 
     #[test]
@@ -1086,10 +1118,16 @@ mod tests {
         let (runtime, _dom) = runtime_with_dom(b"<html><body></body></html>");
         let ua = runtime.eval("navigator.userAgent", "test.js").unwrap();
         assert!(ua.contains("Rrowser"), "UA: {ua}");
-        let cores = runtime.eval("navigator.hardwareConcurrency", "test.js").unwrap().parse::<u32>().unwrap();
+        let cores = runtime
+            .eval("navigator.hardwareConcurrency", "test.js")
+            .unwrap()
+            .parse::<u32>()
+            .unwrap();
         assert!((2..=8).contains(&cores));
         assert_eq!(
-            runtime.eval("typeof navigator.getBattery", "test.js").unwrap(),
+            runtime
+                .eval("typeof navigator.getBattery", "test.js")
+                .unwrap(),
             "undefined"
         );
     }
@@ -1115,12 +1153,18 @@ mod tests {
             },
         )
         .unwrap();
-        runtime.eval("localStorage.setItem('theme', 'dark')", "test.js").unwrap();
+        runtime
+            .eval("localStorage.setItem('theme', 'dark')", "test.js")
+            .unwrap();
         assert_eq!(
-            runtime.eval("localStorage.getItem('theme')", "test.js").unwrap(),
+            runtime
+                .eval("localStorage.getItem('theme')", "test.js")
+                .unwrap(),
             "dark"
         );
-        runtime.eval("localStorage.removeItem('theme')", "test.js").unwrap();
+        runtime
+            .eval("localStorage.removeItem('theme')", "test.js")
+            .unwrap();
         assert_eq!(
             runtime
                 .eval("localStorage.getItem('theme') === null", "test.js")

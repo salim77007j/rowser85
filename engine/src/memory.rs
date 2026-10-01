@@ -3,8 +3,8 @@
 //! Goals: idle CPU ≈ 0, no unbounded growth, graceful degradation under
 //! memory pressure instead of OOM.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use crate::{EngineEvent, EngineLoop};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Static state for the current memory tick (shared with page threads
 /// through their JsRuntime handles indirectly).
@@ -26,7 +26,9 @@ pub(crate) fn tick(state: &EngineLoop) {
             budget / 1024
         );
         PRESSURE.store(true, Ordering::Relaxed);
-        let _ = state.event_tx.send(EngineEvent::MemoryPressure { total_bytes: total });
+        let _ = state
+            .event_tx
+            .send(EngineEvent::MemoryPressure { total_bytes: total });
         // Suspend the largest backgrounded tab immediately.
         let mut tabs = state.pages().lock().unwrap();
         let mut largest: Option<(u64, crate::TabId)> = None;

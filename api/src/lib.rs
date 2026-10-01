@@ -12,13 +12,13 @@
 //! # async fn demo() -> anyhow::Result<()> {
 //! use rowser_api::{BrowserApi, EngineConfig};
 //!
-//! let mut browser = BrowserApi::start(EngineConfig::default()).await?;
-//! let tab = browser.new_tab("https://example.com".into());
+//! let browser = BrowserApi::start(EngineConfig::default())?;
+//! let tab = browser.new_tab(Some("https://example.com".into()));
 //!
 //! while let Some(event) = browser.next_event().await {
 //!     if matches!(event, rowser_api::EngineEvent::FrameReady { .. }) {
 //!         if let Some(frame) = browser.frame(tab) {
-//!             // frame.width, frame.height, frame.pixels (premultiplied RGBA)
+//!             // frame.width, frame.height, frame.straight_rgba()
 //!         }
 //!         break;
 //!     }
@@ -30,11 +30,12 @@
 
 use std::sync::Arc;
 
-use rowser_engine::{
-    Command, Engine, EngineConfig, EngineEvent as InnerEvent, TabId, TabSnapshot,
-};
+use rowser_engine::{Command, Engine, EngineEvent as InnerEvent, TabSnapshot};
 use rowser_privacy::PrivacySettings;
 use rowser_rendering::Frame;
+
+pub use rowser_engine::{EngineConfig, TabId};
+pub use rowser_privacy::PrivacySettings as Privacy;
 
 /// Re-exported engine events.
 pub type EngineEvent = InnerEvent;
@@ -116,7 +117,8 @@ impl BrowserApi {
 
     /// Dispatches a click event to a DOM node handle (from hit-testing).
     pub fn click(&self, tab: TabId, node: u64) {
-        self.engine.send(Command::UiEvent(tab, node, "click".to_owned()));
+        self.engine
+            .send(Command::UiEvent(tab, node, "click".to_owned()));
     }
 
     /// Dispatches a UI event to a DOM node.

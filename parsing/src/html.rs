@@ -7,12 +7,12 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 use encoding_rs::Encoding;
-use html5ever::driver::{ParseOpts, parse_document};
-use html5ever::tendril::stream::TendrilSink;
+use html5ever::driver::{parse_document, ParseOpts};
+use html5ever::interface::ElemName;
 use html5ever::interface::{ElementFlags, NodeOrText, QuirksMode, TreeSink};
+use html5ever::tendril::stream::TendrilSink;
 use html5ever::tendril::StrTendril;
 use html5ever::{Attribute, QualName};
-use html5ever::interface::ElemName;
 use html5ever::{LocalName, Namespace};
 use rowser_dom::{Attr, Dom, NodeId};
 
@@ -68,7 +68,9 @@ impl Document {
             if let Some(el) = self.dom.element(node) {
                 if &*el.name.local == "link" {
                     let rel = self.dom.get_attr(node, "rel").unwrap_or_default();
-                    let is_css = rel.split_whitespace().any(|r| r.eq_ignore_ascii_case("stylesheet"));
+                    let is_css = rel
+                        .split_whitespace()
+                        .any(|r| r.eq_ignore_ascii_case("stylesheet"));
                     if is_css {
                         if let Some(href) = self.dom.get_attr(node, "href") {
                             out.push(href.to_owned());
@@ -124,7 +126,9 @@ fn find_meta_charset(window: &[u8]) -> Option<String> {
     let mut pos = 0;
     while let Some(start) = find_sub(&lower[pos..], b"<meta") {
         let abs = pos + start;
-        let end = find_sub(&lower[abs..], b">").map(|e| abs + e).unwrap_or(lower.len());
+        let end = find_sub(&lower[abs..], b">")
+            .map(|e| abs + e)
+            .unwrap_or(lower.len());
         let tag = &lower[abs..end];
         if let Some(cpos) = find_sub(tag, b"charset") {
             let rest = &tag[cpos + b"charset".len()..];
@@ -249,7 +253,8 @@ fn convert_attrs(attrs: Vec<Attribute>) -> Vec<Attr> {
 impl TreeSink for DomSink {
     type Handle = NodeId;
     type Output = Dom;
-    type ElemName<'a> = DomElemName
+    type ElemName<'a>
+        = DomElemName
     where
         Self: 'a;
 
@@ -267,14 +272,21 @@ impl TreeSink for DomSink {
 
     fn elem_name<'a>(&'a self, target: &'a Self::Handle) -> Self::ElemName<'a> {
         let dom = self.dom.borrow();
-        let el = dom.element(*target).expect("elem_name called on non-element");
+        let el = dom
+            .element(*target)
+            .expect("elem_name called on non-element");
         DomElemName {
             ns: el.name.ns.clone(),
             local: el.name.local.clone(),
         }
     }
 
-    fn create_element(&self, name: QualName, attrs: Vec<Attribute>, flags: ElementFlags) -> Self::Handle {
+    fn create_element(
+        &self,
+        name: QualName,
+        attrs: Vec<Attribute>,
+        flags: ElementFlags,
+    ) -> Self::Handle {
         let node = self.with_dom(|dom| dom.create_element(name, convert_attrs(attrs)));
         if flags.template {
             // The template contents live in a detached (invisible) holder.
@@ -311,7 +323,12 @@ impl TreeSink for DomSink {
         }
     }
 
-    fn append_doctype_to_document(&self, name: StrTendril, public_id: StrTendril, system_id: StrTendril) {
+    fn append_doctype_to_document(
+        &self,
+        name: StrTendril,
+        public_id: StrTendril,
+        system_id: StrTendril,
+    ) {
         let doc = self.get_document();
         let node = self.with_dom(|dom| {
             dom.create_doctype(name.as_ref(), public_id.as_ref(), system_id.as_ref())
@@ -375,15 +392,11 @@ impl TreeSink for DomSink {
     fn is_mathml_annotation_xml_integration_point(&self, handle: &Self::Handle) -> bool {
         let dom = self.dom.borrow();
         dom.element(*handle)
-            .map(|el| {
-                el.name.ns == *html5ever::ns!(mathml)
-                    && &*el.name.local == "annotation-xml"
-            })
+            .map(|el| el.name.ns == *html5ever::ns!(mathml) && &*el.name.local == "annotation-xml")
             .unwrap_or(false)
     }
 
     fn allow_declarative_shadow_roots(&self, _intended_parent: &Self::Handle) -> bool {
         true
     }
-
 }

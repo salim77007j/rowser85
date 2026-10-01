@@ -135,8 +135,6 @@ pub enum ResourceKind {
     Other,
 }
 
-
-
 /// A fetch response.
 #[derive(Debug, Clone)]
 pub struct FetchResponse {
@@ -217,8 +215,7 @@ pub async fn fetch(ctx: &NetworkContext, request: FetchRequest) -> Result<FetchR
     let mut redirects = 0;
     loop {
         // 1. Parse + scheme dispatch.
-        let mut url =
-            Url::parse(&current.url).map_err(|e| NetError::InvalidUrl(e.to_string()))?;
+        let mut url = Url::parse(&current.url).map_err(|e| NetError::InvalidUrl(e.to_string()))?;
         match url.scheme() {
             "data" => return fetch_data_url(&current),
             "about" => {
@@ -241,9 +238,7 @@ pub async fn fetch(ctx: &NetworkContext, request: FetchRequest) -> Result<FetchR
                             || h.starts_with("[::1]")
                     })
                     .unwrap_or(false);
-                if !is_local
-                    && ctx.settings.read().map(|s| s.https_upgrade).unwrap_or(true)
-                {
+                if !is_local && ctx.settings.read().map(|s| s.https_upgrade).unwrap_or(true) {
                     url.set_scheme("https").ok();
                     current.url = url.to_string();
                 }
@@ -299,9 +294,10 @@ pub async fn fetch(ctx: &NetworkContext, request: FetchRequest) -> Result<FetchR
         if (301..400).contains(&response.status) && redirects < 20 {
             redirects += 1;
             if let Some(location) = response.header("location") {
-                let joined = url.join(location.trim()).map(|u| u.to_string()).map_err(
-                    |e| NetError::InvalidUrl(e.to_string()),
-                )?;
+                let joined = url
+                    .join(location.trim())
+                    .map(|u| u.to_string())
+                    .map_err(|e| NetError::InvalidUrl(e.to_string()))?;
                 current.url = joined;
                 current.source_url = request.source_url.clone();
                 // Preserve partition context across redirects.
@@ -316,7 +312,10 @@ pub async fn fetch(ctx: &NetworkContext, request: FetchRequest) -> Result<FetchR
         if response.is_success()
             && matches!(
                 current.resource_type,
-                ResourceKind::Stylesheet | ResourceKind::Script | ResourceKind::Font | ResourceKind::Image
+                ResourceKind::Stylesheet
+                    | ResourceKind::Script
+                    | ResourceKind::Font
+                    | ResourceKind::Image
             )
         {
             let cacheable = response
@@ -407,11 +406,16 @@ fn fetch_data_url(request: &FetchRequest) -> Result<FetchResponse, NetError> {
 }
 
 /// Builds a standard header list for a request (user agent etc.).
-pub fn default_headers(profile: &rowser_privacy::fingerprint::SpoofProfile) -> Vec<(String, String)> {
+pub fn default_headers(
+    profile: &rowser_privacy::fingerprint::SpoofProfile,
+) -> Vec<(String, String)> {
     vec![
         ("user-agent".to_owned(), profile.user_agent.clone()),
-        ("accept".to_owned(),
-         "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8".to_owned()),
+        (
+            "accept".to_owned(),
+            "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
+                .to_owned(),
+        ),
         ("accept-language".to_owned(), "en-US,en;q=0.9".to_owned()),
         ("sec-fetch-mode".to_owned(), "navigate".to_owned()),
     ]

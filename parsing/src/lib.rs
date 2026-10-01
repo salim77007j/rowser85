@@ -25,7 +25,6 @@ pub use html::{parse_html, Document, ScriptInfo};
 pub mod values {
     pub use crate::cascade::{
         AlignItemsMode, BorderInfo, FlexDirectionMode, FlexWrapMode, FontStyleMode,
-        JustifyContentMode, Length, LengthOrAuto, LineStyleMode, PositionMode, Rgba,
-        TextAlignMode,
+        JustifyContentMode, Length, LengthOrAuto, LineStyleMode, PositionMode, Rgba, TextAlignMode,
     };
 }

@@ -99,7 +99,10 @@ mod tests {
     fn prefix_matching() {
         let mut sb = SafeBrowsing::new();
         sb.update_from_urls(&["https://phishing.example/login".to_owned()]);
-        assert_eq!(sb.check("https://phishing.example/login"), SafeBrowsingVerdict::Match);
+        assert_eq!(
+            sb.check("https://phishing.example/login"),
+            SafeBrowsingVerdict::Match
+        );
         assert_eq!(sb.check("https://good.example/"), SafeBrowsingVerdict::Ok);
         // Case-insensitive canonicalization.
         assert_eq!(

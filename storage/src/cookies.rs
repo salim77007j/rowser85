@@ -12,7 +12,7 @@ use redb::{Database, ReadableTable, ReadableTableMetadata};
 use serde::{Deserialize, Serialize};
 use url::Url;
 
-use crate::{COOKIE_TABLE, StorageError};
+use crate::{StorageError, COOKIE_TABLE};
 
 /// Third-party cookie policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -114,7 +114,10 @@ impl<'a> CookieJar<'a> {
             return Ok(SetCookieOutcome::Rejected("malformed"));
         };
 
-        let host = request_url.host_str().unwrap_or_default().to_ascii_lowercase();
+        let host = request_url
+            .host_str()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
         if host.is_empty() {
             return Ok(SetCookieOutcome::Rejected("no host"));
         }
@@ -141,7 +144,9 @@ impl<'a> CookieJar<'a> {
 
         // Third-party determination + CHIPS.
         let request_site = registrable_domain(&host);
-        let top = top_site.map(str::to_owned).unwrap_or_else(|| request_site.clone());
+        let top = top_site
+            .map(str::to_owned)
+            .unwrap_or_else(|| request_site.clone());
         let third_party = request_site != top;
         let partition = if partitioned_attr && third_party {
             Some(top.clone())
@@ -165,7 +170,10 @@ impl<'a> CookieJar<'a> {
         }
 
         // SameSite=None requires Secure.
-        let same_site = parsed.same_site().map(SameSiteMode::from).unwrap_or_default();
+        let same_site = parsed
+            .same_site()
+            .map(SameSiteMode::from)
+            .unwrap_or_default();
         if same_site == SameSiteMode::None && !secure {
             return Ok(SetCookieOutcome::Rejected("SameSite=None without Secure"));
         }
@@ -221,7 +229,9 @@ impl<'a> CookieJar<'a> {
             return Ok(None);
         }
         let request_site = registrable_domain(&host);
-        let top = top_site.map(str::to_owned).unwrap_or_else(|| request_site.clone());
+        let top = top_site
+            .map(str::to_owned)
+            .unwrap_or_else(|| request_site.clone());
         let third_party = request_site != top;
         let path = url.path();
 
@@ -232,11 +242,11 @@ impl<'a> CookieJar<'a> {
         let txn = self.db.begin_write()?;
         {
             let mut table = txn.open_table(COOKIE_TABLE)?;
-            let range = table.range::<&str>(..)
+            let range = table
+                .range::<&str>(..)
                 .map_err(|e| StorageError::Backend(e.to_string()))?;
             for entry in range {
-                let (key, value) = entry
-                    .map_err(|e| StorageError::Backend(e.to_string()))?;
+                let (key, value) = entry.map_err(|e| StorageError::Backend(e.to_string()))?;
                 let Ok(record) = serde_json::from_str::<CookieRecord>(value.value()) else {
                     continue;
                 };
@@ -387,11 +397,10 @@ fn path_matches(request_path: &str, cookie_path: &str) -> bool {
     if request_path == cookie_path {
         return true;
     }
-    request_path.strip_prefix(cookie_path).is_some_and(|rest| {
-        cookie_path.ends_with('/') || rest.starts_with('/')
-    })
+    request_path
+        .strip_prefix(cookie_path)
+        .is_some_and(|rest| cookie_path.ends_with('/') || rest.starts_with('/'))
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -401,7 +410,11 @@ mod tests {
     fn storage() -> Storage {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        Storage::open(format!("/tmp/rowser-cookie-{}-{id}.redb", std::process::id())).unwrap()
+        Storage::open(format!(
+            "/tmp/rowser-cookie-{}-{id}.redb",
+            std::process::id()
+        ))
+        .unwrap()
     }
 
     #[test]
@@ -411,10 +424,17 @@ mod tests {
         jar.clear().unwrap();
         let url = Url::parse("https://example.com/page").unwrap();
         let out = jar
-            .set_cookie("session=abc; Path=/", &url, None, ThirdPartyPolicy::default())
+            .set_cookie(
+                "session=abc; Path=/",
+                &url,
+                None,
+                ThirdPartyPolicy::default(),
+            )
             .unwrap();
         assert_eq!(out, SetCookieOutcome::Stored);
-        let header = jar.cookie_header(&url, None, ThirdPartyPolicy::default()).unwrap();
+        let header = jar
+            .cookie_header(&url, None, ThirdPartyPolicy::default())
+            .unwrap();
         assert_eq!(header.as_deref(), Some("session=abc"));
     }
 
@@ -436,10 +456,14 @@ mod tests {
         assert_eq!(out, SetCookieOutcome::Stored);
         // Same tracker on a different top site → no cookie.
         let other = Url::parse("https://tracker.dev/pixel").unwrap();
-        let header = jar.cookie_header(&other, Some("shop.other"), ThirdPartyPolicy::default()).unwrap();
+        let header = jar
+            .cookie_header(&other, Some("shop.other"), ThirdPartyPolicy::default())
+            .unwrap();
         assert_eq!(header, None);
         // Matching partition → sent.
-        let header = jar.cookie_header(&tracker, Some("news.example"), ThirdPartyPolicy::default()).unwrap();
+        let header = jar
+            .cookie_header(&tracker, Some("news.example"), ThirdPartyPolicy::default())
+            .unwrap();
         assert_eq!(header.as_deref(), Some("id=123"));
     }
 
@@ -450,7 +474,12 @@ mod tests {
         jar.clear().unwrap();
         let tracker = Url::parse("https://tracker.dev/pixel").unwrap();
         let out = jar
-            .set_cookie("x=1; Secure; SameSite=None", &tracker, Some("news.example"), ThirdPartyPolicy::default())
+            .set_cookie(
+                "x=1; Secure; SameSite=None",
+                &tracker,
+                Some("news.example"),
+                ThirdPartyPolicy::default(),
+            )
             .unwrap();
         assert_eq!(out, SetCookieOutcome::Rejected("third-party unpartitioned"));
     }
@@ -462,7 +491,12 @@ mod tests {
         jar.clear().unwrap();
         let url = Url::parse("https://evil.example/").unwrap();
         let out = jar
-            .set_cookie("hijack=1; Domain=bank.com", &url, None, ThirdPartyPolicy::default())
+            .set_cookie(
+                "hijack=1; Domain=bank.com",
+                &url,
+                None,
+                ThirdPartyPolicy::default(),
+            )
             .unwrap();
         assert_eq!(out, SetCookieOutcome::Rejected("domain mismatch"));
     }

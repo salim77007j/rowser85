@@ -12,10 +12,14 @@ use rowser_parsing::parse_html;
 use rowser_rendering::{build_display_list, Painter, RenderOptions};
 
 fn media() -> MediaContext {
-    MediaContext { width: 1280.0, height: 800.0, dark_mode: false }
+    MediaContext {
+        width: 1280.0,
+        height: 800.0,
+        dark_mode: false,
+    }
 }
 
-/// Any byte input must parse without panic (and reasonably fast).
+// Any byte input must parse without panic (and reasonably fast).
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(64))]
 
@@ -96,7 +100,11 @@ proptest! {
 fn synthetic_page(nodes: usize, classes: usize) -> String {
     let mut html = String::from("<!DOCTYPE html><html><head><title>f</title></head><body>");
     for i in 0..nodes {
-        let class = if classes > 0 { format!(" c{}", i % classes) } else { String::new() };
+        let class = if classes > 0 {
+            format!(" c{}", i % classes)
+        } else {
+            String::new()
+        };
         html.push_str(&format!(
             "<div class=\"n{i}{class}\" id=\"i{i}\"><p>Node {i} text content for shaping</p></div>"
         ));
@@ -108,7 +116,9 @@ fn synthetic_page(nodes: usize, classes: usize) -> String {
 fn synthetic_css(classes: usize) -> String {
     let mut css = String::from("body { margin: 4px; color: #111 } div { display: block }");
     for c in 0..classes {
-        css.push_str(&format!(".c{c} {{ padding: {c}px; color: rgb({c}, 0, 0) }}"));
+        css.push_str(&format!(
+            ".c{c} {{ padding: {c}px; color: rgb({c}, 0, 0) }}"
+        ));
     }
     css
 }

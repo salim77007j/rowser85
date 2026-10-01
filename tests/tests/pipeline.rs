@@ -18,10 +18,8 @@ fn test_config(label: &str) -> EngineConfig {
     }
     EngineConfig {
         // Unique per test (parallel test runs share one process).
-        profile_dir: std::env::temp_dir().join(format!(
-            "rowser-e2e-{}-{label}",
-            std::process::id()
-        )),
+        profile_dir: std::env::temp_dir()
+            .join(format!("rowser-e2e-{}-{label}", std::process::id())),
         ..EngineConfig::default()
     }
 }
@@ -65,7 +63,11 @@ async fn full_pipeline_loads_renders_and_runs_scripts() {
     let mut routes: HashMap<String, (u16, String, Vec<u8>)> = HashMap::new();
     routes.insert(
         "/".to_owned(),
-        (200, "text/html; charset=utf-8".to_owned(), PAGE_HTML.as_bytes().to_vec()),
+        (
+            200,
+            "text/html; charset=utf-8".to_owned(),
+            PAGE_HTML.as_bytes().to_vec(),
+        ),
     );
     routes.insert(
         "/style.css".to_owned(),
@@ -73,7 +75,11 @@ async fn full_pipeline_loads_renders_and_runs_scripts() {
     );
     routes.insert(
         "/app.js".to_owned(),
-        (200, "application/javascript".to_owned(), PAGE_JS.as_bytes().to_vec()),
+        (
+            200,
+            "application/javascript".to_owned(),
+            PAGE_JS.as_bytes().to_vec(),
+        ),
     );
     use base64::Engine;
     let png = base64::engine::general_purpose::STANDARD
@@ -105,7 +111,11 @@ async fn full_pipeline_loads_renders_and_runs_scripts() {
                 loaded = true;
             }
             EngineEvent::FrameReady { .. } => frame_ids += 1,
-            EngineEvent::ConsoleMessage { tab: _, level, text } => {
+            EngineEvent::ConsoleMessage {
+                tab: _,
+                level,
+                text,
+            } => {
                 assert_eq!(level, "log");
                 assert_eq!(text, "script running");
                 console_messages += 1;

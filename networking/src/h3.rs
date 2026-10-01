@@ -2,15 +2,15 @@
 //! fallback.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use bytes::{Buf, Bytes};
 use url::Url;
 
-use crate::{FetchResponse, NetError, NetworkContext, FetchRequest};
+use crate::{FetchRequest, FetchResponse, NetError, NetworkContext};
 
 /// A reusable HTTP/3 request handle for one origin.
 type SendRequestHandle = h3::client::SendRequest<h3_quinn::OpenStreams, Bytes>;
@@ -100,9 +100,8 @@ impl H3Pool {
     async fn endpoint(&self) -> Result<quinn::Endpoint, NetError> {
         let mut guard = self.endpoint.lock().await;
         if guard.is_none() {
-            let roots = rustls::RootCertStore::from_iter(
-                webpki_roots::TLS_SERVER_ROOTS.iter().cloned(),
-            );
+            let roots =
+                rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
             let provider = Arc::new(rustls::crypto::ring::default_provider());
             let mut crypto = rustls::ClientConfig::builder_with_provider(provider)
                 .with_safe_default_protocol_versions()
@@ -117,8 +116,8 @@ impl H3Pool {
             let bind_addr: SocketAddr = "[::]:0"
                 .parse()
                 .map_err(|e: std::net::AddrParseError| NetError::Connect(e.to_string()))?;
-            let mut endpoint = quinn::Endpoint::client(bind_addr)
-                .map_err(|e| NetError::Connect(e.to_string()))?;
+            let mut endpoint =
+                quinn::Endpoint::client(bind_addr).map_err(|e| NetError::Connect(e.to_string()))?;
             endpoint.set_default_client_config(quic_config);
             *guard = Some(endpoint);
         }
@@ -241,7 +240,11 @@ async fn exchange(
         .collect();
 
     let mut body = Vec::new();
-    while let Some(mut chunk) = stream.recv_data().await.map_err(|e| NetError::Body(e.to_string()))? {
+    while let Some(mut chunk) = stream
+        .recv_data()
+        .await
+        .map_err(|e| NetError::Body(e.to_string()))?
+    {
         while chunk.has_remaining() {
             body.push(chunk.get_u8());
         }
@@ -264,4 +267,3 @@ async fn exchange(
         transport: "h3",
     })
 }
-

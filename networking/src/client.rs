@@ -13,14 +13,14 @@ use hickory_resolver::proto::xfer::Protocol;
 use hickory_resolver::TokioResolver;
 use http_body_util::BodyExt;
 use hyper::body::Incoming;
+use hyper_rustls::HttpsConnector;
 use hyper_util::client::legacy::connect::dns::Name;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
-use hyper_rustls::HttpsConnector;
 use url::Url;
 
-use crate::{FetchResponse, NetError, NetworkContext, FetchRequest};
+use crate::{FetchRequest, FetchResponse, NetError, NetworkContext};
 
 /// The concrete HTTP client type.
 pub type HttpClient =
@@ -46,8 +46,7 @@ impl tower_service::Service<Name> for HickoryDnsResolver {
         let host = name.as_str().to_owned();
         Box::pin(async move {
             let lookup = resolver.lookup_ip(host).await?;
-            let addrs: Vec<SocketAddr> =
-                lookup.iter().map(|ip| SocketAddr::new(ip, 0)).collect();
+            let addrs: Vec<SocketAddr> = lookup.iter().map(|ip| SocketAddr::new(ip, 0)).collect();
             Ok(addrs.into_iter())
         })
     }
@@ -82,8 +81,8 @@ pub async fn build_resolver(config: &HickoryDnsConfig) -> Result<TokioResolver, 
     match &config.mode {
         DnsMode::System => {
             // System config (reads /etc/resolv.conf).
-            let builder = TokioResolver::builder_tokio()
-                .map_err(|e| NetError::Dns(e.to_string()))?;
+            let builder =
+                TokioResolver::builder_tokio().map_err(|e| NetError::Dns(e.to_string()))?;
             return Ok(builder.build());
         }
         DnsMode::Doh(url) => {
@@ -110,18 +109,22 @@ pub async fn build_resolver(config: &HickoryDnsConfig) -> Result<TokioResolver, 
         }
     }
     let config_struct = ResolverConfig::from_parts(None, vec![], group);
-    let mut builder = TokioResolver::builder_with_config(
-        config_struct,
-        TokioConnectionProvider::default(),
-    );
+    let mut builder =
+        TokioResolver::builder_with_config(config_struct, TokioConnectionProvider::default());
     builder.options_mut().timeout = config.timeout;
     Ok(builder.build())
 }
 
 fn split_host_port(input: &str, default_port: u16) -> (String, u16) {
     match input.rsplit_once(':') {
-        Some((host, port)) => (host.trim_matches(|c| c == '[' || c == ']').to_owned(), port.parse().unwrap_or(default_port)),
-        None => (input.trim_matches(|c| c == '[' || c == ']').to_owned(), default_port),
+        Some((host, port)) => (
+            host.trim_matches(|c| c == '[' || c == ']').to_owned(),
+            port.parse().unwrap_or(default_port),
+        ),
+        None => (
+            input.trim_matches(|c| c == '[' || c == ']').to_owned(),
+            default_port,
+        ),
     }
 }
 
@@ -141,7 +144,9 @@ fn parse_host(host: &str) -> Result<std::net::IpAddr, NetError> {
 
 /// Builds the hyper client (h1 + h2, rustls, connection pooling).
 pub fn build_http_client(resolver: &TokioResolver) -> HttpClient {
-    let dns = HickoryDnsResolver { resolver: resolver.clone() };
+    let dns = HickoryDnsResolver {
+        resolver: resolver.clone(),
+    };
     let mut http = HttpConnector::new_with_resolver(dns);
     http.set_nodelay(true);
     http.set_keepalive(Some(Duration::from_secs(30)));
@@ -197,7 +202,12 @@ pub async fn fetch_http(
     let headers: Vec<(String, String)> = response
         .headers()
         .iter()
-        .map(|(n, v)| (n.as_str().to_owned(), String::from_utf8_lossy(v.as_bytes()).into_owned()))
+        .map(|(n, v)| {
+            (
+                n.as_str().to_owned(),
+                String::from_utf8_lossy(v.as_bytes()).into_owned(),
+            )
+        })
         .collect();
     let (parts, body) = response.into_parts();
     let _ = parts;
@@ -231,10 +241,13 @@ pub async fn cname_chain(resolver: &TokioResolver, host: &str) -> Vec<String> {
             .records()
             .iter()
             .filter_map(|record| {
-                record
-                    .data()
-                    .as_cname()
-                    .map(|cname| cname.0.to_string().trim_end_matches('.').to_ascii_lowercase())
+                record.data().as_cname().map(|cname| {
+                    cname
+                        .0
+                        .to_string()
+                        .trim_end_matches('.')
+                        .to_ascii_lowercase()
+                })
             })
             .collect(),
         Err(_) => Vec::new(),
@@ -248,7 +261,10 @@ mod tests {
     #[test]
     fn split_host_port_works() {
         assert_eq!(split_host_port("1.1.1.1", 443), ("1.1.1.1".to_owned(), 443));
-        assert_eq!(split_host_port("dns.example:853", 53), ("dns.example".to_owned(), 853));
+        assert_eq!(
+            split_host_port("dns.example:853", 53),
+            ("dns.example".to_owned(), 853)
+        );
         assert_eq!(split_host_port("[::1]:53", 53), ("::1".to_owned(), 53));
     }
 

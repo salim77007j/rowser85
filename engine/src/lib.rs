@@ -24,12 +24,12 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use rowser_js::{EngineEvent as JsIntoEvent, JsCommand, JsConfig};
+use rowser_layout::Viewport;
 use rowser_privacy::blocklist::{Blocklist, ResourceType as FilterResourceType};
 use rowser_privacy::cname::CnameGuard;
-use rowser_privacy::RequestVerdict;
-use rowser_layout::Viewport;
-pub use rowser_privacy::PrivacySettings;
 use rowser_privacy::fingerprint::SpoofProfile;
+pub use rowser_privacy::PrivacySettings;
+use rowser_privacy::RequestVerdict;
 use rowser_rendering::Frame;
 use rowser_storage::Storage;
 
@@ -404,7 +404,9 @@ impl Engine {
                     })?;
                     Ok((runtime, network, resolver))
                 });
-                handle.join().map_err(|_| anyhow::anyhow!("engine bootstrap thread panicked"))?
+                handle
+                    .join()
+                    .map_err(|_| anyhow::anyhow!("engine bootstrap thread panicked"))?
             })
         }?;
 
@@ -570,7 +572,9 @@ fn handle_user(state: &EngineLoop, command: Command) -> bool {
         Command::Navigate(tab, url) => {
             if let Some(handle) = state.tabs.lock().unwrap().get(&tab) {
                 let _ = handle.tx.send(page::Message::Navigate(url.clone()));
-                let _ = state.event_tx.send(EngineEvent::NavigationStarted { tab, url });
+                let _ = state
+                    .event_tx
+                    .send(EngineEvent::NavigationStarted { tab, url });
             }
         }
         Command::CloseTab(tab) => close_tab(state, tab),
@@ -668,7 +672,9 @@ fn create_tab(state: &EngineLoop, requested: TabId, url: Option<String>) {
         if let Some(tx) = tx {
             let _ = tx.send(page::Message::Navigate(url.clone()));
         }
-        let _ = state.event_tx.send(EngineEvent::NavigationStarted { tab, url });
+        let _ = state
+            .event_tx
+            .send(EngineEvent::NavigationStarted { tab, url });
     }
 }
 
@@ -690,7 +696,9 @@ fn handle_internal(state: &EngineLoop, internal: Internal) {
             tracing::debug!(target: "rowser::engine", "fetch subresources: tab {tab}, {} requests", requests.len());
             {
                 let mut tabs = state.tabs.lock().unwrap();
-                let Some(handle) = tabs.get_mut(&tab) else { return };
+                let Some(handle) = tabs.get_mut(&tab) else {
+                    return;
+                };
                 for request in &requests {
                     handle.pending_subresources.insert(request.url.clone());
                 }
@@ -700,9 +708,17 @@ fn handle_internal(state: &EngineLoop, internal: Internal) {
             }
         }
         Internal::PageCommand { tab, command } => handle_page_command(state, tab, command),
-        Internal::FetchDone { tab, url, status, headers, body } => {
+        Internal::FetchDone {
+            tab,
+            url,
+            status,
+            headers,
+            body,
+        } => {
             let mut tabs = state.tabs.lock().unwrap();
-            let Some(handle) = tabs.get_mut(&tab) else { return };
+            let Some(handle) = tabs.get_mut(&tab) else {
+                return;
+            };
             handle.pending_subresources.remove(&url);
             let pending = handle.pending_subresources.len();
             let tx = handle.tx.clone();
@@ -717,14 +733,26 @@ fn handle_internal(state: &EngineLoop, internal: Internal) {
         }
         Internal::FetchFailed { tab, url, error } => {
             let mut tabs = state.tabs.lock().unwrap();
-            let Some(handle) = tabs.get_mut(&tab) else { return };
+            let Some(handle) = tabs.get_mut(&tab) else {
+                return;
+            };
             handle.pending_subresources.remove(&url);
             let pending = handle.pending_subresources.len();
             let tx = handle.tx.clone();
             drop(tabs);
-            let _ = tx.send(page::Message::SubresourceFailed { url, error, pending });
+            let _ = tx.send(page::Message::SubresourceFailed {
+                url,
+                error,
+                pending,
+            });
         }
-        Internal::JsFetchDone { tab, id, status, headers, body_b64 } => {
+        Internal::JsFetchDone {
+            tab,
+            id,
+            status,
+            headers,
+            body_b64,
+        } => {
             send_page(&state.tabs, tab, |tx| {
                 tx.send(page::Message::JsEvent(JsIntoEvent::FetchCompleted {
                     id,
@@ -736,7 +764,10 @@ fn handle_internal(state: &EngineLoop, internal: Internal) {
         }
         Internal::JsFetchFailed { tab, id, error } => {
             send_page(&state.tabs, tab, |tx| {
-                tx.send(page::Message::JsEvent(JsIntoEvent::FetchFailed { id, error }))
+                tx.send(page::Message::JsEvent(JsIntoEvent::FetchFailed {
+                    id,
+                    error,
+                }))
             });
         }
         Internal::TimerFired { tab, timer } => {
@@ -761,9 +792,18 @@ fn handle_internal(state: &EngineLoop, internal: Internal) {
                 snapshot.memory_bytes = bytes;
             }
         }
-        Internal::WsEvent { tab, socket, kind, data } => {
+        Internal::WsEvent {
+            tab,
+            socket,
+            kind,
+            data,
+        } => {
             send_page(&state.tabs, tab, |tx| {
-                tx.send(page::Message::JsEvent(JsIntoEvent::WsEvent { id: socket, kind, data }))
+                tx.send(page::Message::JsEvent(JsIntoEvent::WsEvent {
+                    id: socket,
+                    kind,
+                    data,
+                }))
             });
         }
         Internal::PageExited(tab) => {
@@ -777,7 +817,12 @@ fn handle_internal(state: &EngineLoop, internal: Internal) {
         Internal::PageMessage { tab, message } => {
             send_page(&state.tabs, tab, |tx| tx.send(*message));
         }
-        Internal::CnameVerdict { tab, request, cloaked, detail } => {
+        Internal::CnameVerdict {
+            tab,
+            request,
+            cloaked,
+            detail,
+        } => {
             if cloaked {
                 tracing::debug!(target: "rowser::engine", "CNAME cloaking blocked: {detail}");
                 let _ = state.event_tx.send(EngineEvent::BlockedRequest {
@@ -808,7 +853,9 @@ fn handle_internal(state: &EngineLoop, internal: Internal) {
 fn send_page(
     tabs: &Mutex<HashMap<TabId, PageHandle>>,
     tab: TabId,
-    f: impl FnOnce(&std::sync::mpsc::Sender<page::Message>) -> Result<(), std::sync::mpsc::SendError<page::Message>>,
+    f: impl FnOnce(
+        &std::sync::mpsc::Sender<page::Message>,
+    ) -> Result<(), std::sync::mpsc::SendError<page::Message>>,
 ) {
     let guard = tabs.lock().unwrap();
     if let Some(handle) = guard.get(&tab) {
@@ -820,7 +867,11 @@ fn send_page(
 
 fn handle_page_command(state: &EngineLoop, tab: TabId, command: JsCommand) {
     match command {
-        JsCommand::TimerStart { id, delay_ms, interval } => {
+        JsCommand::TimerStart {
+            id,
+            delay_ms,
+            interval,
+        } => {
             let cmd_tx = state.cmd_tx.clone();
             state.runtime.spawn(async move {
                 loop {
@@ -839,9 +890,11 @@ fn handle_page_command(state: &EngineLoop, tab: TabId, command: JsCommand) {
         JsCommand::FetchStart { id, url, init } => {
             let request = js_fetch_request(state, tab, url, init);
             if let RequestVerdict::Block(reason) = blocklist_check(state, &request) {
-                let _ = state
-                    .event_tx
-                    .send(EngineEvent::BlockedRequest { tab, url: request.url, reason });
+                let _ = state.event_tx.send(EngineEvent::BlockedRequest {
+                    tab,
+                    url: request.url,
+                    reason,
+                });
                 let _ = state.cmd_tx.send(Cmd::Internal(Internal::JsFetchFailed {
                     tab,
                     id,
@@ -865,9 +918,7 @@ fn handle_page_command(state: &EngineLoop, tab: TabId, command: JsCommand) {
         JsCommand::WsSend { id, data } => {
             let sender = {
                 let tabs = state.tabs.lock().unwrap();
-                tabs.get(&tab)
-                    .and_then(|h| h.ws_senders.get(&id))
-                    .cloned()
+                tabs.get(&tab).and_then(|h| h.ws_senders.get(&id)).cloned()
             };
             if let Some(sender) = sender {
                 let _ = sender.send(WsCommand::Send(data));
@@ -921,11 +972,7 @@ fn handle_page_command(state: &EngineLoop, tab: TabId, command: JsCommand) {
     }
 }
 
-fn send_page_direct(
-    cmd_tx: std::sync::mpsc::Sender<Cmd>,
-    tab: TabId,
-    message: page::Message,
-) {
+fn send_page_direct(cmd_tx: std::sync::mpsc::Sender<Cmd>, tab: TabId, message: page::Message) {
     let _ = cmd_tx.send(Cmd::Internal(Internal::PageMessage {
         tab,
         message: Box::new(message),
@@ -975,12 +1022,10 @@ fn spawn_js_fetch(
         match rowser_networking::fetch(&network, request).await {
             Ok(response) => {
                 use base64::Engine;
-                let body_b64 = base64::engine::general_purpose::STANDARD
-                    .encode(response.body.as_ref());
-                let headers = serde_json::to_string(
-                    &response.headers,
-                )
-                .unwrap_or_else(|_| "[]".to_owned());
+                let body_b64 =
+                    base64::engine::general_purpose::STANDARD.encode(response.body.as_ref());
+                let headers =
+                    serde_json::to_string(&response.headers).unwrap_or_else(|_| "[]".to_owned());
                 let _ = cmd_tx.send(Cmd::Internal(Internal::JsFetchDone {
                     tab,
                     id,
@@ -1153,7 +1198,13 @@ fn blocklist_check(
     state: &EngineLoop,
     request: &rowser_networking::FetchRequest,
 ) -> RequestVerdict {
-    if !state.network.settings.read().map(|s| s.block_ads).unwrap_or(true) {
+    if !state
+        .network
+        .settings
+        .read()
+        .map(|s| s.block_ads)
+        .unwrap_or(true)
+    {
         return RequestVerdict::Allow;
     }
     let source = if request.source_url.is_empty() {
@@ -1173,16 +1224,22 @@ fn blocklist_check(
         rowser_networking::ResourceKind::Media => FilterResourceType::Media,
         rowser_networking::ResourceKind::Other => FilterResourceType::Other,
     };
-    state.blocklist.lock().unwrap().check(&request.url, &source, resource)
+    state
+        .blocklist
+        .lock()
+        .unwrap()
+        .check(&request.url, &source, resource)
 }
 
 /// Full gate: blocklist (sync) + CNAME (async gate thread for third-party).
 /// Returns true when the request was blocked/queued (caller does nothing).
 fn gate_fetch(state: &EngineLoop, tab: TabId, request: rowser_networking::FetchRequest) -> bool {
     if let RequestVerdict::Block(reason) = blocklist_check(state, &request) {
-        let _ = state
-            .event_tx
-            .send(EngineEvent::BlockedRequest { tab, url: request.url.clone(), reason });
+        let _ = state.event_tx.send(EngineEvent::BlockedRequest {
+            tab,
+            url: request.url.clone(),
+            reason,
+        });
         // Deliver the failure to the waiting page/subresource counter.
         let mut tabs = state.tabs.lock().unwrap();
         let blocked_url = request.url.clone();

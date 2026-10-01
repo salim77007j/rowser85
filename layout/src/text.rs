@@ -106,7 +106,11 @@ pub struct TextRun {
 }
 
 /// Shapes `leaf` at `width` and returns the shaped lines (cached).
-pub fn shape(leaf: &mut TextLeaf, font_system: &mut FontSystem, width: Option<f32>) -> Arc<Vec<LayoutLine>> {
+pub fn shape(
+    leaf: &mut TextLeaf,
+    font_system: &mut FontSystem,
+    width: Option<f32>,
+) -> Arc<Vec<LayoutLine>> {
     let key = width.map(|w| w.round()).unwrap_or(-1.0);
     if let Some((cached_key, lines)) = &leaf.cache {
         if *cached_key == key {
@@ -169,7 +173,11 @@ pub fn shape_at(
     glyphs
 }
 
-fn shape_lines(leaf: &TextLeaf, font_system: &mut FontSystem, width: Option<f32>) -> Vec<LayoutLine> {
+fn shape_lines(
+    leaf: &TextLeaf,
+    font_system: &mut FontSystem,
+    width: Option<f32>,
+) -> Vec<LayoutLine> {
     if leaf.text.is_empty() {
         return Vec::new();
     }
@@ -182,8 +190,12 @@ fn shape_lines(leaf: &TextLeaf, font_system: &mut FontSystem, width: Option<f32>
             attrs_list.add_span(range.clone(), &span_attrs);
         }
     }
-    let mut buffer_line =
-        BufferLine::new(leaf.text.clone(), LineEnding::None, attrs_list, Shaping::Advanced);
+    let mut buffer_line = BufferLine::new(
+        leaf.text.clone(),
+        LineEnding::None,
+        attrs_list,
+        Shaping::Advanced,
+    );
     let layout = buffer_line.layout(
         font_system,
         defaults.font_size,

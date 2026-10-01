@@ -3,7 +3,7 @@
 use redb::{Database, ReadableTable};
 use serde::{Deserialize, Serialize};
 
-use crate::{CACHE_BODY_TABLE, CACHE_META_TABLE, StorageError};
+use crate::{StorageError, CACHE_BODY_TABLE, CACHE_META_TABLE};
 
 /// Cached response metadata.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -176,12 +176,23 @@ mod tests {
 
     #[test]
     fn cache_roundtrip_and_eviction() {
-        let store = Storage::open(format!("/tmp/rowser-cache-{}-{}.redb", std::process::id(), line!())).unwrap();
+        let store = Storage::open(format!(
+            "/tmp/rowser-cache-{}-{}.redb",
+            std::process::id(),
+            line!()
+        ))
+        .unwrap();
         let cache = store.http_cache(1000);
         cache.delete("https://example.com/a").unwrap();
-        cache.put("https://example.com/a", 200, vec![], vec![0u8; 400]).unwrap();
-        cache.put("https://example.com/b", 200, vec![], vec![0u8; 400]).unwrap();
-        cache.put("https://example.com/c", 200, vec![], vec![0u8; 400]).unwrap();
+        cache
+            .put("https://example.com/a", 200, vec![], vec![0u8; 400])
+            .unwrap();
+        cache
+            .put("https://example.com/b", 200, vec![], vec![0u8; 400])
+            .unwrap();
+        cache
+            .put("https://example.com/c", 200, vec![], vec![0u8; 400])
+            .unwrap();
         // Budget 1000 → oldest evicted.
         assert!(cache.get("https://example.com/a").unwrap().is_none());
         assert!(cache.get("https://example.com/c").unwrap().is_some());

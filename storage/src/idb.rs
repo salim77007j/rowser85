@@ -8,7 +8,7 @@
 use redb::{Database, ReadableTable};
 use serde::{Deserialize, Serialize};
 
-use crate::{IDB_DB_TABLE, IDB_RECORD_TABLE, StorageError};
+use crate::{StorageError, IDB_DB_TABLE, IDB_RECORD_TABLE};
 
 /// Metadata for one IndexedDB database.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -125,7 +125,9 @@ impl<'a> IndexedDb<'a> {
         let record_key = format!("{db}\u{0}{store}\u{0}{key}");
         let txn = self.db.begin_read()?;
         let records = txn.open_table(IDB_RECORD_TABLE)?;
-        Ok(records.get(record_key.as_str())?.map(|v| v.value().to_owned()))
+        Ok(records
+            .get(record_key.as_str())?
+            .map(|v| v.value().to_owned()))
     }
 
     /// `delete` a record.
@@ -173,12 +175,19 @@ mod tests {
 
     #[test]
     fn idb_roundtrip() {
-        let store = Storage::open(format!("/tmp/rowser-idb-{}-{}.redb", std::process::id(), line!())).unwrap();
+        let store = Storage::open(format!(
+            "/tmp/rowser-idb-{}-{}.redb",
+            std::process::id(),
+            line!()
+        ))
+        .unwrap();
         let idb = store.indexed_db();
         idb.open_database("testdb").unwrap();
         idb.create_store("testdb", "people").unwrap();
-        idb.put("testdb", "people", "1", r#"{"name":"Ada"}"#).unwrap();
-        idb.put("testdb", "people", "2", r#"{"name":"Alan"}"#).unwrap();
+        idb.put("testdb", "people", "1", r#"{"name":"Ada"}"#)
+            .unwrap();
+        idb.put("testdb", "people", "2", r#"{"name":"Alan"}"#)
+            .unwrap();
         assert_eq!(
             idb.get("testdb", "people", "1").unwrap().as_deref(),
             Some(r#"{"name":"Ada"}"#)

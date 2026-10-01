@@ -4,8 +4,8 @@
 use std::sync::Arc;
 
 use rowser_dom::{Dom, NodeId};
-use rowser_parsing::cascade::{DisplayMode, StyleMap};
 use rowser_layout::LayoutResult;
+use rowser_parsing::cascade::{DisplayMode, StyleMap};
 
 use crate::{DecodedImage, Rect};
 
@@ -71,7 +71,9 @@ pub fn build_display_list(
     let mut runs: std::collections::HashMap<NodeId, Vec<Arc<rowser_layout::text::TextRun>>> =
         std::collections::HashMap::new();
     for run in &layout.text {
-        runs.entry(run.node).or_default().push(Arc::new(run.clone()));
+        runs.entry(run.node)
+            .or_default()
+            .push(Arc::new(run.clone()));
     }
     walk(dom, styles, layout, images, root, &mut list, &runs);
     list
@@ -98,14 +100,21 @@ fn walk(
     list: &mut DisplayList,
     runs: &std::collections::HashMap<NodeId, Vec<Arc<rowser_layout::text::TextRun>>>,
 ) {
-    let Some(style) = styles.get(node) else { return };
+    let Some(style) = styles.get(node) else {
+        return;
+    };
     if style.display == DisplayMode::None {
         return;
     }
     let Some(rect) = layout.rects.get(&node) else {
         return;
     };
-    let rect = Rect { x: rect.x, y: rect.y, w: rect.w, h: rect.h };
+    let rect = Rect {
+        x: rect.x,
+        y: rect.y,
+        w: rect.w,
+        h: rect.h,
+    };
 
     // Background.
     if style.background_color.a > 0 {
@@ -125,10 +134,8 @@ fn walk(
 
     // Borders.
     let b = &style.borders;
-    let has_border = b.top.width > 0.0
-        || b.right.width > 0.0
-        || b.bottom.width > 0.0
-        || b.left.width > 0.0;
+    let has_border =
+        b.top.width > 0.0 || b.right.width > 0.0 || b.bottom.width > 0.0 || b.left.width > 0.0;
     if has_border {
         list.commands.push(DrawCmd::Border {
             rect,
@@ -140,7 +147,9 @@ fn walk(
     // The element's own text.
     if let Some(element_runs) = runs.get(&node) {
         for run in element_runs {
-            list.commands.push(DrawCmd::Text { run: Arc::clone(run) });
+            list.commands.push(DrawCmd::Text {
+                run: Arc::clone(run),
+            });
         }
     }
 
