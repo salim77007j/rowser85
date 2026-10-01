@@ -220,7 +220,7 @@ impl Shell {
                 self.browser.new_tab(Some(url));
             }
             let tabs = self.browser.tabs();
-            if let Some(active) = tabs.get(self.store.session.active.min(tabs.len() - 1)) {
+            if let Some(active) = tabs.get(self.store.session.active.min(tabs.len().saturating_sub(1))) {
                 self.browser.focus(*active);
             }
         }

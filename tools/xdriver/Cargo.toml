@@ -1,0 +1,17 @@
+[package]
+name = "xdriver"
+description = "X11 test driver for the Rrowser85 UI (XTEST synthetic input)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[[bin]]
+name = "xdriver"
+path = "src/main.rs"
+
+[dependencies]
+x11rb = { version = "0.13", features = ["xtest"] }
+anyhow = "1"

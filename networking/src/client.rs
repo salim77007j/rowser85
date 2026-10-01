@@ -148,6 +148,10 @@ pub fn build_http_client(resolver: &TokioResolver) -> HttpClient {
         resolver: resolver.clone(),
     };
     let mut http = HttpConnector::new_with_resolver(dns);
+    // hyper-rustls handles scheme gating itself; the inner connector must
+    // accept https URIs too (hyper-rustls only clears this on its own
+    // built-in connector, not on wrapped ones).
+    http.enforce_http(false);
     http.set_nodelay(true);
     http.set_keepalive(Some(Duration::from_secs(30)));
     http.set_keepalive_interval(Some(Duration::from_secs(15)));
@@ -188,7 +192,18 @@ pub async fn fetch_http(
 
     let fut = ctx.http.request(req);
     let response = match tokio::time::timeout(ctx.request_timeout, fut).await {
-        Ok(result) => result.map_err(|e| NetError::Http(e.to_string()))?,
+        Ok(result) => result.map_err(|e| {
+            // Surface the full error chain (connect/TLS/DNS causes) so
+            // callers see the actual failure, not just "client error".
+            let mut chain = e.to_string();
+            let mut source = std::error::Error::source(&e);
+            while let Some(s) = source {
+                chain.push_str(" <- ");
+                chain.push_str(&s.to_string());
+                source = s.source();
+            }
+            NetError::Http(chain)
+        })?,
         Err(_) => return Err(NetError::Timeout(ctx.request_timeout)),
     };
 

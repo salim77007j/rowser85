@@ -1,0 +1,17 @@
+[package]
+name = "kbdprobe"
+description = "X11/egui input event probe used to validate the headless test rig."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[[bin]]
+name = "kbdprobe"
+path = "src/main.rs"
+
+[dependencies]
+eframe = "0.32"
+egui = "0.32"

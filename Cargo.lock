@@ -2846,6 +2846,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "kbdprobe"
+version = "0.1.0"
+dependencies = [
+ "eframe",
+ "egui",
+]
+
+[[package]]
 name = "khronos-egl"
 version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7198,6 +7206,14 @@ name = "xcursor"
 version = "0.3.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "163b33ed8786455e2fa5d72f554057ce3f3182425434f756cd39c99839d88e23"
+
+[[package]]
+name = "xdriver"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "x11rb",
+]
 
 [[package]]
 name = "xkbcommon-dl"
