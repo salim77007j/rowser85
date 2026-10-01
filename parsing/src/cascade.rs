@@ -557,25 +557,34 @@ pub fn compute_styles(dom: &Dom, author: &[ParsedStylesheet], media: &MediaConte
     let mut caches = CachesWrap::default();
     let root = dom.document();
     let nodes: Vec<NodeId> = std::iter::once(root).chain(dom.descendants(root)).collect();
-    for node in nodes {
-        if dom.element(node).is_none() {
+    let trace = std::env::var("ROWSER_UI_TRACE").is_ok();
+    let t0 = std::time::Instant::now();
+    for (n, node) in nodes.iter().enumerate() {
+        if trace && n % 200 == 0 {
+            eprintln!(
+                "[cascade] {n}/{} elements, {}ms elapsed",
+                nodes.len(),
+                t0.elapsed().as_millis()
+            );
+        }
+        if dom.element(*node).is_none() {
             continue;
         }
         let parent_style = dom
-            .parent_element(node)
+            .parent_element(*node)
             .and_then(|p| map.styles.get(&p))
             .cloned()
             .unwrap_or_default();
-        let inline = dom.get_attr(node, "style").map(parse_style_attribute);
+        let inline = dom.get_attr(*node, "style").map(parse_style_attribute);
         let style = cascade_element(
             dom,
-            node,
+            *node,
             &rules,
             inline.as_ref(),
             &parent_style,
             &mut caches,
         );
-        map.styles.insert(node, style);
+        map.styles.insert(*node, style);
     }
     map
 }

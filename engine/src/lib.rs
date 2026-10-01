@@ -892,7 +892,9 @@ fn handle_internal(state: &EngineLoop, internal: Internal) {
             // in the page thread).
             let now = std::time::Instant::now();
             let mut tabs = state.tabs.lock().unwrap();
-            let Some(handle) = tabs.get_mut(&tab) else { return };
+            let Some(handle) = tabs.get_mut(&tab) else {
+                return;
+            };
             let suspended = handle.suspended;
             let backgrounded_long = handle
                 .backgrounded_since

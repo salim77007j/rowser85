@@ -61,7 +61,12 @@ impl RuleIndex {
                         // arguments; treat as tags (safe superset).
                         bucket_kinds.push((0, ident.to_ascii_lowercase()));
                     }
-                    pos = next;
+                    // ALWAYS advance: scan_ident does not consume '\', so an
+                    // escaped identifier (`.\31 23`, `.foo\.bar`) returned an
+                    // empty ident at the same position and this loop spun
+                    // forever at 100% CPU with zero allocation (observed on
+                    // github.com's stylesheets).
+                    pos = next.max(pos + 1);
                 }
                 _ => {
                     pos += 1;

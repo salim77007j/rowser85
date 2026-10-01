@@ -186,8 +186,7 @@ pub(crate) fn run(state: Arc<PageState>, rx: Receiver<Message>) {
             if last_report.elapsed() > Duration::from_secs(2) {
                 eprintln!(
                     "[page-{}] loop ticks={ticks}/2s dirty_now={} renders_signal={renders}",
-                    state.tab,
-                    page.dirty,
+                    state.tab, page.dirty,
                 );
                 ticks = 0;
                 renders = 0;
@@ -742,7 +741,11 @@ impl Page {
     fn document_fetched(&mut self, url: String, body: Vec<u8>) {
         let trace = std::env::var("ROWSER_UI_TRACE").is_ok();
         if trace {
-            eprintln!("[page-{}] document_fetched start ({} bytes)", self.state.tab, body.len());
+            eprintln!(
+                "[page-{}] document_fetched start ({} bytes)",
+                self.state.tab,
+                body.len()
+            );
         }
         let mut document = parse_html(&body);
         document.url = Some(url);
@@ -905,20 +908,7 @@ impl Page {
             }
             h.finish()
         };
-        if trace {
-            // Dump sheets for offline parser analysis (hang reproduction):
-            // BEFORE the parse — the parse itself may wedge.
-            let dump = std::path::PathBuf::from("/tmp/css-dump");
-            let _ = std::fs::create_dir_all(&dump);
-            for (i, css) in self.css_texts.iter().enumerate() {
-                let _ = std::fs::write(
-                    dump.join(format!("tab{}-sheet{i:02}.css", self.state.tab)),
-                    css,
-                );
-            }
-        }
-        let sheets: Vec<ParsedStylesheet> = if let Some((cached_fp, cached)) =
-            self.css_cache.take()
+        let sheets: Vec<ParsedStylesheet> = if let Some((cached_fp, cached)) = self.css_cache.take()
         {
             if cached_fp == fp {
                 cached
@@ -1064,7 +1054,9 @@ impl Page {
                         text: format!("{name}: {err}"),
                     });
                 }
-                if std::env::var("ROWSER_UI_TRACE").is_ok() && t0.elapsed() > std::time::Duration::from_millis(300) {
+                if std::env::var("ROWSER_UI_TRACE").is_ok()
+                    && t0.elapsed() > std::time::Duration::from_millis(300)
+                {
                     eprintln!(
                         "[page-{}] script {} ({}) took {}ms",
                         self.state.tab,

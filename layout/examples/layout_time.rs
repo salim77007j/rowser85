@@ -3,7 +3,9 @@
 use std::time::Instant;
 
 fn main() {
-    let html_path = std::env::args().nth(1).expect("usage: layout_time <html> [css-dir]");
+    let html_path = std::env::args()
+        .nth(1)
+        .expect("usage: layout_time <html> [css-dir]");
     let css_dir = std::env::args()
         .nth(2)
         .unwrap_or_else(|| "/tmp/css-dump".into());
