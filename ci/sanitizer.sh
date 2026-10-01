@@ -27,8 +27,11 @@ export ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=1}"
 export TSAN_OPTIONS="${TSAN_OPTIONS:-halt_on_error=0 exitcode=0}"
 
 set -o pipefail
-cargo +nightly test -Z build-std --workspace --exclude rowser-benchmarks \
-  --lib --tests --target x86_64-unknown-linux-gnu -- --test-threads=2 2>&1 | tee /tmp/sanitized.log
+cargo +nightly test -Z build-std --workspace --exclude rowser-tests \
+  --exclude rowser-benchmarks --lib \
+  --target x86_64-unknown-linux-gnu -- --test-threads=2 2>&1 | tee /tmp/sanitized.log
+cargo +nightly test -Z build-std -p rowser-tests --test fuzz \
+  --target x86_64-unknown-linux-gnu -- --test-threads=2 2>&1 | tee -a /tmp/sanitized.log
 
 if [ "$SAN" = "thread" ]; then
   python3 "$(dirname "$0")/tsan-filter.py" /tmp/sanitized.log

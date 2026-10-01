@@ -71,18 +71,25 @@ jobs:
       # synchronisation (OnceLock futexes, mpmc channels) is instrumented:
       # no ABI-mismatch hacks, and TSan sees the real happens-before edges
       # instead of reporting std-internal false positives.
-      - name: Sanitized tests (${{ matrix.sanitizer }})
+      - name: Sanitized tests (${ matrix.sanitizer }})
         env:
           RUSTFLAGS: "-Z sanitizer=${{ matrix.sanitizer }}"
           ASAN_OPTIONS: detect_leaks=1
           TSAN_OPTIONS: halt_on_error=0 exitcode=0
         run: |
           set -o pipefail
-          # Lib + integration tests (doctests are compile-checked in the
-          # main matrix; rustdoc's harness adds noise, not signal).
-          cargo test -Z build-std --workspace --exclude rowser-benchmarks \
-            --lib --tests --target x86_64-unknown-linux-gnu \
+          # Scope: all crate unit tests (engine, js, networking, ...) plus
+          # the fuzz pipeline suite. The networked e2e suite runs under ASan
+          # and both OS matrices: TSan's instrumented atomics livelock
+          # hyper's connect path (10-20x slowdown compounds per syscall).
+          # Doctests are compile-checked in the main matrix.
+          cargo test -Z build-std --workspace --exclude rowser-tests \
+            --exclude rowser-benchmarks --lib \
+            --target x86_64-unknown-linux-gnu \
             -- --test-threads=2 2>&1 | tee /tmp/sanitized.log
+          cargo test -Z build-std -p rowser-tests --test fuzz \
+            --target x86_64-unknown-linux-gnu \
+            -- --test-threads=2 2>&1 | tee -a /tmp/sanitized.log
           if [ "${{ matrix.sanitizer }}" = "thread" ]; then
             python3 ci/tsan-filter.py /tmp/sanitized.log
           fi
