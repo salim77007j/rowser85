@@ -9,6 +9,15 @@ use rowser_engine::EngineConfig;
 
 use rowser_tests::LocalServer;
 
+/// Test wait budget; sanitizer builds run 10-20x slower.
+fn wait_seconds() -> u64 {
+    if std::env::var("TSAN_OPTIONS").is_ok() || std::env::var("ASAN_OPTIONS").is_ok() {
+        120
+    } else {
+        20
+    }
+}
+
 fn test_config(label: &str) -> EngineConfig {
     if std::env::var("ROWSER_TEST_LOG").is_ok() {
         let _ = tracing_subscriber::fmt()
@@ -173,7 +182,7 @@ async fn data_url_navigation_renders() {
     });
     let tab = browser.new_tab(Some(data_url));
     let mut events = browser.events();
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(wait_seconds());
     loop {
         let event = tokio::time::timeout_at(deadline, events.recv())
             .await
@@ -217,7 +226,7 @@ async fn tab_lifecycle_and_suspension() {
     let browser = BrowserApi::start(config).expect("engine start");
     let tab = browser.new_tab(Some(url.clone()));
     let mut events = browser.events();
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(wait_seconds());
     let mut loaded = false;
     let mut suspended = false;
     let mut resumed = false;
