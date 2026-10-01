@@ -1,0 +1,99 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  build-and-test:
+    name: ${{ matrix.os }} / ${{ matrix.profile }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        profile: [debug, release]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install fonts (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y fonts-dejavu-core
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.profile }}
+
+      - name: Format check
+        run: cargo fmt --all -- --check
+
+      - name: Clippy (zero warnings)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Lockfile hygiene (no OpenSSL / aws-lc)
+        shell: bash
+        run: |
+          ! grep -E 'name = "(openssl-sys|aws-lc-rs|aws-lc-sys)"' Cargo.lock
+
+      - name: Build (${{ matrix.profile }})
+        run: cargo build --workspace ${{ matrix.profile == 'release' && '--release' || '' }}
+
+      - name: Test (${{ matrix.profile }})
+        run: cargo test --workspace --exclude rowser-benchmarks ${{ matrix.profile == 'release' && '--release' || '' }}
+
+      - name: Benchmark compile check
+        run: cargo bench -p rowser-benchmarks --no-run
+
+  sanitizer:
+    name: sanitizer / ${{ matrix.sanitizer }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        sanitizer: [address, thread]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install fonts
+        run: sudo apt-get update && sudo apt-get install -y fonts-dejavu-core
+      - uses: dtolnay/rust-toolchain@nightly
+      - name: Sanitized tests (${{ matrix.sanitizer }})
+        env:
+          RUSTFLAGS: "-Z sanitizer=${{ matrix.sanitizer }}"
+          # ASan needs a big shadow-friendly allocator setting; TSan is
+          # tolerant. Leak detection is on for address.
+          ASAN_OPTIONS: detect_leaks=1
+        run: |
+          cargo test --workspace --exclude rowser-benchmarks --target x86_64-unknown-linux-gnu \
+            -- --test-threads=2
+
+  benchmark-baseline:
+    name: benchmarks / baseline artifact
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install fonts
+        run: sudo apt-get update && sudo apt-get install -y fonts-dejavu-core
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run pipeline benchmarks
+        run: |
+          cargo bench -p rowser-benchmarks --bench pipeline -- \
+            --warm-up-time 1 --measurement-time 3 --sample-size 15
+      - name: Engine idle report
+        run: cargo run --release -p rowser-api --example idle_report -- 8 20
+      - name: Upload criterion baseline
+        uses: actions/upload-artifact@v4
+        with:
+          name: criterion-baseline-${{ github.sha }}
+          path: target/criterion
+          retention-days: 90
