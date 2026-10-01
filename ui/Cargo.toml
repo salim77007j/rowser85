@@ -1,0 +1,19 @@
+[package]
+name = "rowser-ui"
+description = "Rrowser85 native browser UI (egui)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "rowser"
+path = "src/main.rs"
+
+[dependencies]
+rowser-shell = { path = "../integration" }
+rowser-api = { path = "../api" }
+rowser-engine = { path = "../engine" }
+anyhow = "1.0.104"
+eframe = "0.32.3"

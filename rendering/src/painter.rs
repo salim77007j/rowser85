@@ -10,7 +10,7 @@ use crate::display_list::{DisplayList, DrawCmd};
 use crate::{to_skia_color, Rect};
 
 /// Options for one render pass.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct RenderOptions {
     /// Viewport width.
     pub viewport_width: u32,
@@ -20,6 +20,10 @@ pub struct RenderOptions {
     pub scroll_y: f32,
     /// Page background (used for the initial clear).
     pub background: rowser_parsing::cascade::Rgba,
+    /// Find-in-page match rectangles (document coordinates).
+    pub find_matches: Vec<crate::Rect>,
+    /// Index of the active match (painted more strongly).
+    pub active_match: Option<usize>,
 }
 
 impl Default for RenderOptions {
@@ -29,6 +33,8 @@ impl Default for RenderOptions {
             viewport_height: 800,
             scroll_y: 0.0,
             background: rowser_parsing::cascade::Rgba::new_opaque(255, 255, 255),
+            find_matches: Vec::new(),
+            active_match: None,
         }
     }
 }
@@ -66,6 +72,7 @@ impl Painter {
         pixmap.fill(to_skia_color(options.background));
         let scroll = (0.0f32, -options.scroll_y);
         self.paint(list, &mut pixmap, scroll, font_system);
+        self.paint_find_highlights(&mut pixmap, &options, scroll);
         self.frame_id += 1;
         Some(crate::Frame {
             width: pixmap.width(),
@@ -73,6 +80,33 @@ impl Painter {
             pixels: pixmap.take(),
             id: self.frame_id,
         })
+    }
+
+    /// Paints find-in-page match rectangles on top of the content.
+    fn paint_find_highlights(
+        &mut self,
+        pixmap: &mut Pixmap,
+        options: &RenderOptions,
+        scroll: (f32, f32),
+    ) {
+        if options.find_matches.is_empty() {
+            return;
+        }
+        let viewport = (pixmap.width() as f32, pixmap.height() as f32);
+        let normal = rowser_parsing::cascade::Rgba::new(255, 170, 0, 90);
+        let active = rowser_parsing::cascade::Rgba::new(255, 140, 0, 130);
+        for (index, rect) in options.find_matches.iter().enumerate() {
+            let color = if Some(index) == options.active_match {
+                active
+            } else {
+                normal
+            };
+            let rect = translate(rect, scroll).clipped(viewport);
+            if rect.w <= 0.0 || rect.h <= 0.0 {
+                continue;
+            }
+            fill_rect(pixmap, &rect, color);
+        }
     }
 
     fn paint(

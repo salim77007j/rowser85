@@ -79,6 +79,26 @@ pub enum Message {
     Suspend,
     /// Unfreeze the tab.
     Resume,
+    /// Navigate back in the session history.
+    GoBack,
+    /// Navigate forward in the session history.
+    GoForward,
+    /// Reload the current document.
+    Reload,
+    /// Cancel the navigation in flight.
+    Stop,
+    /// Evaluate JavaScript in the page (devtools console).
+    Eval(String),
+    /// Set the find-in-page query (empty clears highlighting).
+    Find(String),
+    /// Step the active find match forward (1) or backward (-1).
+    FindStep(i32),
+    /// Save the current DOM as HTML to a path.
+    SavePage(std::path::PathBuf),
+    /// Click at a document-space point (hit-test + link navigation or JS event).
+    ClickAt(f32, f32),
+    /// Query what is at a document-space point (hover/status bar).
+    HitTest(f32, f32),
     /// Terminate the page thread.
     Shutdown,
 }
@@ -184,6 +204,16 @@ struct Page {
     rendered_dom_version: u64,
     last_memory_report: std::time::Instant,
     navigating: bool,
+    /// Session history (visited URLs, oldest first).
+    history: Vec<String>,
+    /// Current position in the session history.
+    history_pos: usize,
+    /// Find-in-page match rectangles (document coordinates).
+    find_matches: Vec<rowser_rendering::Rect>,
+    /// Index of the active find match.
+    active_match: Option<usize>,
+    /// The current find query ("" = no search).
+    find_query: String,
 }
 
 impl Page {
@@ -214,6 +244,11 @@ impl Page {
             rendered_dom_version: 0,
             last_memory_report: std::time::Instant::now(),
             navigating: false,
+            history: Vec::new(),
+            history_pos: 0,
+            find_matches: Vec::new(),
+            active_match: None,
+            find_query: String::new(),
         }
     }
 
@@ -287,6 +322,16 @@ impl Page {
                 self.suspended = false;
                 self.dirty = true;
             }
+            Message::GoBack => self.go_history(-1),
+            Message::GoForward => self.go_history(1),
+            Message::Reload => self.reload(),
+            Message::Stop => self.stop_loading(),
+            Message::Eval(code) => self.eval_js(code),
+            Message::Find(query) => self.find_set(&query),
+            Message::FindStep(delta) => self.find_step(delta),
+            Message::SavePage(path) => self.save_page(path),
+            Message::ClickAt(x, y) => self.click_at(x, y),
+            Message::HitTest(x, y) => self.hit_test(x, y),
         }
         false
     }
@@ -324,19 +369,274 @@ impl Page {
     }
 
     fn navigate(&mut self, url: String) {
+        self.start_navigation(url, true);
+    }
+
+    /// Starts a navigation, optionally pushing it onto the session history.
+    fn start_navigation(&mut self, url: String, push_history: bool) {
         tracing::debug!(target: "rowser::engine", "tab {} navigating to {url}", self.state.tab);
         self.navigating = true;
         self.reset_page();
         self.url = url.clone();
+        if push_history && !url.is_empty() {
+            self.history.truncate(self.history_pos);
+            self.history.push(url.clone());
+            self.history_pos = self.history.len() - 1;
+        }
+        let (back, forward) = self.history_state();
         self.snapshot(|snapshot| {
             snapshot.url = url.clone();
             snapshot.loading = true;
+            snapshot.can_go_back = back;
+            snapshot.can_go_forward = forward;
         });
         self.pending.insert(url.clone(), SubresourceKind::Document);
         self.request_subresources(&[(url, SubresourceKind::Document)]);
     }
 
+    /// `(can_go_back, can_go_forward)` for the current history position.
+    fn history_state(&self) -> (bool, bool) {
+        (self.history_pos > 0, self.history_pos + 1 < self.history.len())
+    }
+
+    /// Moves in the session history by `delta` (−1 back, +1 forward).
+    fn go_history(&mut self, delta: i64) {
+        let target = self.history_pos as i64 + delta;
+        if target < 0 || target >= self.history.len() as i64 {
+            return;
+        }
+        self.history_pos = target as usize;
+        let url = self.history[target as usize].clone();
+        self.start_navigation(url, false);
+    }
+
+    /// Reloads the current document (history position unchanged).
+    fn reload(&mut self) {
+        if !self.url.is_empty() {
+            self.start_navigation(self.url.clone(), false);
+        }
+    }
+
+    /// Cancels the navigation in flight: pending subresources are dropped so
+    /// late responses no longer apply.
+    fn stop_loading(&mut self) {
+        self.navigating = false;
+        self.pending.clear();
+        self.snapshot(|snapshot| snapshot.loading = false);
+    }
+
+    /// Evaluates JavaScript in the page runtime and reports the result.
+    fn eval_js(&mut self, code: String) {
+        let (ok, result) = match &self.js {
+            Some(js) => match js.eval(&code, "devtools-console.js") {
+                Ok(value) => (true, value),
+                Err(err) => (false, err.to_string()),
+            },
+            None => (false, "no JavaScript runtime on this page".to_owned()),
+        };
+        let _ = self.state.event_tx.send(EngineEvent::JsResult {
+            tab: self.state.tab,
+            ok,
+            result,
+        });
+    }
+
+    /// Sets the find query, recomputes matches and repaints with highlights.
+    fn find_set(&mut self, query: &str) {
+        self.find_query = query.to_owned();
+        self.find_matches.clear();
+        self.active_match = None;
+        if !query.is_empty() {
+            if let Some(layout) = self.layout.clone() {
+                if let Some(dom) = self.dom.clone() {
+                    let dom = dom.borrow();
+                    let needle = query.to_lowercase();
+                    for run in &layout.text {
+                        let hay = dom
+                            .text_content(run.node)
+                            .to_lowercase();
+                        let mut start = 0;
+                        while let Some(found) = hay[start..].find(&needle) {
+                            let byte = start + found;
+                            start = byte + needle.len();
+                            if let Some(lr) = layout.rects.get(&run.node).copied() {
+                                let rect = rowser_rendering::Rect {
+                                    x: lr.x,
+                                    y: lr.y,
+                                    w: lr.w,
+                                    h: (lr.h / 8.0).max(18.0).min(lr.h),
+                                };
+                                let rect = rowser_rendering::Rect {
+                                    y: rect.y
+                                        + (byte as f32 / hay.len().max(1) as f32)
+                                            * lr.h.max(1.0),
+                                    ..rect
+                                };
+                                self.find_matches.push(rect);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        self.active_match = (!self.find_matches.is_empty()).then_some(0);
+        if self.active_match.is_some() {
+            self.scroll_to_match();
+        }
+        self.dirty = true;
+        self.repaint();
+        let _ = self.state.event_tx.send(EngineEvent::FindResult {
+            tab: self.state.tab,
+            matches: self.find_matches.len(),
+            active: self.active_match,
+        });
+    }
+
+    /// Steps the active find match and scrolls to it.
+    fn find_step(&mut self, delta: i32) {
+        if self.find_query.is_empty() || self.find_matches.is_empty() {
+            return;
+        }
+        let current = self.active_match.unwrap_or(0) as i64;
+        let next =
+            (current + delta as i64).rem_euclid(self.find_matches.len() as i64) as usize;
+        self.active_match = Some(next);
+        self.scroll_to_match();
+        self.dirty = true;
+        self.repaint();
+        let _ = self.state.event_tx.send(EngineEvent::FindResult {
+            tab: self.state.tab,
+            matches: self.find_matches.len(),
+            active: self.active_match,
+        });
+    }
+
+    /// Scrolls so the active match is comfortably in view.
+    fn scroll_to_match(&mut self) {
+        if let (Some(active), Some(layout)) = (self.active_match, self.layout.as_ref()) {
+            if let Some(rect) = self.find_matches.get(active) {
+                let max =
+                    (layout.content_size.1 - self.viewport.height).max(0.0);
+                self.scroll_y = (rect.y - self.viewport.height / 3.0).clamp(0.0, max);
+            }
+        }
+    }
+
+    /// Saves the current DOM as an HTML file.
+    fn save_page(&mut self, path: std::path::PathBuf) {
+        let html = self
+            .dom
+            .as_ref()
+            .map(|dom| serialize_dom(&dom.borrow()))
+            .unwrap_or_default();
+        let saved = std::fs::write(&path, html).is_ok();
+        if saved {
+            let _ = self.state.event_tx.send(EngineEvent::PageSaved {
+                tab: self.state.tab,
+                path: path.display().to_string(),
+            });
+        } else {
+            let _ = self.state.event_tx.send(EngineEvent::ConsoleMessage {
+                tab: self.state.tab,
+                level: "error".to_owned(),
+                text: format!("save page: cannot write {}", path.display()),
+            });
+        }
+    }
+
+    /// Clicks at a document-space point: follows links, otherwise dispatches
+    /// a DOM click event on the hit element.
+    fn click_at(&mut self, x: f32, y: f32) {
+        let node = self.hit_node(x, y);
+        let Some(node) = node else { return };
+        if let Some(dom) = self.dom.as_ref() {
+            let dom = dom.borrow();
+            if let Some((href, _)) = ancestor_link(&dom, node) {
+                let href = self.resolve_url(&href);
+                drop(dom);
+                self.start_navigation(href, true);
+                return;
+            }
+        }
+        if let Some(js) = &self.js {
+            js.dispatch(rowser_js::EngineEvent::DomEvent {
+                node: node as u64,
+                event_type: "click".to_owned(),
+            });
+            self.mark_if_dirty();
+        }
+    }
+
+    /// Reports what is under a document-space point (hover/status bar).
+    fn hit_test(&mut self, x: f32, y: f32) {
+        let node = self.hit_node(x, y);
+        let mut tag = String::new();
+        let mut href = None;
+        let mut text = None;
+        let mut node_id = 0u64;
+        if let Some(node) = node {
+            if let Some(dom) = self.dom.as_ref() {
+                let dom = dom.borrow();
+                if let Some(element) = dom.element(node) {
+                    node_id = node as u64;
+                    tag = element.local_name().to_string();
+                    if let Some((link_href, link_text)) = ancestor_link(&dom, node) {
+                        href = Some(link_href);
+                        text = Some(link_text);
+                    }
+                }
+            }
+        }
+        let _ = self.state.event_tx.send(EngineEvent::HitTestResult {
+            tab: self.state.tab,
+            node: node_id,
+            tag,
+            href,
+            text,
+        });
+    }
+
+    /// Deepest element whose layout rect contains the point.
+    fn hit_node(&self, x: f32, y: f32) -> Option<rowser_dom::NodeId> {
+        let layout = self.layout.as_ref()?;
+        let dom = self.dom.as_ref()?;
+        let dom = dom.borrow();
+        let mut best: Option<(rowser_dom::NodeId, f32, usize)> = None;
+        for (node, rect) in &layout.rects {
+            let contains = x >= rect.x
+                && x <= rect.x + rect.w
+                && y >= rect.y
+                && y <= rect.y + rect.h;
+            if !contains {
+                continue;
+            }
+            if dom.element(*node).is_none() {
+                continue;
+            }
+            // "Deepest": prefer the smallest rect, tie-broken by tree depth.
+            let area = rect.w * rect.h;
+            let mut depth = 0usize;
+            let mut walk = dom.parent(*node);
+            while let Some(up) = walk {
+                depth += 1;
+                walk = dom.parent(up);
+            }
+            match best {
+                Some((_, best_area, best_depth)) => {
+                    if area < best_area || (area == best_area && depth > best_depth) {
+                        best = Some((*node, area, depth));
+                    }
+                }
+                None => best = Some((*node, area, depth)),
+            }
+        }
+        best.map(|(node, _, _)| node)
+    }
+
     fn reset_page(&mut self) {
+        self.find_matches.clear();
+        self.active_match = None;
+        self.find_query.clear();
         self.js = None;
         self.workers.clear();
         self.dom = None;
@@ -503,6 +803,9 @@ impl Page {
 
     fn subresources_complete(&mut self) {
         if self.dom.is_none() {
+            // Internal (rowser://) or unreachable pages: end the load state.
+            self.navigating = false;
+            self.snapshot(|snapshot| snapshot.loading = false);
             return;
         }
         tracing::debug!(target: "rowser::engine", "tab {} subresources complete → render", self.state.tab);
@@ -573,6 +876,8 @@ impl Page {
             viewport_height: self.viewport.height as u32,
             scroll_y: self.scroll_y,
             background,
+            find_matches: self.find_matches.clone(),
+            active_match: self.active_match,
         };
         if let Some(frame) =
             self.painter
@@ -724,6 +1029,72 @@ impl Page {
             .engine_tx
             .send(Cmd::Internal(Internal::PageExited(self.state.tab)));
     }
+}
+
+/// Walks up from `node` looking for the nearest anchor with an href;
+/// returns `(href, anchor text)`.
+fn ancestor_link(dom: &Dom, node: rowser_dom::NodeId) -> Option<(String, String)> {
+    let mut current = Some(node);
+    while let Some(id) = current {
+        if let Some(element) = dom.element(id) {
+            if &*element.name.local == "a" {
+                if let Some(href) = dom.get_attr(id, "href") {
+                    let text = dom.text_content(id);
+                    return Some((href.to_owned(), text));
+                }
+            }
+        }
+        current = dom.parent(id);
+    }
+    None
+}
+
+/// Serializes the DOM back to HTML5.
+fn serialize_dom(dom: &Dom) -> String {
+    fn escape(text: &str) -> String {
+        text.replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+    }
+    fn walk(dom: &Dom, id: rowser_dom::NodeId, out: &mut String) {
+        match dom.kind(id) {
+            rowser_dom::NodeKind::Text(text) => out.push_str(&escape(text)),
+            rowser_dom::NodeKind::Element(_) => {
+                let Some(element) = dom.element(id) else { return };
+                let tag = element.local_name().to_string();
+                out.push('<');
+                out.push_str(&tag);
+                for attr in &element.attrs {
+                    out.push(' ');
+                    out.push_str(&attr.name);
+                    out.push_str("=\"");
+                    out.push_str(&escape(&attr.value));
+                    out.push('\"');
+                }
+                out.push('>');
+                let mut child = dom.first_child(id);
+                while let Some(child_id) = child {
+                    walk(dom, child_id, out);
+                    child = dom.next_sibling(child_id);
+                }
+                out.push_str("</");
+                out.push_str(&tag);
+                out.push('>');
+            }
+            rowser_dom::NodeKind::Document => {
+                let mut child = dom.first_child(id);
+                while let Some(child_id) = child {
+                    walk(dom, child_id, out);
+                    child = dom.next_sibling(child_id);
+                }
+            }
+            rowser_dom::NodeKind::Doctype { .. } => out.push_str("<!DOCTYPE html>"),
+            rowser_dom::NodeKind::Comment(_) => {}
+        }
+    }
+    let mut html = String::from("<!DOCTYPE html>\n");
+    walk(dom, dom.document(), &mut html);
+    html
 }
 
 fn page_background(styles: &StyleMap, layout: &LayoutResult) -> rowser_parsing::cascade::Rgba {

@@ -100,6 +100,44 @@ pub enum EngineEvent {
         /// Reason.
         reason: String,
     },
+    /// Result of a devtools-console JavaScript evaluation.
+    JsResult {
+        /// Tab id.
+        tab: TabId,
+        /// Whether evaluation succeeded.
+        ok: bool,
+        /// The serialized result (or error text).
+        result: String,
+    },
+    /// Find-in-page match update.
+    FindResult {
+        /// Tab id.
+        tab: TabId,
+        /// Total matches for the query.
+        matches: usize,
+        /// 0-based index of the active match, if any.
+        active: Option<usize>,
+    },
+    /// The page DOM was saved to disk.
+    PageSaved {
+        /// Tab id.
+        tab: TabId,
+        /// File path written.
+        path: String,
+    },
+    /// What is under a document-space point (hover / status bar).
+    HitTestResult {
+        /// Tab id.
+        tab: TabId,
+        /// DOM node id (0 when nothing was hit).
+        node: u64,
+        /// Hit element tag name ("" when nothing was hit).
+        tag: String,
+        /// Href of the enclosing anchor, if any.
+        href: Option<String>,
+        /// Anchor text, when inside a link.
+        text: Option<String>,
+    },
     /// The tab was suspended (frozen, frame freed).
     TabSuspended(TabId),
     /// The tab resumed from suspension.
@@ -126,6 +164,10 @@ pub struct TabSnapshot {
     pub memory_bytes: u64,
     /// True while a navigation is in flight.
     pub loading: bool,
+    /// True when session history has a back entry.
+    pub can_go_back: bool,
+    /// True when session history has a forward entry.
+    pub can_go_forward: bool,
 }
 
 /// Commands accepted by the engine.
@@ -147,6 +189,26 @@ pub enum Command {
     UiEvent(TabId, u64, String),
     /// Update privacy settings (applies to future requests).
     SetPrivacy(PrivacySettings),
+    /// Navigate back in the session history.
+    GoBack(TabId),
+    /// Navigate forward in the session history.
+    GoForward(TabId),
+    /// Reload the current document.
+    Reload(TabId),
+    /// Cancel the navigation in flight.
+    Stop(TabId),
+    /// Evaluate JavaScript in the page (devtools console).
+    EvalJs(TabId, String),
+    /// Set the find-in-page query (empty clears highlights).
+    Find(TabId, String),
+    /// Step the active find match (1 forward, −1 backward).
+    FindStep(TabId, i32),
+    /// Save the current DOM as HTML to a path.
+    SavePage(TabId, std::path::PathBuf),
+    /// Click at a document-space point (link navigation or JS event).
+    ClickAt(TabId, f32, f32),
+    /// Query what is at a document-space point (hover).
+    HitTest(TabId, f32, f32),
     /// Shut the engine down.
     Shutdown,
 }
@@ -614,6 +676,56 @@ fn handle_user(state: &EngineLoop, command: Command) -> bool {
         }
         Command::SetPrivacy(privacy) => {
             *state.network.settings.write().unwrap() = privacy;
+        }
+        Command::GoBack(tab) => {
+            if let Some(handle) = state.tabs.lock().unwrap().get(&tab) {
+                let _ = handle.tx.send(page::Message::GoBack);
+            }
+        }
+        Command::GoForward(tab) => {
+            if let Some(handle) = state.tabs.lock().unwrap().get(&tab) {
+                let _ = handle.tx.send(page::Message::GoForward);
+            }
+        }
+        Command::Reload(tab) => {
+            if let Some(handle) = state.tabs.lock().unwrap().get(&tab) {
+                let _ = handle.tx.send(page::Message::Reload);
+            }
+        }
+        Command::Stop(tab) => {
+            if let Some(handle) = state.tabs.lock().unwrap().get(&tab) {
+                let _ = handle.tx.send(page::Message::Stop);
+            }
+        }
+        Command::EvalJs(tab, code) => {
+            if let Some(handle) = state.tabs.lock().unwrap().get(&tab) {
+                let _ = handle.tx.send(page::Message::Eval(code));
+            }
+        }
+        Command::Find(tab, query) => {
+            if let Some(handle) = state.tabs.lock().unwrap().get(&tab) {
+                let _ = handle.tx.send(page::Message::Find(query));
+            }
+        }
+        Command::FindStep(tab, delta) => {
+            if let Some(handle) = state.tabs.lock().unwrap().get(&tab) {
+                let _ = handle.tx.send(page::Message::FindStep(delta));
+            }
+        }
+        Command::SavePage(tab, path) => {
+            if let Some(handle) = state.tabs.lock().unwrap().get(&tab) {
+                let _ = handle.tx.send(page::Message::SavePage(path));
+            }
+        }
+        Command::ClickAt(tab, x, y) => {
+            if let Some(handle) = state.tabs.lock().unwrap().get(&tab) {
+                let _ = handle.tx.send(page::Message::ClickAt(x, y));
+            }
+        }
+        Command::HitTest(tab, x, y) => {
+            if let Some(handle) = state.tabs.lock().unwrap().get(&tab) {
+                let _ = handle.tx.send(page::Message::HitTest(x, y));
+            }
         }
     }
     false

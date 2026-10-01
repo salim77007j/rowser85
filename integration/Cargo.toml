@@ -1,0 +1,23 @@
+[package]
+name = "rowser-shell"
+description = "Integration layer gluing the rowser85 engine to the UI: state, persistence, downloads, print."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+rowser-api = { path = "../api" }
+rowser-engine = { path = "../engine" }
+rowser-networking = { path = "../networking" }
+rowser-privacy = { path = "../privacy" }
+rowser-storage = { path = "../storage" }
+anyhow = "1.0.104"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1.53.1", default-features = false, features = ["rt-multi-thread", "time", "macros"] }
+flate2 = "1"
+dirs = "5"
+url = "2"
+percent-encoding = "2"

@@ -115,6 +115,59 @@ impl BrowserApi {
         self.engine.send(Command::Scroll(tab, y));
     }
 
+    /// Navigates back in the session history.
+    pub fn go_back(&self, tab: TabId) {
+        self.engine.send(Command::GoBack(tab));
+    }
+
+    /// Navigates forward in the session history.
+    pub fn go_forward(&self, tab: TabId) {
+        self.engine.send(Command::GoForward(tab));
+    }
+
+    /// Reloads the current document.
+    pub fn reload(&self, tab: TabId) {
+        self.engine.send(Command::Reload(tab));
+    }
+
+    /// Cancels the navigation in flight.
+    pub fn stop(&self, tab: TabId) {
+        self.engine.send(Command::Stop(tab));
+    }
+
+    /// Evaluates JavaScript in a page (devtools console); the result arrives
+    /// as an `EngineEvent::JsResult`.
+    pub fn eval_js(&self, tab: TabId, code: impl Into<String>) {
+        self.engine.send(Command::EvalJs(tab, code.into()));
+    }
+
+    /// Sets the find-in-page query (empty clears highlights); results arrive
+    /// as `EngineEvent::FindResult`.
+    pub fn find_in_page(&self, tab: TabId, query: impl Into<String>) {
+        self.engine.send(Command::Find(tab, query.into()));
+    }
+
+    /// Steps the active find match (1 forward, −1 backward).
+    pub fn find_step(&self, tab: TabId, delta: i32) {
+        self.engine.send(Command::FindStep(tab, delta));
+    }
+
+    /// Saves the current DOM as an HTML file.
+    pub fn save_page(&self, tab: TabId, path: impl Into<std::path::PathBuf>) {
+        self.engine.send(Command::SavePage(tab, path.into()));
+    }
+
+    /// Clicks at a document-space point (follows links, dispatches events).
+    pub fn click_at(&self, tab: TabId, x: f32, y: f32) {
+        self.engine.send(Command::ClickAt(tab, x, y));
+    }
+
+    /// Queries what is at a document-space point; the result arrives as an
+    /// `EngineEvent::HitTestResult`.
+    pub fn hit_test(&self, tab: TabId, x: f32, y: f32) {
+        self.engine.send(Command::HitTest(tab, x, y));
+    }
+
     /// Dispatches a click event to a DOM node handle (from hit-testing).
     pub fn click(&self, tab: TabId, node: u64) {
         self.engine

@@ -13,6 +13,8 @@ members = [
     "api",
     "tests",
     "benchmarks",
+    "integration",
+    "ui",
 ]
 
 [workspace.package]
