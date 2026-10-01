@@ -395,9 +395,7 @@ impl Bookmarks {
         let mut hits: Vec<&Bookmark> = self
             .items
             .iter()
-            .filter(|b| {
-                b.title.to_lowercase().contains(&q) || b.url.to_lowercase().contains(&q)
-            })
+            .filter(|b| b.title.to_lowercase().contains(&q) || b.url.to_lowercase().contains(&q))
             .collect();
         hits.sort_by_key(|b| b.id);
         hits.truncate(limit);
@@ -580,12 +578,23 @@ impl History {
         let title = title.into();
         if let Some(first) = self.entries.first_mut() {
             if first.url == url {
-                first.title = if title.is_empty() { first.title.clone() } else { title };
+                first.title = if title.is_empty() {
+                    first.title.clone()
+                } else {
+                    title
+                };
                 first.visited = now_ms();
                 return;
             }
         }
-        self.entries.insert(0, HistoryEntry { url, title, visited: now_ms() });
+        self.entries.insert(
+            0,
+            HistoryEntry {
+                url,
+                title,
+                visited: now_ms(),
+            },
+        );
         if self.entries.len() > 10_000 {
             self.entries.truncate(10_000);
         }
@@ -600,9 +609,7 @@ impl History {
         let mut hits: Vec<&HistoryEntry> = self
             .entries
             .iter()
-            .filter(|e| {
-                e.url.to_lowercase().contains(&q) || e.title.to_lowercase().contains(&q)
-            })
+            .filter(|e| e.url.to_lowercase().contains(&q) || e.title.to_lowercase().contains(&q))
             .collect();
         hits.truncate(limit);
         hits

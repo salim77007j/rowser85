@@ -28,12 +28,8 @@ struct Probe {
 impl eframe::App for Probe {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         egui::CentralPanel::default().show(ctx, |ui| {
-            let new: Vec<String> = ctx.input(|i| {
-                i.events
-                    .iter()
-                    .map(|e| format!("{e:?}"))
-                    .collect()
-            });
+            let new: Vec<String> =
+                ctx.input(|i| i.events.iter().map(|e| format!("{e:?}")).collect());
             for e in new {
                 self.events.insert(0, e);
             }
@@ -46,7 +42,6 @@ impl eframe::App for Probe {
             for e in &self.events {
                 ui.monospace(e);
             }
-
         });
         ctx.request_repaint_after(std::time::Duration::from_millis(100));
     }

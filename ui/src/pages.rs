@@ -1,7 +1,9 @@
 //! Internal browser pages (`rowser://…`), rendered natively in egui and
 //! fully wired to the engine + shell.
 
-use egui::{Align2, Color32, CornerRadius, Id, Rect, RichText, ScrollArea, Sense, Stroke, Ui, Vec2};
+use egui::{
+    Align2, Color32, CornerRadius, Id, Rect, RichText, ScrollArea, Sense, Stroke, Ui, Vec2,
+};
 
 use crate::app::BrowserApp;
 use crate::icons::Icon;
@@ -89,7 +91,11 @@ pub fn blank_or_error(app: &mut BrowserApp, ui: &mut Ui, url: &str, loading: boo
                 let p = ui.painter_at(icon_rect);
                 Icon::Warning.paint(&p, icon_rect, pal.warning);
                 ui.add_space(10.0);
-                ui.label(RichText::new("This site can't be reached").strong().size(19.0));
+                ui.label(
+                    RichText::new("This site can't be reached")
+                        .strong()
+                        .size(19.0),
+                );
                 ui.add_space(4.0);
                 ui.label(
                     RichText::new(ellipsize_url(url, 64))
@@ -181,8 +187,8 @@ fn new_tab_page(app: &mut BrowserApp, ui: &mut Ui) {
                             .desired_width(width - 80.0)
                             .font(egui::FontId::proportional(15.5)),
                     );
-                    let enter = response.lost_focus()
-                        && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    let enter =
+                        response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                     if enter && !search.trim().is_empty() {
                         app.navigate_input(&search.clone());
                     }
@@ -199,10 +205,7 @@ fn new_tab_page(app: &mut BrowserApp, ui: &mut Ui) {
             if sites.is_empty() {
                 default_tiles()
             } else {
-                sites
-                    .into_iter()
-                    .map(|s| (s.label, s.url))
-                    .collect()
+                sites.into_iter().map(|s| (s.label, s.url)).collect()
             }
         };
         let tile_w = 108.0;
@@ -221,10 +224,19 @@ fn new_tab_page(app: &mut BrowserApp, ui: &mut Ui) {
                         painter.rect_filled(
                             tile,
                             CornerRadius::same(10),
-                            if hovered { pal.field_focus_bg } else { pal.field_bg },
+                            if hovered {
+                                pal.field_focus_bg
+                            } else {
+                                pal.field_bg
+                            },
                         );
                         if hovered {
-                            painter.rect_stroke(tile, CornerRadius::same(10), Stroke::new(1.2_f32, pal.border), egui::epaint::StrokeKind::Inside);
+                            painter.rect_stroke(
+                                tile,
+                                CornerRadius::same(10),
+                                Stroke::new(1.2_f32, pal.border),
+                                egui::epaint::StrokeKind::Inside,
+                            );
                         }
                         let avatar = Rect::from_center_size(
                             egui::Pos2::new(tile.center().x, tile.top() + 32.0),
@@ -363,8 +375,9 @@ fn settings_appearance(app: &mut BrowserApp, ui: &mut Ui, pal: &Theme) {
     });
     section(ui, "Accent color");
     ui.horizontal(|ui| {
-        for hex in ["1A73E8", "8430CE", "1E8E3E", "D93025", "E8710A", "00897B", "5F6368", "C5221F"]
-        {
+        for hex in [
+            "1A73E8", "8430CE", "1E8E3E", "D93025", "E8710A", "00897B", "5F6368", "C5221F",
+        ] {
             let color = crate::theme::parse_hex(hex).unwrap();
             let (rect, response) = ui.allocate_exact_size(Vec2::splat(26.0), Sense::click());
             let painter = ui.painter_at(rect);
@@ -381,7 +394,9 @@ fn settings_appearance(app: &mut BrowserApp, ui: &mut Ui, pal: &Theme) {
         ui.label("Custom");
         let mut hex = app.shell.store().settings.accent.clone();
         let response = ui.add(
-            egui::TextEdit::singleline(&mut hex).desired_width(90.0).hint_text("RRGGBB"),
+            egui::TextEdit::singleline(&mut hex)
+                .desired_width(90.0)
+                .hint_text("RRGGBB"),
         );
         if response.changed() {
             app.shell.store_mut().settings.accent = hex;
@@ -446,7 +461,9 @@ fn settings_startup(app: &mut BrowserApp, ui: &mut Ui, _pal: &Theme) {
     section(ui, "Home page");
     let mut home = app.shell.store().settings.homepage.clone();
     let response = ui.add(
-        egui::TextEdit::singleline(&mut home).desired_width(400.0).hint_text("rowser://newtab"),
+        egui::TextEdit::singleline(&mut home)
+            .desired_width(400.0)
+            .hint_text("rowser://newtab"),
     );
     if response.changed() {
         app.shell.store_mut().settings.homepage = home;
@@ -477,13 +494,34 @@ fn settings_privacy(app: &mut BrowserApp, ui: &mut Ui, pal: &Theme) {
         let _ = ui;
     };
     let toggles: Vec<(&str, &str)> = vec![
-        ("Block ads & trackers", "Network-layer blocking (Brave-derived rules)."),
-        ("HTTPS upgrade", "http:// requests upgrade to https:// where possible."),
-        ("Block third-party cookies", "Unpartitioned cross-site cookies rejected (CHIPS stays)."),
-        ("Anti-fingerprinting", "Per-tab consistent canvas/audio/navigator spoofing."),
-        ("WebRTC protection", "WebRTC candidate filtering (IP leak protection)."),
-        ("Safe browsing", "Local hash-prefix checks; no URLs leave the device."),
-        ("Telemetry opt-in", "The engine ships zero telemetry; this flag exists for opt-in builds."),
+        (
+            "Block ads & trackers",
+            "Network-layer blocking (Brave-derived rules).",
+        ),
+        (
+            "HTTPS upgrade",
+            "http:// requests upgrade to https:// where possible.",
+        ),
+        (
+            "Block third-party cookies",
+            "Unpartitioned cross-site cookies rejected (CHIPS stays).",
+        ),
+        (
+            "Anti-fingerprinting",
+            "Per-tab consistent canvas/audio/navigator spoofing.",
+        ),
+        (
+            "WebRTC protection",
+            "WebRTC candidate filtering (IP leak protection).",
+        ),
+        (
+            "Safe browsing",
+            "Local hash-prefix checks; no URLs leave the device.",
+        ),
+        (
+            "Telemetry opt-in",
+            "The engine ships zero telemetry; this flag exists for opt-in builds.",
+        ),
     ];
     for (label, help) in toggles {
         let mut value = flag_of(privacy, label);
@@ -552,16 +590,19 @@ fn settings_permissions(app: &mut BrowserApp, ui: &mut Ui, pal: &Theme) {
     ui.horizontal(|ui| {
         let mut site = app.chrome.perm_site.clone();
         let response = ui.add(
-            egui::TextEdit::singleline(&mut site).desired_width(240.0).hint_text("example.com"),
+            egui::TextEdit::singleline(&mut site)
+                .desired_width(240.0)
+                .hint_text("example.com"),
         );
         if response.changed() {
             app.chrome.perm_site = site;
         }
         if ui.button("Add").clicked() && !app.chrome.perm_site.trim().is_empty() {
-            app.shell
-                .store_mut()
-                .permissions
-                .set(app.chrome.perm_site.trim(), "location", PermissionState::Ask);
+            app.shell.store_mut().permissions.set(
+                app.chrome.perm_site.trim(),
+                "location",
+                PermissionState::Ask,
+            );
             save_permissions(app);
             app.chrome.perm_site.clear();
         }
@@ -590,10 +631,7 @@ fn permission_site_row(
                         .clicked()
                     {
                         let dir = app.shell.store().dir.clone();
-                        app.shell
-                            .store_mut()
-                            .permissions
-                            .set(&site, kind, next);
+                        app.shell.store_mut().permissions.set(&site, kind, next);
                         app.shell.store().permissions.save(&dir);
                     }
                     ui.end_row();
@@ -907,7 +945,10 @@ fn bookmarks_page(app: &mut BrowserApp, ui: &mut Ui) {
                 }
                 for folder in folders {
                     if ui
-                        .selectable_label(app.chrome.bookmarks_folder == folder, format!("📁 {folder}"))
+                        .selectable_label(
+                            app.chrome.bookmarks_folder == folder,
+                            format!("📁 {folder}"),
+                        )
                         .clicked()
                     {
                         app.chrome.bookmarks_folder = folder;
@@ -933,7 +974,14 @@ fn bookmarks_page(app: &mut BrowserApp, ui: &mut Ui) {
                             || b.title.to_lowercase().contains(&search.to_lowercase())
                             || b.url.to_lowercase().contains(&search.to_lowercase()))
                 })
-                .map(|b| (b.id, b.url.clone(), b.display_title().to_owned(), b.folder.clone()))
+                .map(|b| {
+                    (
+                        b.id,
+                        b.url.clone(),
+                        b.display_title().to_owned(),
+                        b.folder.clone(),
+                    )
+                })
                 .collect();
             for (id, url, title, folder) in rows {
                 let url = url.clone();
@@ -974,8 +1022,10 @@ fn bookmarks_page(app: &mut BrowserApp, ui: &mut Ui) {
             }
             if app.shell.store().bookmarks.items.is_empty() {
                 ui.label(
-                    RichText::new("No bookmarks yet — press Ctrl+D on a page, or the star in the toolbar.")
-                        .color(pal.text_dim),
+                    RichText::new(
+                        "No bookmarks yet — press Ctrl+D on a page, or the star in the toolbar.",
+                    )
+                    .color(pal.text_dim),
                 );
             }
         });
@@ -985,7 +1035,12 @@ fn bookmarks_page(app: &mut BrowserApp, ui: &mut Ui) {
         app.navigate_url(url);
     }
     if let Some((id, url, title, folder)) = edit {
-        app.bookmark_edit = Some(crate::app::BookmarkEdit { id, url, title, folder });
+        app.bookmark_edit = Some(crate::app::BookmarkEdit {
+            id,
+            url,
+            title,
+            folder,
+        });
     }
     if let Some(id) = remove {
         let dir = app.shell.store().dir.clone();
@@ -1111,8 +1166,10 @@ fn downloads_page(app: &mut BrowserApp, ui: &mut Ui) {
             });
             // Progress bar row.
             if matches!(phase, DownloadPhase::Writing | DownloadPhase::Paused) {
-                let (rect, _) = ui
-                    .allocate_exact_size(Vec2::new(ui.available_width() - 60.0, 8.0), Sense::hover());
+                let (rect, _) = ui.allocate_exact_size(
+                    Vec2::new(ui.available_width() - 60.0, 8.0),
+                    Sense::hover(),
+                );
                 let painter = ui.painter_at(rect);
                 painter.rect_filled(rect, CornerRadius::same(4), pal.border);
                 if let Some(p) = progress {
@@ -1145,7 +1202,9 @@ fn downloads_page(app: &mut BrowserApp, ui: &mut Ui) {
 }
 
 fn open_containing_folder(items: &[std::sync::Arc<rowser_shell::DownloadItem>], id: u64) {
-    let Some(item) = items.iter().find(|i| i.id == id) else { return };
+    let Some(item) = items.iter().find(|i| i.id == id) else {
+        return;
+    };
     let dir = item.path.parent().map(|p| p.to_path_buf());
     let Some(dir) = dir else { return };
     #[cfg(unix)]
@@ -1252,14 +1311,7 @@ fn privacy_page(app: &mut BrowserApp, ui: &mut Ui) {
     });
 }
 
-fn stat_card(
-    ui: &mut Ui,
-    title: &str,
-    value: &str,
-    icon: Icon,
-    color: Color32,
-    pal: &Theme,
-) {
+fn stat_card(ui: &mut Ui, title: &str, value: &str, icon: Icon, color: Color32, pal: &Theme) {
     let frame = egui::Frame::default()
         .fill(pal.field_bg)
         .corner_radius(10)
@@ -1271,12 +1323,7 @@ fn stat_card(
             let (icon_rect, _) = ui.allocate_exact_size(Vec2::splat(22.0), Sense::hover());
             let painter = ui.painter_at(icon_rect);
             icon.paint(&painter, icon_rect, color);
-            ui.label(
-                RichText::new(value)
-                    .strong()
-                    .size(24.0)
-                    .color(color),
-            );
+            ui.label(RichText::new(value).strong().size(24.0).color(color));
         });
         ui.label(RichText::new(title).small().color(pal.text_dim));
     });

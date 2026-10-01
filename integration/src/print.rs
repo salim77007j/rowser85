@@ -76,14 +76,17 @@ pub fn write_pdf(path: &Path, pages: &[PrintPage]) -> anyhow::Result<()> {
     for (i, page) in pages.iter().enumerate() {
         let image_num = 3 + i * 3 + 1;
         let content_num = 3 + i * 3 + 2;
-        objects.push(format!(
-            "<</Type/Page/Parent 2 0 R/MediaBox[0 0 {A4_PT_W} {A4_PT_H}]\
+        objects.push(
+            format!(
+                "<</Type/Page/Parent 2 0 R/MediaBox[0 0 {A4_PT_W} {A4_PT_H}]\
              /Resources<</XObject<</Im{i} {image_num} 0 R>>>>/Contents {content_num} 0 R>>"
-        )
-        .into_bytes());
+            )
+            .into_bytes(),
+        );
 
         let mut zrgb = Vec::with_capacity(page.rgb.len());
-        let mut encoder = flate2::write::ZlibEncoder::new(&mut zrgb, flate2::Compression::default());
+        let mut encoder =
+            flate2::write::ZlibEncoder::new(&mut zrgb, flate2::Compression::default());
         encoder.write_all(&page.rgb)?;
         encoder.finish()?;
         let mut stream = format!(
@@ -98,9 +101,7 @@ pub fn write_pdf(path: &Path, pages: &[PrintPage]) -> anyhow::Result<()> {
         stream.extend_from_slice(b"\nendstream");
         objects.push(stream);
 
-        objects.push(
-            format!("q {A4_PT_W} 0 0 {A4_PT_H} 0 0 cm /Im{i} Do Q").into_bytes()
-        );
+        objects.push(format!("q {A4_PT_W} 0 0 {A4_PT_H} 0 0 cm /Im{i} Do Q").into_bytes());
     }
 
     let mut pdf = Vec::new();

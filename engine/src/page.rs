@@ -396,7 +396,10 @@ impl Page {
 
     /// `(can_go_back, can_go_forward)` for the current history position.
     fn history_state(&self) -> (bool, bool) {
-        (self.history_pos > 0, self.history_pos + 1 < self.history.len())
+        (
+            self.history_pos > 0,
+            self.history_pos + 1 < self.history.len(),
+        )
     }
 
     /// Moves in the session history by `delta` (−1 back, +1 forward).
@@ -452,9 +455,7 @@ impl Page {
                     let dom = dom.borrow();
                     let needle = query.to_lowercase();
                     for run in &layout.text {
-                        let hay = dom
-                            .text_content(run.node)
-                            .to_lowercase();
+                        let hay = dom.text_content(run.node).to_lowercase();
                         let mut start = 0;
                         while let Some(found) = hay[start..].find(&needle) {
                             let byte = start + found;
@@ -468,8 +469,7 @@ impl Page {
                                 };
                                 let rect = rowser_rendering::Rect {
                                     y: rect.y
-                                        + (byte as f32 / hay.len().max(1) as f32)
-                                            * lr.h.max(1.0),
+                                        + (byte as f32 / hay.len().max(1) as f32) * lr.h.max(1.0),
                                     ..rect
                                 };
                                 self.find_matches.push(rect);
@@ -498,8 +498,7 @@ impl Page {
             return;
         }
         let current = self.active_match.unwrap_or(0) as i64;
-        let next =
-            (current + delta as i64).rem_euclid(self.find_matches.len() as i64) as usize;
+        let next = (current + delta as i64).rem_euclid(self.find_matches.len() as i64) as usize;
         self.active_match = Some(next);
         self.scroll_to_match();
         self.dirty = true;
@@ -515,8 +514,7 @@ impl Page {
     fn scroll_to_match(&mut self) {
         if let (Some(active), Some(layout)) = (self.active_match, self.layout.as_ref()) {
             if let Some(rect) = self.find_matches.get(active) {
-                let max =
-                    (layout.content_size.1 - self.viewport.height).max(0.0);
+                let max = (layout.content_size.1 - self.viewport.height).max(0.0);
                 self.scroll_y = (rect.y - self.viewport.height / 3.0).clamp(0.0, max);
             }
         }
@@ -603,10 +601,8 @@ impl Page {
         let dom = dom.borrow();
         let mut best: Option<(rowser_dom::NodeId, f32, usize)> = None;
         for (node, rect) in &layout.rects {
-            let contains = x >= rect.x
-                && x <= rect.x + rect.w
-                && y >= rect.y
-                && y <= rect.y + rect.h;
+            let contains =
+                x >= rect.x && x <= rect.x + rect.w && y >= rect.y && y <= rect.y + rect.h;
             if !contains {
                 continue;
             }
@@ -1060,7 +1056,9 @@ fn serialize_dom(dom: &Dom) -> String {
         match dom.kind(id) {
             rowser_dom::NodeKind::Text(text) => out.push_str(&escape(text)),
             rowser_dom::NodeKind::Element(_) => {
-                let Some(element) = dom.element(id) else { return };
+                let Some(element) = dom.element(id) else {
+                    return;
+                };
                 let tag = element.local_name().to_string();
                 out.push('<');
                 out.push_str(&tag);

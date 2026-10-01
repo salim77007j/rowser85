@@ -135,16 +135,14 @@ impl Chrome {
                         Pos2::new(cursor + 50.0, strip.top()),
                         strip.right_bottom(),
                     );
-                    let empty_response =
-                        ui.interact(empty, Id::new("strip-empty"), Sense::click());
+                    let empty_response = ui.interact(empty, Id::new("strip-empty"), Sense::click());
                     if empty_response.double_clicked() {
                         app.new_tab(None);
                     }
                 }
 
                 // Drag reorder: bubble the dragged tab toward the pointer.
-                if let (Some(drag), Some(pointer)) =
-                    (app.drag, ui.input(|i| i.pointer.hover_pos()))
+                if let (Some(drag), Some(pointer)) = (app.drag, ui.input(|i| i.pointer.hover_pos()))
                 {
                     if ui.input(|i| i.pointer.primary_down()) {
                         let mut target = drag;
@@ -177,7 +175,14 @@ impl Chrome {
             });
     }
 
-    fn draw_tab(&mut self, app: &mut BrowserApp, ui: &mut Ui, pal: &Theme, index: usize, rect: Rect) {
+    fn draw_tab(
+        &mut self,
+        app: &mut BrowserApp,
+        ui: &mut Ui,
+        pal: &Theme,
+        index: usize,
+        rect: Rect,
+    ) {
         let id = Id::new(("tab", app.tabs[index].id));
         let response = ui.interact(rect, id, Sense::click_and_drag());
         let is_active = app.active == index;
@@ -290,8 +295,11 @@ impl Chrome {
                 Pos2::new(rect.right() - 13.0, rect.center().y),
                 Vec2::splat(20.0),
             );
-            let close_response =
-                ui.interact(close_rect, Id::new(("tab-close", app.tabs[index].id)), Sense::click());
+            let close_response = ui.interact(
+                close_rect,
+                Id::new(("tab-close", app.tabs[index].id)),
+                Sense::click(),
+            );
             if close_response.hovered() {
                 painter.rect_filled(close_rect, CornerRadius::same(10), pal.hover);
             }
@@ -317,7 +325,10 @@ impl Chrome {
             app.drag = Some(index);
         }
         if response.secondary_clicked() {
-            app.ctx_menu = Some((index, ui.input(|i| i.pointer.hover_pos().unwrap_or_default())));
+            app.ctx_menu = Some((
+                index,
+                ui.input(|i| i.pointer.hover_pos().unwrap_or_default()),
+            ));
         }
     }
 
@@ -330,9 +341,17 @@ impl Chrome {
         let pal = app.theme.clone();
         let loading = app.tabs.get(app.active).map(|t| t.loading).unwrap_or(false);
         let progress = app.tabs.get(app.active).map(|t| t.progress).unwrap_or(0.0);
-        let can_back = app.tabs.get(app.active).map(|t| t.can_back).unwrap_or(false);
+        let can_back = app
+            .tabs
+            .get(app.active)
+            .map(|t| t.can_back)
+            .unwrap_or(false);
         let can_fwd = app.tabs.get(app.active).map(|t| t.can_fwd).unwrap_or(false);
-        let url = app.tabs.get(app.active).map(|t| t.url.clone()).unwrap_or_default();
+        let url = app
+            .tabs
+            .get(app.active)
+            .map(|t| t.url.clone())
+            .unwrap_or_default();
 
         let mut nav_action: Vec<String> = Vec::new();
         TopBottomPanel::top("toolbar")
@@ -341,7 +360,11 @@ impl Chrome {
             .show(ctx, |ui| {
                 ui.horizontal_centered(|ui| {
                     ui.add_space(4.0);
-                    let nav = |ui: &mut Ui, icon: Icon, enabled: bool, id: &str, action: &mut Vec<String>| {
+                    let nav = |ui: &mut Ui,
+                               icon: Icon,
+                               enabled: bool,
+                               id: &str,
+                               action: &mut Vec<String>| {
                         let (rect, response) =
                             ui.allocate_exact_size(Vec2::splat(32.0), Sense::click());
                         let painter = ui.painter_at(rect);
@@ -369,8 +392,8 @@ impl Chrome {
 
                     // Omnibox pill.
                     let width = ui.available_width() - 190.0;
-                    let (rect, response) = ui
-                        .allocate_exact_size(Vec2::new(width.max(120.0), 34.0), Sense::click());
+                    let (rect, response) =
+                        ui.allocate_exact_size(Vec2::new(width.max(120.0), 34.0), Sense::click());
                     app.omnibox_rect = rect;
                     let painter = ui.painter_at(rect);
                     let focused = app.omnibox_focused;
@@ -384,7 +407,12 @@ impl Chrome {
                         },
                     );
                     if focused {
-                        painter.rect_stroke(rect, CornerRadius::same(17), Stroke::new(1.6_f32, pal.accent), egui::epaint::StrokeKind::Inside);
+                        painter.rect_stroke(
+                            rect,
+                            CornerRadius::same(17),
+                            Stroke::new(1.6_f32, pal.accent),
+                            egui::epaint::StrokeKind::Inside,
+                        );
                     }
 
                     // Security / search indicator.
@@ -497,7 +525,11 @@ impl Chrome {
                         Icon::Code.paint(
                             &painter,
                             rect,
-                            if app.devtools_open { pal.accent } else { pal.text },
+                            if app.devtools_open {
+                                pal.accent
+                            } else {
+                                pal.text
+                            },
                         );
                         if response.clicked() {
                             right_actions.push("devtools".to_owned());
@@ -543,7 +575,11 @@ impl Chrome {
                         Icon::Download.paint(
                             &painter,
                             rect,
-                            if active_downloads > 0 { pal.accent } else { pal.text },
+                            if active_downloads > 0 {
+                                pal.accent
+                            } else {
+                                pal.text
+                            },
                         );
                         if active_downloads > 0 {
                             badge(&painter, rect, compact_count(active_downloads as u64), &pal);
@@ -553,19 +589,18 @@ impl Chrome {
                         }
 
                         // Star (bookmark).
-                        let starred = app
-                            .shell
-                            .store()
-                            .bookmarks
-                            .find_url(&url)
-                            .is_some();
+                        let starred = app.shell.store().bookmarks.find_url(&url).is_some();
                         let (rect, response) =
                             ui.allocate_exact_size(Vec2::splat(30.0), Sense::click());
                         let painter = ui.painter_at(rect);
                         if response.hovered() {
                             painter.rect_filled(rect, CornerRadius::same(15), pal.hover);
                         }
-                        Icon::Star.paint(&painter, rect, if starred { pal.warning } else { pal.text_dim });
+                        Icon::Star.paint(
+                            &painter,
+                            rect,
+                            if starred { pal.warning } else { pal.text_dim },
+                        );
                         if response.clicked() {
                             right_actions.push("star".to_owned());
                         }
@@ -626,8 +661,8 @@ impl Chrome {
                         action: &str,
                         actions: &mut Vec<String>,
                         pal: &Theme| {
-                let (rect, response) = ui
-                    .allocate_exact_size(Vec2::new(250.0, 26.0), Sense::click());
+                let (rect, response) =
+                    ui.allocate_exact_size(Vec2::new(250.0, 26.0), Sense::click());
                 let painter = ui.painter_at(rect);
                 if response.hovered() {
                     painter.rect_filled(rect, CornerRadius::same(6), pal.hover);
@@ -652,21 +687,112 @@ impl Chrome {
                     ui.close();
                 }
             };
-            item(ui, Icon::Plus, "New tab  ·  Ctrl+T", "new-tab", &mut actions, &pal);
-            item(ui, Icon::Reload, "Reopen closed tab  ·  Ctrl+Shift+T", "reopen", &mut actions, &pal);
+            item(
+                ui,
+                Icon::Plus,
+                "New tab  ·  Ctrl+T",
+                "new-tab",
+                &mut actions,
+                &pal,
+            );
+            item(
+                ui,
+                Icon::Reload,
+                "Reopen closed tab  ·  Ctrl+Shift+T",
+                "reopen",
+                &mut actions,
+                &pal,
+            );
             ui.separator();
-            item(ui, Icon::Bookmarks, "Bookmarks  ·  Ctrl+Shift+O", "bookmarks", &mut actions, &pal);
-            item(ui, Icon::Clock, "History  ·  Ctrl+H", "history", &mut actions, &pal);
-            item(ui, Icon::Download, "Downloads  ·  Ctrl+J", "downloads", &mut actions, &pal);
-            item(ui, Icon::Shield, "Privacy dashboard", "privacy", &mut actions, &pal);
-            item(ui, Icon::Puzzle, "Extensions", "extensions", &mut actions, &pal);
+            item(
+                ui,
+                Icon::Bookmarks,
+                "Bookmarks  ·  Ctrl+Shift+O",
+                "bookmarks",
+                &mut actions,
+                &pal,
+            );
+            item(
+                ui,
+                Icon::Clock,
+                "History  ·  Ctrl+H",
+                "history",
+                &mut actions,
+                &pal,
+            );
+            item(
+                ui,
+                Icon::Download,
+                "Downloads  ·  Ctrl+J",
+                "downloads",
+                &mut actions,
+                &pal,
+            );
+            item(
+                ui,
+                Icon::Shield,
+                "Privacy dashboard",
+                "privacy",
+                &mut actions,
+                &pal,
+            );
+            item(
+                ui,
+                Icon::Puzzle,
+                "Extensions",
+                "extensions",
+                &mut actions,
+                &pal,
+            );
             ui.separator();
-            item(ui, Icon::Find, "Find in page  ·  Ctrl+F", "find", &mut actions, &pal);
-            item(ui, Icon::ZoomIn, "Zoom in  ·  Ctrl+Plus", "zoom-in", &mut actions, &pal);
-            item(ui, Icon::ZoomOut, "Zoom out  ·  Ctrl+Minus", "zoom-out", &mut actions, &pal);
-            item(ui, Icon::Print, "Print…  ·  Ctrl+P", "print", &mut actions, &pal);
-            item(ui, Icon::Save, "Save page…  ·  Ctrl+S", "save", &mut actions, &pal);
-            item(ui, Icon::Fullscreen, "Fullscreen  ·  F11", "fullscreen", &mut actions, &pal);
+            item(
+                ui,
+                Icon::Find,
+                "Find in page  ·  Ctrl+F",
+                "find",
+                &mut actions,
+                &pal,
+            );
+            item(
+                ui,
+                Icon::ZoomIn,
+                "Zoom in  ·  Ctrl+Plus",
+                "zoom-in",
+                &mut actions,
+                &pal,
+            );
+            item(
+                ui,
+                Icon::ZoomOut,
+                "Zoom out  ·  Ctrl+Minus",
+                "zoom-out",
+                &mut actions,
+                &pal,
+            );
+            item(
+                ui,
+                Icon::Print,
+                "Print…  ·  Ctrl+P",
+                "print",
+                &mut actions,
+                &pal,
+            );
+            item(
+                ui,
+                Icon::Save,
+                "Save page…  ·  Ctrl+S",
+                "save",
+                &mut actions,
+                &pal,
+            );
+            item(
+                ui,
+                Icon::Fullscreen,
+                "Fullscreen  ·  F11",
+                "fullscreen",
+                &mut actions,
+                &pal,
+            );
             ui.separator();
             item(ui, Icon::Gear, "Settings", "settings", &mut actions, &pal);
             let _ = fullscreen;
@@ -703,7 +829,8 @@ impl Chrome {
                 "save" => app.open_save_dialog(),
                 "fullscreen" => {
                     let fs = self.is_fullscreen;
-                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Fullscreen(!fs));
+                    ui.ctx()
+                        .send_viewport_cmd(egui::ViewportCommand::Fullscreen(!fs));
                     self.is_fullscreen = !fs;
                 }
                 "settings" => app.navigate_url("rowser://settings"),
@@ -745,9 +872,7 @@ impl Chrome {
                     for (id, title, url) in entries.iter().take(24) {
                         let label = ellipsize(ui, title, 130.0);
                         let response = ui
-                            .add(egui::Button::new(
-                                egui::RichText::new(label).size(12.5),
-                            ))
+                            .add(egui::Button::new(egui::RichText::new(label).size(12.5)))
                             .on_hover_text(url);
                         if response.clicked() {
                             actions.push((*id, false));
@@ -765,8 +890,7 @@ impl Chrome {
                         }
                     }
                     for folder in folders {
-                        let response =
-                            ui.add(egui::Button::new(format!("📁 {}", folder)).small());
+                        let response = ui.add(egui::Button::new(format!("📁 {}", folder)).small());
                         if response.clicked() {
                             folder_opens.push(folder.clone());
                         }
@@ -811,7 +935,9 @@ impl Chrome {
     // -----------------------------------------------------------------------
 
     fn status_bar(&mut self, app: &mut BrowserApp, ctx: &Context) {
-        let Some(tab) = app.tabs.get(app.active) else { return };
+        let Some(tab) = app.tabs.get(app.active) else {
+            return;
+        };
         let hover = app.hover_link.clone();
         let blocked = tab.blocked;
         let memory = app
@@ -907,8 +1033,8 @@ impl Chrome {
                         let phase = *item.phase.lock().unwrap();
                         let progress = item.progress();
                         let status = item.status_text();
-                        let (response_rect, response) = ui
-                            .allocate_exact_size(Vec2::new(252.0, 70.0), Sense::click());
+                        let (response_rect, response) =
+                            ui.allocate_exact_size(Vec2::new(252.0, 70.0), Sense::click());
                         let painter = ui.painter_at(response_rect);
                         painter.rect_filled(response_rect, CornerRadius::same(8), pal.field_bg);
                         painter.text(
@@ -948,11 +1074,8 @@ impl Chrome {
                             Pos2::new(response_rect.right() - 18.0, response_rect.top() + 50.0),
                             Vec2::splat(26.0),
                         );
-                        let control = ui.interact(
-                            control_rect,
-                            Id::new(("dl-ctl", item.id)),
-                            Sense::click(),
-                        );
+                        let control =
+                            ui.interact(control_rect, Id::new(("dl-ctl", item.id)), Sense::click());
                         let control_painter = ui.painter_at(control_rect);
                         let control_icon = match phase {
                             rowser_shell::DownloadPhase::Writing => Icon::Clock,
@@ -1015,8 +1138,16 @@ impl Chrome {
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new("DevTools").strong());
                     ui.separator();
-                    ui.selectable_value(&mut app.chrome.devtools_section, "console".into(), "Console");
-                    ui.selectable_value(&mut app.chrome.devtools_section, "network".into(), "Network");
+                    ui.selectable_value(
+                        &mut app.chrome.devtools_section,
+                        "console".into(),
+                        "Console",
+                    );
+                    ui.selectable_value(
+                        &mut app.chrome.devtools_section,
+                        "network".into(),
+                        "Network",
+                    );
                     let _ = &section;
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui.button("Clear").clicked() {
@@ -1214,7 +1345,8 @@ impl Chrome {
                         if ui.button("↓").clicked() {
                             do_step = 1;
                         }
-                        if ui.button("✕").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape))
+                        if ui.button("✕").clicked()
+                            || ui.input(|i| i.key_pressed(egui::Key::Escape))
                         {
                             do_close = true;
                         }
@@ -1282,8 +1414,8 @@ impl Chrome {
                     ui.set_width(width);
                     for (index, suggestion) in suggestions.iter().enumerate() {
                         let selected = index == app.sugg_index;
-                        let (rect, response) = ui
-                            .allocate_exact_size(Vec2::new(width - 8.0, 30.0), Sense::click());
+                        let (rect, response) =
+                            ui.allocate_exact_size(Vec2::new(width - 8.0, 30.0), Sense::click());
                         let painter = ui.painter_at(rect);
                         let bg = if response.hovered() || selected {
                             pal.hover
@@ -1343,7 +1475,10 @@ impl Chrome {
         // Keyboard navigation.
         let events: Vec<egui::Event> = ctx.input(|i| i.events.clone());
         for event in events {
-            if let egui::Event::Key { key, pressed: true, .. } = event {
+            if let egui::Event::Key {
+                key, pressed: true, ..
+            } = event
+            {
                 match key {
                     egui::Key::ArrowDown if !app.suggestions.is_empty() => {
                         app.sugg_index = (app.sugg_index + 1) % app.suggestions.len();
@@ -1408,7 +1543,11 @@ impl Chrome {
                 let texture = app.tabs.get(app.active).and_then(|t| t.texture.clone());
                 let Some(texture) = texture else {
                     let loading = app.tabs.get(app.active).map(|t| t.loading).unwrap_or(false);
-                    let url = app.tabs.get(app.active).map(|t| t.url.clone()).unwrap_or_default();
+                    let url = app
+                        .tabs
+                        .get(app.active)
+                        .map(|t| t.url.clone())
+                        .unwrap_or_default();
                     pages::blank_or_error(app, ui, &url, loading);
                     return;
                 };
@@ -1468,7 +1607,9 @@ impl Chrome {
     // -----------------------------------------------------------------------
 
     fn tab_context_menu(&mut self, app: &mut BrowserApp, ctx: &Context) {
-        let Some((index, pos)) = app.ctx_menu else { return };
+        let Some((index, pos)) = app.ctx_menu else {
+            return;
+        };
         if index >= app.tabs.len() {
             app.ctx_menu = None;
             return;
@@ -1507,8 +1648,22 @@ impl Chrome {
                 item(ui, "Reload", "reload", &mut actions);
                 item(ui, "Duplicate", "duplicate", &mut actions);
                 ui.separator();
-                item(ui, if tab.pinned { "Unpin tab" } else { "Pin tab" }, "pin", &mut actions);
-                item(ui, if tab.muted { "Unmute site" } else { "Mute site" }, "mute", &mut actions);
+                item(
+                    ui,
+                    if tab.pinned { "Unpin tab" } else { "Pin tab" },
+                    "pin",
+                    &mut actions,
+                );
+                item(
+                    ui,
+                    if tab.muted {
+                        "Unmute site"
+                    } else {
+                        "Mute site"
+                    },
+                    "mute",
+                    &mut actions,
+                );
                 item(ui, "Add to new group", "group-new", &mut actions);
                 if tab.group.is_some() {
                     item(ui, "Remove from group", "group-remove", &mut actions);
@@ -1543,12 +1698,7 @@ impl Chrome {
                     }
                 }
                 "group-new" => {
-                    let group = app
-                        .tabs
-                        .iter()
-                        .filter_map(|t| t.group.as_ref())
-                        .count()
-                        + 1;
+                    let group = app.tabs.iter().filter_map(|t| t.group.as_ref()).count() + 1;
                     if let Some(t) = app.tabs.iter_mut().find(|t| t.id == tab.id) {
                         t.group = Some(crate::app::TabGroup {
                             name: format!("Group {group}"),
@@ -1578,8 +1728,12 @@ impl Chrome {
                 "close" => app.close_tab(index),
                 "close-others" => {
                     let keep = tab.id;
-                    let ids: Vec<rowser_api::TabId> =
-                        app.tabs.iter().map(|t| t.id).filter(|&i| i != keep).collect();
+                    let ids: Vec<rowser_api::TabId> = app
+                        .tabs
+                        .iter()
+                        .map(|t| t.id)
+                        .filter(|&i| i != keep)
+                        .collect();
                     for i in ids {
                         app.shell.browser().close_tab(i);
                     }
@@ -1624,7 +1778,9 @@ impl Chrome {
     }
 
     fn print_dialog(&mut self, app: &mut BrowserApp, ctx: &Context) {
-        let Some(dialog) = app.print.clone() else { return };
+        let Some(dialog) = app.print.clone() else {
+            return;
+        };
         let pal = app.theme.clone();
         let mut close = false;
         let mut start = false;
@@ -1645,9 +1801,7 @@ impl Chrome {
                 });
                 ui.horizontal(|ui| {
                     ui.label("Save to");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut path_edit).desired_width(300.0),
-                    );
+                    ui.add(egui::TextEdit::singleline(&mut path_edit).desired_width(300.0));
                     if ui.button("Browse…").clicked() {
                         let dir = std::path::Path::new(&dialog.path)
                             .parent()
@@ -1726,11 +1880,7 @@ impl Chrome {
                             std::path::Path::new(&path),
                             restore,
                         ) {
-                            Ok(pages) => crate::app::PrintOutcome::Done {
-                                tab,
-                                path,
-                                pages,
-                            },
+                            Ok(pages) => crate::app::PrintOutcome::Done { tab, path, pages },
                             Err(err) => crate::app::PrintOutcome::Failed {
                                 tab,
                                 error: format!("{err:#}"),
@@ -1748,7 +1898,9 @@ impl Chrome {
     }
 
     fn file_dialog(&mut self, app: &mut BrowserApp, ctx: &Context) {
-        let Some(dialog) = app.file.clone() else { return };
+        let Some(dialog) = app.file.clone() else {
+            return;
+        };
         let pal = app.theme.clone();
         let purpose = dialog.purpose;
         let title = match purpose {
@@ -1775,29 +1927,35 @@ impl Chrome {
                         action = Some("up".into());
                     }
                     ui.label(
-                        egui::RichText::new(ellipsize(ui, &dialog.dir.display().to_string(), 420.0))
-                            .monospace()
-                            .small()
-                            .color(pal.text_dim),
+                        egui::RichText::new(ellipsize(
+                            ui,
+                            &dialog.dir.display().to_string(),
+                            420.0,
+                        ))
+                        .monospace()
+                        .small()
+                        .color(pal.text_dim),
                     );
                 });
                 ui.separator();
-                egui::ScrollArea::vertical().max_height(300.0).show(ui, |ui| {
-                    for (name, is_dir) in dialog.entries.iter() {
-                        let label = if *is_dir {
-                            format!("📁 {name}")
-                        } else {
-                            name.clone()
-                        };
-                        if ui.button(label).clicked() {
-                            if *is_dir {
-                                action = Some(format!("enter:{name}"));
-                            } else if !is_dir_pick {
-                                action = Some(format!("pick:{name}"));
+                egui::ScrollArea::vertical()
+                    .max_height(300.0)
+                    .show(ui, |ui| {
+                        for (name, is_dir) in dialog.entries.iter() {
+                            let label = if *is_dir {
+                                format!("📁 {name}")
+                            } else {
+                                name.clone()
+                            };
+                            if ui.button(label).clicked() {
+                                if *is_dir {
+                                    action = Some(format!("enter:{name}"));
+                                } else if !is_dir_pick {
+                                    action = Some(format!("pick:{name}"));
+                                }
                             }
                         }
-                    }
-                });
+                    });
                 if let Some(error) = &dialog.error {
                     ui.label(egui::RichText::new(error).color(pal.danger));
                 }
@@ -1805,9 +1963,7 @@ impl Chrome {
                 if !is_dir_pick {
                     ui.horizontal(|ui| {
                         ui.label("File name");
-                        ui.add(
-                            egui::TextEdit::singleline(&mut filename_edit).desired_width(380.0),
-                        );
+                        ui.add(egui::TextEdit::singleline(&mut filename_edit).desired_width(380.0));
                     });
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1858,7 +2014,9 @@ impl Chrome {
     }
 
     fn bookmark_dialog(&mut self, app: &mut BrowserApp, ctx: &Context) {
-        let Some(dialog) = app.bookmark_edit.clone() else { return };
+        let Some(dialog) = app.bookmark_edit.clone() else {
+            return;
+        };
         let pal = app.theme.clone();
         let mut close = false;
         let mut save = false;
@@ -1927,11 +2085,8 @@ impl Chrome {
     // -----------------------------------------------------------------------
 
     fn toasts(&mut self, app: &mut BrowserApp, ctx: &Context) {
-        let toasts: Vec<(String, f32)> = app
-            .toasts
-            .iter()
-            .map(|t| (t.text.clone(), t.ttl))
-            .collect();
+        let toasts: Vec<(String, f32)> =
+            app.toasts.iter().map(|t| (t.text.clone(), t.ttl)).collect();
         if toasts.is_empty() {
             return;
         }
@@ -1966,9 +2121,7 @@ impl Chrome {
                             );
                             let painter = ui.painter();
                             Icon::Check.paint(painter, icon_rect, pal.success);
-                            ui.label(
-                                egui::RichText::new(ellipsize(ui, text, 240.0)).small(),
-                            );
+                            ui.label(egui::RichText::new(ellipsize(ui, text, 240.0)).small());
                         });
                     });
                 }
@@ -1991,7 +2144,13 @@ pub fn window_frame_public(pal: &Theme) -> egui::Frame {
     window_frame(pal)
 }
 
-fn arc_points_helper(center: Pos2, radius: f32, start: f32, end: f32, segments: usize) -> Vec<Pos2> {
+fn arc_points_helper(
+    center: Pos2,
+    radius: f32,
+    start: f32,
+    end: f32,
+    segments: usize,
+) -> Vec<Pos2> {
     let mut pts = Vec::with_capacity(segments + 1);
     for i in 0..=segments {
         let t = i as f32 / segments as f32;

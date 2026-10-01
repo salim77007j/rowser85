@@ -220,7 +220,9 @@ impl Shell {
                 self.browser.new_tab(Some(url));
             }
             let tabs = self.browser.tabs();
-            if let Some(active) = tabs.get(self.store.session.active.min(tabs.len().saturating_sub(1))) {
+            if let Some(active) =
+                tabs.get(self.store.session.active.min(tabs.len().saturating_sub(1)))
+            {
                 self.browser.focus(*active);
             }
         }
@@ -324,10 +326,7 @@ impl Shell {
         match event {
             EngineEvent::PageLoaded { tab, url, title } => {
                 self.store.history.visit(url.clone(), title.clone());
-                self.tab_titles
-                    .lock()
-                    .unwrap()
-                    .insert(*tab, title.clone());
+                self.tab_titles.lock().unwrap().insert(*tab, title.clone());
                 if self.boot_ms.load(Ordering::Relaxed) == 0 {
                     self.boot_ms
                         .store(self.startup.elapsed().as_millis() as u64, Ordering::Relaxed);
@@ -416,10 +415,7 @@ impl Shell {
         drop(known);
         self.store.session.tabs = urls;
         let active = self.active_tab();
-        self.store.session.active = tabs
-            .iter()
-            .position(|t| Some(*t) == active)
-            .unwrap_or(0);
+        self.store.session.active = tabs.iter().position(|t| Some(*t) == active).unwrap_or(0);
         self.store.session.save(&self.store.dir);
     }
 

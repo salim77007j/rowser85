@@ -134,18 +134,15 @@ impl Theme {
         style.spacing.button_padding = Vec2::new(10.0, 5.0);
         style.spacing.interact_size = Vec2::new(26.0, 26.0);
         style.spacing.scroll.bar_width = 10.0;
-        style.text_styles.insert(
-            egui::TextStyle::Body,
-            egui::FontId::proportional(14.5),
-        );
-        style.text_styles.insert(
-            egui::TextStyle::Small,
-            egui::FontId::proportional(12.0),
-        );
-        style.text_styles.insert(
-            egui::TextStyle::Heading,
-            egui::FontId::proportional(19.0),
-        );
+        style
+            .text_styles
+            .insert(egui::TextStyle::Body, egui::FontId::proportional(14.5));
+        style
+            .text_styles
+            .insert(egui::TextStyle::Small, egui::FontId::proportional(12.0));
+        style
+            .text_styles
+            .insert(egui::TextStyle::Heading, egui::FontId::proportional(19.0));
         ctx.set_style(style);
     }
 }

@@ -1,8 +1,8 @@
 //! Crisp vector icons drawn with epaint primitives — no icon font, no
 //! binary assets, resolution independent.
 
-use egui::{Color32, CornerRadius, Painter, Pos2, Rect, Shape, Stroke, Vec2};
 use egui::epaint::PathShape;
+use egui::{Color32, CornerRadius, Painter, Pos2, Rect, Shape, Stroke, Vec2};
 
 /// Icon identifiers (16px design grid, scaled at draw time).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,11 +82,17 @@ impl Icon {
                     stroke,
                 );
                 painter.line_segment(
-                    [pos2(c.x - s * 0.55, c.y), pos2(c.x - s * 0.05, c.y - s * 0.5)],
+                    [
+                        pos2(c.x - s * 0.55, c.y),
+                        pos2(c.x - s * 0.05, c.y - s * 0.5),
+                    ],
                     stroke,
                 );
                 painter.line_segment(
-                    [pos2(c.x - s * 0.55, c.y), pos2(c.x - s * 0.05, c.y + s * 0.5)],
+                    [
+                        pos2(c.x - s * 0.55, c.y),
+                        pos2(c.x - s * 0.05, c.y + s * 0.5),
+                    ],
                     stroke,
                 );
             }
@@ -96,11 +102,17 @@ impl Icon {
                     stroke,
                 );
                 painter.line_segment(
-                    [pos2(c.x + s * 0.55, c.y), pos2(c.x + s * 0.05, c.y - s * 0.5)],
+                    [
+                        pos2(c.x + s * 0.55, c.y),
+                        pos2(c.x + s * 0.05, c.y - s * 0.5),
+                    ],
                     stroke,
                 );
                 painter.line_segment(
-                    [pos2(c.x + s * 0.55, c.y), pos2(c.x + s * 0.05, c.y + s * 0.5)],
+                    [
+                        pos2(c.x + s * 0.55, c.y),
+                        pos2(c.x + s * 0.05, c.y + s * 0.5),
+                    ],
                     stroke,
                 );
             }
@@ -162,7 +174,11 @@ impl Icon {
                 );
             }
             Icon::Star | Icon::StarFilled => {
-                let points = star_points(c, s * 0.9, if self == Icon::StarFilled { 0.5 } else { 0.42 });
+                let points = star_points(
+                    c,
+                    s * 0.9,
+                    if self == Icon::StarFilled { 0.5 } else { 0.42 },
+                );
                 if self == Icon::StarFilled {
                     painter.add(Shape::Path(PathShape {
                         points: points.clone(),
@@ -175,13 +191,22 @@ impl Icon {
                 }
             }
             Icon::Download => {
-                painter.line_segment([pos2(c.x, c.y - s * 0.8), pos2(c.x, c.y + s * 0.25)], stroke);
                 painter.line_segment(
-                    [pos2(c.x - s * 0.4, c.y - s * 0.1), pos2(c.x, c.y + s * 0.35)],
+                    [pos2(c.x, c.y - s * 0.8), pos2(c.x, c.y + s * 0.25)],
                     stroke,
                 );
                 painter.line_segment(
-                    [pos2(c.x + s * 0.4, c.y - s * 0.1), pos2(c.x, c.y + s * 0.35)],
+                    [
+                        pos2(c.x - s * 0.4, c.y - s * 0.1),
+                        pos2(c.x, c.y + s * 0.35),
+                    ],
+                    stroke,
+                );
+                painter.line_segment(
+                    [
+                        pos2(c.x + s * 0.4, c.y - s * 0.1),
+                        pos2(c.x, c.y + s * 0.35),
+                    ],
                     stroke,
                 );
                 painter.line_segment(
@@ -219,7 +244,8 @@ impl Icon {
                         stroke,
                     );
                 }
-            }            Icon::Code => {
+            }
+            Icon::Code => {
                 painter.line_segment(
                     [c + vec2(-s * 0.65, -s * 0.4), c + vec2(-s * 0.15, 0.0)],
                     stroke,
@@ -244,7 +270,7 @@ impl Icon {
                     stroke,
                 );
             }
-                        Icon::Close => {
+            Icon::Close => {
                 painter.line_segment(
                     [c + vec2(-s * 0.45, -s * 0.45), c + vec2(s * 0.45, s * 0.45)],
                     stroke,
@@ -255,14 +281,8 @@ impl Icon {
                 );
             }
             Icon::Plus => {
-                painter.line_segment(
-                    [pos2(c.x - s * 0.6, c.y), pos2(c.x + s * 0.6, c.y)],
-                    stroke,
-                );
-                painter.line_segment(
-                    [pos2(c.x, c.y - s * 0.6), pos2(c.x, c.y + s * 0.6)],
-                    stroke,
-                );
+                painter.line_segment([pos2(c.x - s * 0.6, c.y), pos2(c.x + s * 0.6, c.y)], stroke);
+                painter.line_segment([pos2(c.x, c.y - s * 0.6), pos2(c.x, c.y + s * 0.6)], stroke);
             }
             Icon::Search => {
                 painter.circle_stroke(c + vec2(-s * 0.15, -s * 0.15), s * 0.55, stroke);
@@ -350,32 +370,45 @@ impl Icon {
             }
             Icon::Puzzle => {
                 let body = Rect::from_center_size(c, vec2(s * 1.1, s * 0.8));
-                painter.rect_stroke(body, CornerRadius::same(3), stroke, egui::epaint::StrokeKind::Inside);
-                painter.circle_stroke(
-                    Pos2::new(body.center().x, body.top()),
-                    s * 0.18,
+                painter.rect_stroke(
+                    body,
+                    CornerRadius::same(3),
                     stroke,
+                    egui::epaint::StrokeKind::Inside,
                 );
+                painter.circle_stroke(Pos2::new(body.center().x, body.top()), s * 0.18, stroke);
             }
             Icon::Print => {
                 let body = Rect::from_center_size(c + vec2(0.0, s * 0.1), vec2(s * 1.2, s * 0.55));
-                painter.rect_stroke(body, CornerRadius::same(3), stroke, egui::epaint::StrokeKind::Inside);
-                let paper = Rect::from_center_size(
-                    c + vec2(0.0, -s * 0.35),
-                    vec2(s * 0.7, s * 0.55),
+                painter.rect_stroke(
+                    body,
+                    CornerRadius::same(3),
+                    stroke,
+                    egui::epaint::StrokeKind::Inside,
                 );
-                painter.rect_stroke(paper, CornerRadius::same(2), stroke, egui::epaint::StrokeKind::Inside);
-                let tray = Rect::from_center_size(
-                    c + vec2(0.0, s * 0.55),
-                    vec2(s * 0.8, s * 0.25),
+                let paper =
+                    Rect::from_center_size(c + vec2(0.0, -s * 0.35), vec2(s * 0.7, s * 0.55));
+                painter.rect_stroke(
+                    paper,
+                    CornerRadius::same(2),
+                    stroke,
+                    egui::epaint::StrokeKind::Inside,
                 );
-                painter.rect_stroke(tray, CornerRadius::same(2), stroke, egui::epaint::StrokeKind::Inside);
+                let tray = Rect::from_center_size(c + vec2(0.0, s * 0.55), vec2(s * 0.8, s * 0.25));
+                painter.rect_stroke(
+                    tray,
+                    CornerRadius::same(2),
+                    stroke,
+                    egui::epaint::StrokeKind::Inside,
+                );
             }
             Icon::Save => {
                 painter.rect_stroke(
                     Rect::from_center_size(c, vec2(s * 1.2, s * 1.2)),
                     CornerRadius::same(3),
-                    stroke, egui::epaint::StrokeKind::Inside);
+                    stroke,
+                    egui::epaint::StrokeKind::Inside,
+                );
                 painter.rect_filled(
                     Rect::from_center_size(c + vec2(0.0, -s * 0.35), vec2(s * 0.9, s * 0.35)),
                     CornerRadius::same(2),
@@ -389,7 +422,9 @@ impl Icon {
                 painter.rect_stroke(
                     Rect::from_center_size(c + vec2(0.0, s * 0.3), vec2(s * 0.6, s * 0.4)),
                     CornerRadius::same(2),
-                    stroke, egui::epaint::StrokeKind::Inside);
+                    stroke,
+                    egui::epaint::StrokeKind::Inside,
+                );
             }
             Icon::Find => {
                 painter.line_segment(
@@ -417,41 +452,26 @@ impl Icon {
             Icon::ZoomIn => {
                 painter.circle_stroke(c + vec2(-s * 0.12, -s * 0.12), s * 0.55, stroke);
                 painter.line_segment(
-                    [
-                        c + vec2(s * 0.3, s * 0.3),
-                        c + vec2(s * 0.75, s * 0.75),
-                    ],
+                    [c + vec2(s * 0.3, s * 0.3), c + vec2(s * 0.75, s * 0.75)],
                     stroke,
                 );
                 painter.line_segment(
-                    [
-                        c + vec2(-s * 0.35, -s * 0.12),
-                        c + vec2(s * 0.1, -s * 0.12),
-                    ],
+                    [c + vec2(-s * 0.35, -s * 0.12), c + vec2(s * 0.1, -s * 0.12)],
                     stroke,
                 );
                 painter.line_segment(
-                    [
-                        c + vec2(-s * 0.12, -s * 0.35),
-                        c + vec2(-s * 0.12, s * 0.1),
-                    ],
+                    [c + vec2(-s * 0.12, -s * 0.35), c + vec2(-s * 0.12, s * 0.1)],
                     stroke,
                 );
             }
             Icon::ZoomOut => {
                 painter.circle_stroke(c + vec2(-s * 0.12, -s * 0.12), s * 0.55, stroke);
                 painter.line_segment(
-                    [
-                        c + vec2(s * 0.3, s * 0.3),
-                        c + vec2(s * 0.75, s * 0.75),
-                    ],
+                    [c + vec2(s * 0.3, s * 0.3), c + vec2(s * 0.75, s * 0.75)],
                     stroke,
                 );
                 painter.line_segment(
-                    [
-                        c + vec2(-s * 0.35, -s * 0.12),
-                        c + vec2(s * 0.1, -s * 0.12),
-                    ],
+                    [c + vec2(-s * 0.35, -s * 0.12), c + vec2(s * 0.1, -s * 0.12)],
                     stroke,
                 );
             }
@@ -466,24 +486,15 @@ impl Icon {
             }
             Icon::Mute => {
                 painter.line_segment(
-                    [
-                        c + vec2(-s * 0.7, -s * 0.25),
-                        c + vec2(-s * 0.3, -s * 0.25),
-                    ],
+                    [c + vec2(-s * 0.7, -s * 0.25), c + vec2(-s * 0.3, -s * 0.25)],
                     stroke,
                 );
                 painter.line_segment(
-                    [
-                        c + vec2(-s * 0.3, -s * 0.25),
-                        c + vec2(-s * 0.3, s * 0.25),
-                    ],
+                    [c + vec2(-s * 0.3, -s * 0.25), c + vec2(-s * 0.3, s * 0.25)],
                     stroke,
                 );
                 painter.line_segment(
-                    [
-                        c + vec2(-s * 0.7, s * 0.25),
-                        c + vec2(-s * 0.3, s * 0.25),
-                    ],
+                    [c + vec2(-s * 0.7, s * 0.25), c + vec2(-s * 0.3, s * 0.25)],
                     stroke,
                 );
                 // speaker cone
@@ -495,48 +506,30 @@ impl Icon {
                     stroke,
                 );
                 painter.line_segment(
-                    [
-                        c + vec2(-s * 0.3, s * 0.25),
-                        c + vec2(-s * 0.05, s * 0.55),
-                    ],
+                    [c + vec2(-s * 0.3, s * 0.25), c + vec2(-s * 0.05, s * 0.55)],
                     stroke,
                 );
                 // cross
                 painter.line_segment(
-                    [
-                        c + vec2(s * 0.1, -s * 0.35),
-                        c + vec2(s * 0.7, s * 0.35),
-                    ],
+                    [c + vec2(s * 0.1, -s * 0.35), c + vec2(s * 0.7, s * 0.35)],
                     stroke,
                 );
                 painter.line_segment(
-                    [
-                        c + vec2(s * 0.1, s * 0.35),
-                        c + vec2(s * 0.7, -s * 0.35),
-                    ],
+                    [c + vec2(s * 0.1, s * 0.35), c + vec2(s * 0.7, -s * 0.35)],
                     stroke,
                 );
             }
-                                                Icon::External => {
+            Icon::External => {
                 painter.line_segment(
-                    [
-                        c + vec2(-s * 0.6, s * 0.6),
-                        c + vec2(s * 0.6, -s * 0.6),
-                    ],
+                    [c + vec2(-s * 0.6, s * 0.6), c + vec2(s * 0.6, -s * 0.6)],
                     stroke,
                 );
                 painter.line_segment(
-                    [
-                        c + vec2(s * 0.6, -s * 0.6),
-                        c + vec2(s * 0.6, -s * 0.1),
-                    ],
+                    [c + vec2(s * 0.6, -s * 0.6), c + vec2(s * 0.6, -s * 0.1)],
                     stroke,
                 );
                 painter.line_segment(
-                    [
-                        c + vec2(s * 0.6, -s * 0.6),
-                        c + vec2(s * 0.1, -s * 0.6),
-                    ],
+                    [c + vec2(s * 0.6, -s * 0.6), c + vec2(s * 0.1, -s * 0.6)],
                     stroke,
                 );
             }
@@ -550,7 +543,7 @@ impl Icon {
                     stroke,
                 );
             }
-                    }
+        }
     }
 }
 

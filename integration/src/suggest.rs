@@ -129,7 +129,11 @@ pub fn suggest(
         }
         out.push(Suggestion {
             kind: SuggestionKind::History,
-            title: if e.title.is_empty() { e.url.clone() } else { e.title.clone() },
+            title: if e.title.is_empty() {
+                e.url.clone()
+            } else {
+                e.title.clone()
+            },
             url: e.url.clone(),
         });
     }

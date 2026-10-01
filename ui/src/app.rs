@@ -175,7 +175,8 @@ impl FileDialog {
                     self.entries.push((name, is_dir));
                 }
                 self.entries.sort_by(|a, b| {
-                    b.1.cmp(&a.1).then(a.0.to_lowercase().cmp(&b.0.to_lowercase()))
+                    b.1.cmp(&a.1)
+                        .then(a.0.to_lowercase().cmp(&b.0.to_lowercase()))
                 });
             }
             Err(err) => self.error = Some(err.to_string()),
@@ -350,7 +351,10 @@ impl BrowserApp {
             tabs.push(TabUi::new(
                 id,
                 snapshot.as_ref().map(|s| s.url.clone()).unwrap_or_default(),
-                snapshot.as_ref().map(|s| s.title.clone()).unwrap_or_default(),
+                snapshot
+                    .as_ref()
+                    .map(|s| s.title.clone())
+                    .unwrap_or_default(),
             ));
         }
 
@@ -425,7 +429,9 @@ impl BrowserApp {
 
     /// Navigates the active tab from omnibox-style input.
     pub fn navigate_input(&mut self, input: &str) {
-        let Some(tab) = self.tabs.get(self.active) else { return };
+        let Some(tab) = self.tabs.get(self.active) else {
+            return;
+        };
         let url = resolve_input(input, &self.shell.store().settings.search_engine);
         self.shell.browser().navigate(tab.id, url);
         self.omnibox_focused = false;
@@ -434,7 +440,9 @@ impl BrowserApp {
 
     /// Opens a URL in the active tab.
     pub fn navigate_url(&mut self, url: impl Into<String>) {
-        let Some(tab) = self.tabs.get(self.active) else { return };
+        let Some(tab) = self.tabs.get(self.active) else {
+            return;
+        };
         self.shell.browser().navigate(tab.id, url.into());
         self.omnibox_focused = false;
         self.suggestions.clear();
@@ -508,10 +516,7 @@ impl BrowserApp {
                         let snapshot = self.shell.browser().snapshot(id);
                         self.tabs.push(TabUi::new(
                             id,
-                            snapshot
-                                .as_ref()
-                                .map(|s| s.url.clone())
-                                .unwrap_or_default(),
+                            snapshot.as_ref().map(|s| s.url.clone()).unwrap_or_default(),
                             snapshot
                                 .as_ref()
                                 .map(|s| s.title.clone())
@@ -633,11 +638,7 @@ impl BrowserApp {
     fn poll_print(&mut self) {
         while let Ok(outcome) = self.print_rx.try_recv() {
             match outcome {
-                PrintOutcome::Preview {
-                    tab,
-                    pages,
-                    image,
-                } => {
+                PrintOutcome::Preview { tab, pages, image } => {
                     if let Some(dialog) = &mut self.print {
                         if dialog.tab == tab {
                             dialog.pages = Some(pages);
@@ -703,7 +704,11 @@ impl BrowserApp {
                     }
                     (L, true, false) => {
                         self.omnibox_focused = true;
-                        self.omnibox = self.tabs.get(self.active).map(|t| t.url.clone()).unwrap_or_default();
+                        self.omnibox = self
+                            .tabs
+                            .get(self.active)
+                            .map(|t| t.url.clone())
+                            .unwrap_or_default();
                         self.chrome.omnibox_take_focus = true;
                     }
                     (R, true, false) => self.reload(),
@@ -802,7 +807,9 @@ impl BrowserApp {
     /// Steps the zoom of the active tab.
     pub fn zoom_step(&mut self, direction: i32) {
         let steps = [0.5, 0.67, 0.8, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0];
-        let Some(tab) = self.tabs.get_mut(self.active) else { return };
+        let Some(tab) = self.tabs.get_mut(self.active) else {
+            return;
+        };
         let current = steps
             .iter()
             .position(|&z| (z - tab.zoom).abs() < 0.02)
@@ -820,7 +827,9 @@ impl BrowserApp {
 
     /// Scrolls the active tab.
     pub fn scroll_active(&mut self, delta_y: f32) {
-        let Some(tab) = self.tabs.get_mut(self.active) else { return };
+        let Some(tab) = self.tabs.get_mut(self.active) else {
+            return;
+        };
         let content_h = self
             .shell
             .browser()
@@ -835,7 +844,9 @@ impl BrowserApp {
 
     /// Toggles the bookmark for the active page.
     pub fn toggle_bookmark(&mut self) {
-        let Some(tab) = self.tabs.get(self.active) else { return };
+        let Some(tab) = self.tabs.get(self.active) else {
+            return;
+        };
         let url = tab.url.clone();
         let title = tab.title.clone();
         if url.is_empty() || url.starts_with("rowser:") {
@@ -866,7 +877,9 @@ impl BrowserApp {
 
     /// Opens the print dialog for the active tab.
     pub fn open_print_dialog(&mut self) {
-        let Some(tab) = self.tabs.get(self.active) else { return };
+        let Some(tab) = self.tabs.get(self.active) else {
+            return;
+        };
         let filename = print_filename(&tab.url);
         let dir = self.shell.store().settings.download_dir.clone();
         let dialog = PrintDialog {
@@ -876,10 +889,7 @@ impl BrowserApp {
             error: None,
             preview: None,
             pages: None,
-            restore: (
-                tab.viewport.0.max(640.0),
-                tab.viewport.1.max(480.0),
-            ),
+            restore: (tab.viewport.0.max(640.0), tab.viewport.1.max(480.0)),
         };
         self.print = Some(dialog);
 
@@ -918,7 +928,9 @@ impl BrowserApp {
 
     /// Opens the save-page dialog.
     pub fn open_save_dialog(&mut self) {
-        let Some(tab) = self.tabs.get(self.active) else { return };
+        let Some(tab) = self.tabs.get(self.active) else {
+            return;
+        };
         let dir = self.shell.store().settings.download_dir.clone();
         let filename = format!(
             "{}.html",
@@ -963,7 +975,9 @@ impl BrowserApp {
         if css_w < 100.0 || css_h < 100.0 {
             return;
         }
-        let Some(tab) = self.tabs.get_mut(self.active) else { return };
+        let Some(tab) = self.tabs.get_mut(self.active) else {
+            return;
+        };
         if (tab.viewport.0 - css_w).abs() > 0.5 || (tab.viewport.1 - css_h).abs() > 0.5 {
             tab.viewport = (css_w, css_h);
             self.shell.browser().set_viewport(tab.id, css_w, css_h);
@@ -992,7 +1006,9 @@ impl BrowserApp {
         let path = dialog.full_path();
         match purpose {
             FilePurpose::SavePage => {
-                let Some(tab) = self.tabs.get(self.active) else { return true };
+                let Some(tab) = self.tabs.get(self.active) else {
+                    return true;
+                };
                 let path = path.with_extension("html");
                 self.shell.browser().save_page(tab.id, path);
                 true
@@ -1040,11 +1056,16 @@ impl BrowserApp {
 
     /// Saves the bookmark editor dialog.
     pub fn save_bookmark_edit(&mut self) {
-        let Some(edit) = self.bookmark_edit.clone() else { return };
+        let Some(edit) = self.bookmark_edit.clone() else {
+            return;
+        };
         let dir = self.shell.store().dir.clone();
         if edit.id == 0 {
             self.shell.store_mut().bookmarks.add(edit.url, edit.title);
-            self.shell.store_mut().bookmarks.set_folder_last(edit.folder);
+            self.shell
+                .store_mut()
+                .bookmarks
+                .set_folder_last(edit.folder);
         } else {
             let store = self.shell.store_mut();
             if let Some(b) = store.bookmarks.items.iter_mut().find(|b| b.id == edit.id) {
@@ -1058,7 +1079,9 @@ impl BrowserApp {
 
     /// Deletes the bookmark being edited.
     pub fn delete_bookmark_edit(&mut self) {
-        let Some(edit) = self.bookmark_edit.clone() else { return };
+        let Some(edit) = self.bookmark_edit.clone() else {
+            return;
+        };
         let dir = self.shell.store().dir.clone();
         self.shell.store_mut().bookmarks.remove(edit.id);
         self.shell.store().bookmarks.save(&dir);
@@ -1077,8 +1100,12 @@ fn rgb_to_egui(rgb: &[u8]) -> Vec<egui::Color32> {
 }
 
 fn refresh_frame(ctx: &Context, app: &mut BrowserApp, tab: TabId) {
-    let Some(frame) = app.shell.browser().frame(tab) else { return };
-    let Some(t) = app.tabs.iter_mut().find(|t| t.id == tab) else { return };
+    let Some(frame) = app.shell.browser().frame(tab) else {
+        return;
+    };
+    let Some(t) = app.tabs.iter_mut().find(|t| t.id == tab) else {
+        return;
+    };
     if frame.frame.id <= t.frame_id && t.texture.is_some() {
         return;
     }
@@ -1147,7 +1174,9 @@ fn install_cjk_font(ctx: &Context) {
         std::fs::metadata(&path).is_ok().then_some(path)
     });
     let Some(path) = path else { return };
-    let Ok(bytes) = std::fs::read(&path) else { return };
+    let Ok(bytes) = std::fs::read(&path) else {
+        return;
+    };
     let mut fonts = egui::FontDefinitions::default();
     fonts.font_data.insert(
         "noto-sans-sc".into(),
@@ -1163,7 +1192,10 @@ fn install_cjk_font(ctx: &Context) {
 
 fn host_of(url: &str) -> &str {
     let after_scheme = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
-    let host = after_scheme.split(['/', '?', '#']).next().unwrap_or(after_scheme);
+    let host = after_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or(after_scheme);
     host.trim_start_matches("www.")
 }
 

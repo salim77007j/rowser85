@@ -92,10 +92,7 @@ impl DownloadItem {
             },
             DownloadPhase::Paused => format!("Paused at {}", human_bytes(received)),
             DownloadPhase::Done => format!("Done — {}", human_bytes(received)),
-            DownloadPhase::Failed => format!(
-                "Failed — {}",
-                self.error.lock().unwrap().clone()
-            ),
+            DownloadPhase::Failed => format!("Failed — {}", self.error.lock().unwrap().clone()),
             DownloadPhase::Cancelled => "Cancelled".to_owned(),
         }
     }
@@ -121,7 +118,12 @@ fn human_bytes(bytes: u64) -> String {
 }
 
 fn short_url(url: &str) -> String {
-    url.split("://").nth(1).unwrap_or(url).chars().take(60).collect()
+    url.split("://")
+        .nth(1)
+        .unwrap_or(url)
+        .chars()
+        .take(60)
+        .collect()
 }
 
 /// The download manager.
@@ -396,7 +398,8 @@ fn write_body(item: Arc<DownloadItem>, body: Vec<u8>, offset: u64, waker: Arc<Wa
             && *item.phase.lock().unwrap() == DownloadPhase::Paused
         {
             let (lock, cond) = &*pair;
-            let _unused = cond.wait_timeout(lock.lock().unwrap(), std::time::Duration::from_millis(200));
+            let _unused =
+                cond.wait_timeout(lock.lock().unwrap(), std::time::Duration::from_millis(200));
         }
         if item.cancelled.load(Ordering::SeqCst) {
             return;
@@ -446,7 +449,13 @@ fn filename_for(url: &str, id: u64) -> String {
     let decoded = percent_decode(name);
     let safe: String = decoded
         .chars()
-        .map(|c| if c.is_alphanumeric() || matches!(c, '.' | '-' | '_') { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || matches!(c, '.' | '-' | '_') {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     safe.chars().take(80).collect()
 }
@@ -462,7 +471,10 @@ fn unique_path(path: PathBuf) -> PathBuf {
     if !path.exists() {
         return path;
     }
-    let stem = path.file_stem().map(|s| s.to_os_string()).unwrap_or_default();
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_os_string())
+        .unwrap_or_default();
     let ext = path
         .extension()
         .map(|e| e.to_os_string())
@@ -486,13 +498,25 @@ fn kind_for(url: &str) -> &'static str {
     let lowered = url.to_lowercase();
     if lowered.ends_with(".pdf") {
         "document"
-    } else if [".zip", ".tar", ".gz", ".7z", ".rar"].iter().any(|e| lowered.ends_with(e)) {
+    } else if [".zip", ".tar", ".gz", ".7z", ".rar"]
+        .iter()
+        .any(|e| lowered.ends_with(e))
+    {
         "archive"
-    } else if [".mp4", ".webm", ".mkv", ".avi", ".mov"].iter().any(|e| lowered.ends_with(e)) {
+    } else if [".mp4", ".webm", ".mkv", ".avi", ".mov"]
+        .iter()
+        .any(|e| lowered.ends_with(e))
+    {
         "video"
-    } else if [".mp3", ".ogg", ".wav", ".flac"].iter().any(|e| lowered.ends_with(e)) {
+    } else if [".mp3", ".ogg", ".wav", ".flac"]
+        .iter()
+        .any(|e| lowered.ends_with(e))
+    {
         "audio"
-    } else if [".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"].iter().any(|e| lowered.ends_with(e)) {
+    } else if [".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"]
+        .iter()
+        .any(|e| lowered.ends_with(e))
+    {
         "image"
     } else {
         "file"

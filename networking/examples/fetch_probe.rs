@@ -1,11 +1,13 @@
 //! Probes the engine's fetch pipeline against a real URL.
-use std::sync::Arc;
 use rowser_networking::{build_context, fetch, FetchRequest};
 use rowser_storage::Storage;
+use std::sync::Arc;
 
 #[tokio::main]
 async fn main() {
-    let url = std::env::args().nth(1).unwrap_or_else(|| "https://example.com".into());
+    let url = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "https://example.com".into());
     let dir = std::env::temp_dir().join("rowser-fetch-probe");
     let _ = std::fs::create_dir_all(&dir);
     let storage = Storage::open(dir.join("probe.redb")).expect("storage");

@@ -42,9 +42,7 @@ fn main() -> anyhow::Result<()> {
             warp(&conn, root, x, y);
             std::thread::sleep(Duration::from_millis(70));
             button_click(&conn, button);
-            if args[0] == "double-click"
-                || (args.len() > 3 && args[3] == "double")
-            {
+            if args[0] == "double-click" || (args.len() > 3 && args[3] == "double") {
                 std::thread::sleep(Duration::from_millis(90));
                 button_click(&conn, button);
             }
@@ -97,11 +95,7 @@ fn main() -> anyhow::Result<()> {
                 let geom = conn.get_geometry(*win)?.reply()?;
                 println!(
                     "win {win:#x} '{}': {}x{}+{}+{}",
-                    title,
-                    geom.width,
-                    geom.height,
-                    geom.x,
-                    geom.y
+                    title, geom.width, geom.height, geom.x, geom.y
                 );
             }
         }
@@ -160,8 +154,8 @@ fn fake_key(conn: &RustConnection, keycode: u8, press: bool) {
 }
 
 fn key_tap(conn: &RustConnection, map: &Keymap, keysym: &str) -> anyhow::Result<()> {
-    let code = keycode_of(map, keysym)
-        .ok_or_else(|| anyhow::anyhow!("keysym {keysym} not mapped"))?;
+    let code =
+        keycode_of(map, keysym).ok_or_else(|| anyhow::anyhow!("keysym {keysym} not mapped"))?;
     fake_key(conn, code, true);
     fake_key(conn, code, false);
     Ok(())
@@ -173,10 +167,10 @@ fn modifier_tap(
     modifier: &str,
     keysym: &str,
 ) -> anyhow::Result<()> {
-    let mod_code = keycode_of(map, modifier)
-        .ok_or_else(|| anyhow::anyhow!("keysym {modifier} not mapped"))?;
-    let key = keycode_of(map, keysym)
-        .ok_or_else(|| anyhow::anyhow!("keysym {keysym} not mapped"))?;
+    let mod_code =
+        keycode_of(map, modifier).ok_or_else(|| anyhow::anyhow!("keysym {modifier} not mapped"))?;
+    let key =
+        keycode_of(map, keysym).ok_or_else(|| anyhow::anyhow!("keysym {keysym} not mapped"))?;
     fake_key(conn, mod_code, true);
     fake_key(conn, key, true);
     fake_key(conn, key, false);
@@ -323,9 +317,9 @@ fn keysym_by_name(name: &str) -> Option<Keysym> {
 /// Builds keysym → keycode from the server's core keyboard mapping.
 fn keymap(conn: &RustConnection) -> anyhow::Result<Keymap> {
     let setup = conn.setup();
-    let min = setup.min_keycode as u8;
-    let max = setup.max_keycode as u8;
-    let count = (max - min + 1) as u8;
+    let min = setup.min_keycode;
+    let max = setup.max_keycode;
+    let count = max.saturating_sub(min).saturating_add(1);
     let reply = conn.get_keyboard_mapping(min, count)?.reply()?;
     let syms_per_code = reply.keysyms_per_keycode.max(1) as usize;
     let mut by_sym: HashMap<Keysym, u8> = HashMap::new();
