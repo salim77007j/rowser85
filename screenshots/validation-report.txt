@@ -1,0 +1,14 @@
+== phase: sites ==
+PASS 01-newtab  rss=147.3MB
+PASS 02-example-com  rss=167.9MB
+FAIL 03-wikipedia (frame unchanged vs previous stage)
+PASS 04-github  rss=242.4MB
+PASS 05-hackernews  rss=253.6MB
+PASS 05b-rustlang  rss=257.8MB
+PASS 05c-example-2  rss=257.7MB
+PASS 05d-mozilla  rss=258.1MB
+PASS 05e-cern  rss=259.9MB
+PASS 06-search  rss=260.2MB
+== summary ==
+failed stages: 1
+passed stages: 9

@@ -1128,6 +1128,27 @@ fn refresh_frame(ctx: &Context, app: &mut BrowserApp, tab: TabId) {
 
 impl eframe::App for BrowserApp {
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
+        if std::env::var("ROWSER_UI_DEBUG").is_ok() {
+            for ev in ctx.input(|i| i.events.clone()) {
+                match ev {
+                    egui::Event::PointerButton {
+                        pos,
+                        button,
+                        pressed,
+                        ..
+                    } => {
+                        eprintln!("[ui] pointer {button:?} {pressed} at {pos:?}");
+                    }
+                    egui::Event::Text(ref t) => {
+                        eprintln!("[ui] text {t:?}");
+                    }
+                    egui::Event::Key { key, pressed, .. } => {
+                        eprintln!("[ui] key {key:?} {pressed}");
+                    }
+                    _ => {}
+                }
+            }
+        }
         self.handle_events(ctx);
         self.poll_print();
         self.sync_theme(ctx);

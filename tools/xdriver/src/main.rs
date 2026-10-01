@@ -128,6 +128,7 @@ fn bring_window_front(conn: &RustConnection, root: u32) -> anyhow::Result<()> {
             win,
             &ConfigureWindowAux::new().stack_mode(xproto::StackMode::ABOVE),
         )?;
+        // x11rb-0.13 signature: set_input_focus(revert_to, focus, time).
         conn.set_input_focus(xproto::InputFocus::PARENT, win, 0u32)?;
     }
     conn.flush()?;
@@ -143,14 +144,24 @@ fn warp(conn: &RustConnection, root: u32, x: i16, y: i16) {
 fn button_click(conn: &RustConnection, button: u8) {
     let _ = conn.xtest_fake_input(4, button, 0, 0, 0, 0, 0);
     let _ = conn.flush();
+    // Mandatory press/release separation — same coalescing bug as fake_key:
+    // a zero-gap release gets dropped, the click never registers, and the
+    // target widget never gains focus (observed 2-in-8 nav failures).
+    std::thread::sleep(Duration::from_millis(25));
     let _ = conn.xtest_fake_input(5, button, 0, 0, 0, 0, 0);
     let _ = conn.flush();
+    std::thread::sleep(Duration::from_millis(25));
 }
 
 fn fake_key(conn: &RustConnection, keycode: u8, press: bool) {
     let event_type = if press { 2u8 } else { 3u8 };
     let _ = conn.xtest_fake_input(event_type, keycode, 0, 0, 0, 0, 0);
     let _ = conn.flush();
+    // Mandatory separation: zero-gap synthetic press/release pairs are
+    // coalesced by the X server — the release is lost, the key stays
+    // logically down, and autorepeat floods the app (observed with Escape:
+    // 30 phantom presses that surrendered omnibox focus every frame).
+    std::thread::sleep(Duration::from_millis(25));
 }
 
 fn key_tap(conn: &RustConnection, map: &Keymap, keysym: &str) -> anyhow::Result<()> {

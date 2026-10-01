@@ -1785,6 +1785,9 @@ impl Chrome {
         let mut close = false;
         let mut start = false;
         let mut path_edit = dialog.path.clone();
+        // Modal Escape closes the print dialog (matches Chrome/Firefox
+        // print preview behavior and unblocks keyboard shortcuts).
+        close |= ctx.input(|i| i.key_pressed(egui::Key::Escape));
         egui::Window::new("Print")
             .resizable(false)
             .collapsible(false)
@@ -2024,6 +2027,8 @@ impl Chrome {
         let mut title_edit = dialog.title.clone();
         let mut url_edit = dialog.url.clone();
         let mut folder_edit = dialog.folder.clone();
+        // Modal Escape closes the bookmark editor without saving.
+        close |= ctx.input(|i| i.key_pressed(egui::Key::Escape));
         egui::Window::new("Edit bookmark")
             .resizable(false)
             .collapsible(false)
