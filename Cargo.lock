@@ -4920,7 +4920,9 @@ name = "rowser-ui"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "dirs",
  "eframe",
+ "egui",
  "rowser-api",
  "rowser-engine",
  "rowser-shell",

@@ -12,11 +12,11 @@ mod print;
 mod store;
 mod suggest;
 
-pub use downloads::{DownloadPhase, Downloads};
+pub use downloads::{DownloadItem, DownloadPhase, Downloads};
 pub use print::{print_to_pdf, render_pages, write_pdf, PrintPage, A4_H, A4_W};
 pub use store::{
-    top_sites, Bookmarks, History, HistoryEntry, PermissionState, Permissions, ProfileStore,
-    SearchEngine, Settings, StartupMode, ThemeMode, TopSite, PERMISSION_KINDS,
+    top_sites, Bookmarks, History, HistoryEntry, PermissionState, Permissions, PrivacyMirror,
+    ProfileStore, SearchEngine, Settings, StartupMode, ThemeMode, TopSite, PERMISSION_KINDS,
 };
 pub use suggest::{normalize_url, resolve_input, suggest, Suggestion, SuggestionKind};
 
@@ -254,6 +254,24 @@ impl Shell {
     /// Devtools console log.
     pub fn console(&self) -> &[ConsoleEntry] {
         &self.console
+    }
+
+    /// Appends a devtools console entry (e.g. a JS eval result).
+    pub fn push_console(&mut self, tab: TabId, level: &str, text: String) {
+        self.console.push(ConsoleEntry {
+            level: level.to_owned(),
+            text,
+            tab,
+        });
+        if self.console.len() > 500 {
+            let overflow = self.console.len() - 500;
+            self.console.drain(0..overflow);
+        }
+    }
+
+    /// Clears the devtools console.
+    pub fn clear_console(&mut self) {
+        self.console.clear();
     }
 
     /// Recently closed tabs (most recent last).

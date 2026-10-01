@@ -17,3 +17,5 @@ rowser-api = { path = "../api" }
 rowser-engine = { path = "../engine" }
 anyhow = "1.0.104"
 eframe = "0.32.3"
+dirs = "5"
+egui = "0.32"

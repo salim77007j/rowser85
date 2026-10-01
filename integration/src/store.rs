@@ -298,7 +298,7 @@ impl Settings {
         load_json(&Self::path(dir), Settings::default)
     }
 
-    pub(crate) fn save(&self, dir: &Path) {
+    pub fn save(&self, dir: &Path) {
         save_json(&Self::path(dir), self);
     }
 }
@@ -355,7 +355,7 @@ impl Bookmarks {
         b
     }
 
-    pub(crate) fn save(&self, dir: &Path) {
+    pub fn save(&self, dir: &Path) {
         save_json(&Self::path(dir), self);
     }
 
@@ -371,6 +371,13 @@ impl Bookmarks {
             added: now_ms(),
         });
         id
+    }
+
+    /// Sets the folder of the most recently added bookmark.
+    pub fn set_folder_last(&mut self, folder: String) {
+        if let Some(last) = self.items.last_mut() {
+            last.folder = folder;
+        }
     }
 
     /// Removes by id.
@@ -573,7 +580,7 @@ impl History {
         load_json(&Self::path(dir), History::default)
     }
 
-    pub(crate) fn save(&self, dir: &Path) {
+    pub fn save(&self, dir: &Path) {
         save_json(&Self::path(dir), self);
     }
 
@@ -676,7 +683,7 @@ impl Permissions {
         load_json(&Self::path(dir), Permissions::default)
     }
 
-    pub(crate) fn save(&self, dir: &Path) {
+    pub fn save(&self, dir: &Path) {
         save_json(&Self::path(dir), self);
     }
 
@@ -732,7 +739,7 @@ impl SessionData {
         load_json(&Self::path(dir), SessionData::default)
     }
 
-    pub(crate) fn save(&self, dir: &Path) {
+    pub fn save(&self, dir: &Path) {
         save_json(&Self::path(dir), self);
     }
 }
