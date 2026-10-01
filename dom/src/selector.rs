@@ -180,7 +180,13 @@ impl<'a> Element for ElementRef<'a> {
     type Impl = DomSelectorImpl;
 
     fn opaque(&self) -> OpaqueElement {
-        OpaqueElement::new(self)
+        // Identity for selector caches: point at the element's arena slot.
+        // The arena does not move or mutate during a matching pass, so the
+        // address is unique per node and stable for the pass. (Using the
+        // ElementRef's own address was a bug: those are stack temporaries
+        // reused across loop iterations, colliding cache entries across
+        // different elements.)
+        OpaqueElement::new(self.dom.element(self.node).expect("element"))
     }
 
     fn parent_element(&self) -> Option<Self> {

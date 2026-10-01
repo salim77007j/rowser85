@@ -70,7 +70,7 @@ pub fn write_pdf(path: &Path, pages: &[PrintPage]) -> anyhow::Result<()> {
         let page_num = 3 + i * 3;
         kids.push_str(&format!("{page_num} 0 R "));
     }
-    objects.push(format!("<</Type/Catalog/Pages 2 0 R>>").into_bytes());
+    objects.push("<</Type/Catalog/Pages 2 0 R>>".to_string().into_bytes());
     objects.push(format!("<</Type/Pages/Kids[{kids}]/Count {}>>", pages.len()).into_bytes());
 
     for (i, page) in pages.iter().enumerate() {

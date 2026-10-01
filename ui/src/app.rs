@@ -361,7 +361,7 @@ impl BrowserApp {
             let waker = std::sync::Arc::clone(&waker);
             waker.set(Box::new(move || ctx.request_repaint()));
         }
-        let app = BrowserApp {
+        BrowserApp {
             shell,
             theme,
             theme_mode: settings.theme,
@@ -397,8 +397,7 @@ impl BrowserApp {
             chrome: Chrome::default(),
             removed_bookmark: false,
             added_bookmark: false,
-        };
-        app
+        }
     }
 
     /// The active tab id.

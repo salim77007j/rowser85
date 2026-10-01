@@ -140,20 +140,15 @@ fn save_json<T: Serialize>(path: &Path, value: &T) {
 // ---------------------------------------------------------------------------
 
 /// UI theme selection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum ThemeMode {
     /// Light chrome.
+    #[default]
     Light,
     /// Dark chrome.
     Dark,
     /// Follow the OS preference.
     System,
-}
-
-impl Default for ThemeMode {
-    fn default() -> Self {
-        ThemeMode::Light
-    }
 }
 
 /// A search engine the omnibox can hand queries to.
@@ -221,20 +216,15 @@ impl Default for SearchEngine {
 }
 
 /// What the browser shows on startup.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum StartupMode {
     /// The new tab page.
+    #[default]
     NewTab,
     /// The configured home page.
     Homepage,
     /// Restore the previous session.
     PreviousSession,
-}
-
-impl Default for StartupMode {
-    fn default() -> Self {
-        StartupMode::NewTab
-    }
 }
 
 /// Browser settings (everything the settings page edits).
@@ -640,21 +630,16 @@ impl History {
 // ---------------------------------------------------------------------------
 
 /// A permission state for a site.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PermissionState {
     /// Prompt when a site asks.
+    #[default]
     Ask,
     /// Always allow.
     Allow,
     /// Always block.
     Block,
-}
-
-impl Default for PermissionState {
-    fn default() -> Self {
-        PermissionState::Ask
-    }
 }
 
 /// Permission kinds the manager knows.

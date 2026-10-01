@@ -1,0 +1,104 @@
+name: browser
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_NET_RETRY: 10
+  RUSTUP_MAX_RETRIES: 10
+
+jobs:
+  build:
+    name: Build browser (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact: rowser-linux-x86_64
+            binary: rowser
+          - os: windows-latest
+            artifact: rowser-windows-x86_64
+            binary: rowser.exe
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: browser-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: browser-${{ runner.os }}-
+
+      - name: Linux system deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev \
+            libwayland-dev libx11-dev libxcb1-dev libxkbcommon-x11-0 || true
+
+      - name: Build (release)
+        run: cargo build --release -p rowser-ui --bin rowser
+
+      - name: Clippy gate (engine + UI, zero warnings)
+        run: cargo clippy -p rowser-ui -p rowser-shell --bin rowser -- -D warnings
+
+      - name: Collect binary (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p dist
+          cp target/release/rowser dist/
+          cp LICENSE* dist/ 2>/dev/null || true
+          strip dist/rowser || true
+
+      - name: Collect binary (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item target/release/rowser.exe dist/
+          if (Test-Path LICENSE-MIT) { Copy-Item LICENSE-MIT dist/ }
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/
+          if-no-files-found: error
+
+  engine-tests:
+    name: Engine test suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: engine-tests-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: engine-tests-
+      - name: Linux system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev \
+            libwayland-dev libx11-dev || true
+      - name: Tests
+        run: cargo test --workspace --exclude xdriver --exclude kbdprobe

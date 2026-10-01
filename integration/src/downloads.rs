@@ -439,7 +439,7 @@ fn filename_for(url: &str, id: u64) -> String {
         .ok()
         .and_then(|u| {
             u.path_segments()
-                .and_then(|segs| segs.last().map(|s| s.to_owned()))
+                .and_then(|mut segs| segs.next_back().map(|s| s.to_owned()))
         })
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| format!("download-{id}"));

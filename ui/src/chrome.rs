@@ -41,6 +41,8 @@ pub struct Chrome {
     pub bookmarks_search: String,
     /// Bookmarks manager selected folder ("" all, "\0bar" bar).
     pub bookmarks_folder: String,
+    /// Downloads page "new download" URL field.
+    pub download_url: String,
 }
 
 impl Chrome {
@@ -412,6 +414,7 @@ impl Chrome {
 
                     // The text field inside the pill.
                     let enter_pressed;
+                    let field_clicked;
                     {
                         let field_response = ui.put(
                             Rect::from_min_max(
@@ -425,6 +428,7 @@ impl Chrome {
                                 .font(egui::FontId::proportional(14.5))
                                 .margin(Vec2::new(0.0, 4.0)),
                         );
+                        field_clicked = field_response.clicked();
                         if field_response.changed() {
                             app.omnibox_focused = true;
                             app.sugg_index = 0;
@@ -434,6 +438,15 @@ impl Chrome {
                         }
                         enter_pressed = field_response.lost_focus()
                             && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        if std::env::var("ROWSER_UI_DEBUG").is_ok() {
+                            eprintln!(
+                                "[ui] enter check: lost={} key={} focused={} text={:?}",
+                                field_response.lost_focus(),
+                                ui.input(|i| i.key_pressed(egui::Key::Enter)),
+                                app.omnibox_focused,
+                                app.omnibox
+                            );
+                        }
                         if enter_pressed {
                             if let Some(selected) = app.suggestions.get(app.sugg_index) {
                                 app.navigate_url(selected.url.clone());
@@ -444,14 +457,26 @@ impl Chrome {
                             field_response.surrender_focus();
                         }
                     }
-                    // Focus on request (Ctrl+L).
+                    // Focus on request (Ctrl+L), selecting everything.
                     if self.omnibox_take_focus {
                         self.omnibox_take_focus = false;
                         ui.memory_mut(|m| m.request_focus(Id::new("omnibox-field")));
                     }
-                    if response.clicked() && !app.omnibox_focused {
-                        app.omnibox = url.clone();
+                    if field_clicked {
+                        // Clicking the omnibox starts a fresh edit: clear
+                        // the field (the placeholder takes over) so typed
+                        // input can never append to stale text.
+                        if !app.omnibox_focused {
+                            app.omnibox_focused = true;
+                        }
+                        app.omnibox.clear();
+                        ui.memory_mut(|m| {
+                            m.surrender_focus(Id::new("omnibox-field"));
+                            m.request_focus(Id::new("omnibox-field"));
+                        });
+                    } else if response.clicked() && !app.omnibox_focused {
                         app.omnibox_focused = true;
+                        app.omnibox.clear();
                     }
 
                     // Right cluster.
@@ -1327,6 +1352,11 @@ impl Chrome {
                         app.sugg_index =
                             (app.sugg_index + app.suggestions.len() - 1) % app.suggestions.len();
                     }
+                    egui::Key::Escape if app.omnibox_focused => {
+                        app.omnibox_focused = false;
+                        app.suggestions.clear();
+                        ctx.memory_mut(|m| m.surrender_focus(Id::new("omnibox-field")));
+                    }
                     _ => {}
                 }
             }
@@ -1816,9 +1846,7 @@ impl Chrome {
                         }
                     }
                     "confirm" => {
-                        if app.confirm_file_dialog() {
-                            close = true;
-                        }
+                        close = app.confirm_file_dialog();
                     }
                     _ => {}
                 }
@@ -1867,10 +1895,8 @@ impl Chrome {
                     if ui.button("Save").clicked() {
                         save = true;
                     }
-                    if dialog.id != 0 {
-                        if ui.button("Delete").clicked() {
-                            delete = true;
-                        }
+                    if dialog.id != 0 && ui.button("Delete").clicked() {
+                        delete = true;
                     }
                     if ui.button("Cancel").clicked() {
                         close = true;
@@ -1939,7 +1965,7 @@ impl Chrome {
                                 Vec2::splat(14.0),
                             );
                             let painter = ui.painter();
-                            Icon::Check.paint(&painter, icon_rect, pal.success);
+                            Icon::Check.paint(painter, icon_rect, pal.success);
                             ui.label(
                                 egui::RichText::new(ellipsize(ui, text, 240.0)).small(),
                             );

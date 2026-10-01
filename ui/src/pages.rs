@@ -79,7 +79,7 @@ pub fn blank_or_error(app: &mut BrowserApp, ui: &mut Ui, url: &str, loading: boo
                 ui.add_space(8.0);
                 ui.label(RichText::new("Loading…").color(pal.text_dim));
                 ui.label(
-                    RichText::new(format!("{url}"))
+                    RichText::new(url.to_string())
                         .monospace()
                         .small()
                         .color(pal.text_dim),
@@ -894,7 +894,7 @@ fn bookmarks_page(app: &mut BrowserApp, ui: &mut Ui) {
             .show(ui, |ui| {
                 ui.set_min_width(160.0);
                 if ui
-                    .selectable_label(app.chrome.bookmarks_folder == "", "⭐ All")
+                    .selectable_label(app.chrome.bookmarks_folder.is_empty(), "⭐ All")
                     .clicked()
                 {
                     app.chrome.bookmarks_folder = String::new();
@@ -1029,9 +1029,25 @@ fn downloads_page(app: &mut BrowserApp, ui: &mut Ui) {
     let pal = app.pal().clone();
     let items = app.shell.downloads().snapshot();
     let mut actions: Vec<(u64, u8)> = Vec::new();
+    let mut start_download: Option<String> = None;
     ui.horizontal(|ui| {
         ui.add_space(12.0);
         ui.heading("Downloads");
+    });
+    ui.separator();
+    // Download-from-URL (the engine's networking stack).
+    ui.horizontal(|ui| {
+        ui.add_space(12.0);
+        ui.label("URL:");
+        let response = ui.add(
+            egui::TextEdit::singleline(&mut app.chrome.download_url)
+                .desired_width(520.0)
+                .hint_text("https://… (downloads through the engine's network stack)"),
+        );
+        let enter = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        if ui.button("Download").clicked() || (enter && !app.chrome.download_url.is_empty()) {
+            start_download = Some(app.chrome.download_url.clone());
+        }
     });
     ui.separator();
     ScrollArea::vertical().show(ui, |ui| {
@@ -1089,10 +1105,8 @@ fn downloads_page(app: &mut BrowserApp, ui: &mut Ui) {
                         }
                     }
                 }
-                if phase != DownloadPhase::Fetching {
-                    if ui.button("Remove").clicked() {
-                        actions.push((id, 5));
-                    }
+                if phase != DownloadPhase::Fetching && ui.button("Remove").clicked() {
+                    actions.push((id, 5));
                 }
             });
             // Progress bar row.
@@ -1122,6 +1136,11 @@ fn downloads_page(app: &mut BrowserApp, ui: &mut Ui) {
             4 => open_containing_folder(&app.shell.downloads().items(), id),
             _ => app.shell.downloads().remove(id),
         }
+    }
+    if let Some(url) = start_download {
+        let dir = app.shell.store().settings.download_dir.clone();
+        app.shell.downloads().start(url, dir);
+        app.chrome.download_url.clear();
     }
 }
 

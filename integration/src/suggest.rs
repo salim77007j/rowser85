@@ -48,16 +48,19 @@ pub fn normalize_url(input: &str) -> Option<String> {
     if trimmed.is_empty() {
         return None;
     }
-    if trimmed.contains(' ') || !trimmed.contains('.') {
-        return None;
-    }
+    // Explicit schemes are URLs regardless of dots (rowser://history has
+    // none).
     if trimmed.starts_with("http://")
         || trimmed.starts_with("https://")
         || trimmed.starts_with("file://")
         || trimmed.starts_with("data:")
-        || trimmed.starts_with("rowser:")
+        || trimmed.starts_with("rowser://")
+        || trimmed.starts_with("about:")
     {
         return Some(trimmed.to_owned());
+    }
+    if trimmed.contains(' ') || !trimmed.contains('.') {
+        return None;
     }
     if trimmed.starts_with("localhost") || trimmed.parse::<std::net::IpAddr>().is_ok() {
         return Some(format!("http://{trimmed}"));
