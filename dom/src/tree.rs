@@ -122,7 +122,18 @@ pub struct Dom {
     pub version: u64,
     /// Document quirks mode.
     pub quirks: QuirksMode,
+    /// Overflow sentinel: returned by `alloc` once the node cap is hit.
+    /// Runaway page scripts (a 10s watchdog window of unbounded
+    /// appendChild) otherwise grow the tree to millions of nodes and the
+    /// next layout wedges the page thread for hours. All post-cap
+    /// allocations alias this one detached node, keeping the tree bounded.
+    overflow: NodeId,
 }
+
+/// Hard cap on live DOM nodes (real pages use 5–20k; heavy JS hydration
+/// can legitimately reach ~50k). Beyond this, allocations degrade to the
+/// overflow sentinel.
+pub const MAX_NODES: usize = 100_000;
 
 impl Default for Dom {
     fn default() -> Self {
@@ -140,8 +151,10 @@ impl Dom {
             document: 0,
             version: 1,
             quirks: QuirksMode::NoQuirks,
+            overflow: 0,
         };
         dom.document = dom.alloc(NodeKind::Document);
+        dom.overflow = dom.create_html_element("rowser-overflow");
         dom
     }
 
@@ -168,6 +181,10 @@ impl Dom {
 
     fn alloc(&mut self, kind: NodeKind) -> NodeId {
         self.version += 1;
+        if self.slots.len() - self.free.len() >= MAX_NODES {
+            // Document + overflow are exempt so the sentinel always exists.
+            return self.overflow;
+        }
         if let Some(id) = self.free.pop() {
             let idx = id as usize;
             self.generations[idx] = self.generations[idx].wrapping_add(1);

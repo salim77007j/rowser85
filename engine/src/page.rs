@@ -156,6 +156,10 @@ impl SnapshotWriter {
 pub(crate) fn run(state: Arc<PageState>, rx: Receiver<Message>) {
     let (js_tx, js_rx) = std::sync::mpsc::channel::<JsCommand>();
     let mut page = Page::new(Arc::clone(&state), js_tx, js_rx);
+    let trace = std::env::var("ROWSER_UI_TRACE").is_ok();
+    let mut ticks: u64 = 0;
+    let mut renders: u64 = 0;
+    let mut last_report = std::time::Instant::now();
     loop {
         // Drain JS-originated commands first (fast, non-blocking).
         while let Ok(command) = page.js_rx.try_recv() {
@@ -173,6 +177,22 @@ pub(crate) fn run(state: Arc<PageState>, rx: Receiver<Message>) {
                 page.idle();
             }
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+        if trace {
+            ticks += 1;
+            if page.dirty {
+                renders += 1;
+            }
+            if last_report.elapsed() > Duration::from_secs(2) {
+                eprintln!(
+                    "[page-{}] loop ticks={ticks}/2s dirty_now={} renders_signal={renders}",
+                    state.tab,
+                    page.dirty,
+                );
+                ticks = 0;
+                renders = 0;
+                last_report = std::time::Instant::now();
+            }
         }
     }
     page.shutdown_report();
@@ -192,6 +212,10 @@ struct Page {
     display_list: Option<rowser_rendering::DisplayList>,
     images: ImageMap,
     layout_engine: LayoutEngine,
+    /// Parsed-stylesheet cache: (fingerprint of css_texts + media, sheets).
+    /// Reparsing every stylesheet on every re-render is the dominant cost
+    /// for JS-heavy pages that dirty the DOM continuously.
+    css_cache: Option<(u64, Vec<ParsedStylesheet>)>,
     painter: Painter,
     url: String,
     pending: HashMap<String, SubresourceKind>,
@@ -231,6 +255,7 @@ impl Page {
             layout: None,
             display_list: None,
             images: ImageMap::new(),
+            css_cache: None,
             layout_engine: LayoutEngine::new(),
             painter: Painter::new(),
             url: String::new(),
@@ -715,6 +740,10 @@ impl Page {
     }
 
     fn document_fetched(&mut self, url: String, body: Vec<u8>) {
+        let trace = std::env::var("ROWSER_UI_TRACE").is_ok();
+        if trace {
+            eprintln!("[page-{}] document_fetched start ({} bytes)", self.state.tab, body.len());
+        }
         let mut document = parse_html(&body);
         document.url = Some(url);
         let dom = Rc::new(RefCell::new(std::mem::take(&mut document.dom)));
@@ -798,6 +827,10 @@ impl Page {
     }
 
     fn subresources_complete(&mut self) {
+        let trace = std::env::var("ROWSER_UI_TRACE").is_ok();
+        if trace {
+            eprintln!("[page-{}] subresources_complete → render", self.state.tab);
+        }
         if self.dom.is_none() {
             // Internal (rowser://) or unreachable pages: end the load state.
             self.navigating = false;
@@ -805,8 +838,23 @@ impl Page {
             return;
         }
         tracing::debug!(target: "rowser::engine", "tab {} subresources complete → render", self.state.tab);
-        self.render_pipeline();
+        if trace {
+            let t0 = std::time::Instant::now();
+            self.render_pipeline();
+            if trace {
+                eprintln!(
+                    "[page-{}] render_pipeline took {}ms",
+                    self.state.tab,
+                    t0.elapsed().as_millis()
+                );
+            }
+        } else {
+            self.render_pipeline();
+        }
         tracing::debug!(target: "rowser::engine", "tab {} render done → scripts", self.state.tab);
+        if trace {
+            eprintln!("[page-{}] run_scripts start", self.state.tab);
+        }
         self.run_scripts();
         tracing::debug!(target: "rowser::engine", "tab {} scripts done → PageLoaded", self.state.tab);
         self.navigating = false;
@@ -830,21 +878,85 @@ impl Page {
     /// Style → layout → display list → paint.
     fn render_pipeline(&mut self) {
         tracing::debug!(target: "rowser::engine", "render pipeline start");
+        let trace = std::env::var("ROWSER_UI_TRACE").is_ok();
         let Some(dom) = self.dom.clone() else { return };
-        // Stylesheets.
+        // Stylesheets — parsed once per (css set, media) combination.
         let media = MediaContext {
             width: self.viewport.width,
             height: self.viewport.height,
             dark_mode: false,
         };
-        let sheets: Vec<ParsedStylesheet> = self
-            .css_texts
-            .iter()
-            .map(|css| parse_stylesheet(css, &media))
-            .collect();
+        let fp = {
+            use std::hash::{Hash, Hasher};
+            let fp_t0 = std::time::Instant::now();
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            for css in &self.css_texts {
+                css.len().hash(&mut h);
+                css.hash(&mut h);
+            }
+            (media.width as u64).hash(&mut h);
+            (media.height as u64).hash(&mut h);
+            if trace {
+                eprintln!(
+                    "[page-{}] css fingerprint took {}ms",
+                    self.state.tab,
+                    fp_t0.elapsed().as_millis()
+                );
+            }
+            h.finish()
+        };
+        if trace {
+            // Dump sheets for offline parser analysis (hang reproduction):
+            // BEFORE the parse — the parse itself may wedge.
+            let dump = std::path::PathBuf::from("/tmp/css-dump");
+            let _ = std::fs::create_dir_all(&dump);
+            for (i, css) in self.css_texts.iter().enumerate() {
+                let _ = std::fs::write(
+                    dump.join(format!("tab{}-sheet{i:02}.css", self.state.tab)),
+                    css,
+                );
+            }
+        }
+        let sheets: Vec<ParsedStylesheet> = if let Some((cached_fp, cached)) =
+            self.css_cache.take()
+        {
+            if cached_fp == fp {
+                cached
+            } else {
+                self.css_texts
+                    .iter()
+                    .map(|css| parse_stylesheet(css, &media))
+                    .collect()
+            }
+        } else {
+            self.css_texts
+                .iter()
+                .map(|css| parse_stylesheet(css, &media))
+                .collect()
+        };
+        self.css_cache = Some((fp, sheets.clone()));
+        let stage_t0 = std::time::Instant::now();
+        if trace {
+            eprintln!(
+                "[page-{}] css parsed: {} sheets, {} total bytes",
+                self.state.tab,
+                sheets.len(),
+                self.css_texts.iter().map(|c| c.len()).sum::<usize>()
+            );
+        }
         let (styles, layout) =
             self.layout_engine
                 .layout_document(&dom.borrow(), &sheets, &media, self.viewport);
+        if trace {
+            eprintln!(
+                "[page-{}] layout took {}ms ({} dom nodes)",
+                self.state.tab,
+                stage_t0.elapsed().as_millis(),
+                dom.borrow().node_count()
+            );
+        }
+        let stage_t1 = std::time::Instant::now();
+        let _ = stage_t1;
         self.style_map = Some(styles);
         self.layout = Some(layout);
         self.rendered_dom_version = dom.borrow().version;
@@ -869,7 +981,16 @@ impl Page {
             return;
         };
         let Some(dom) = self.dom.clone() else { return };
+        let dl_t0 = std::time::Instant::now();
         let list = build_display_list(&dom.borrow(), &styles, &layout, &self.images);
+        if std::env::var("ROWSER_UI_TRACE").is_ok() {
+            eprintln!(
+                "[page-{}] display_list took {}ms ({} cmds)",
+                self.state.tab,
+                dl_t0.elapsed().as_millis(),
+                list.commands.len()
+            );
+        }
         self.display_list = Some(list.clone());
         let background = page_background(&styles, &layout);
         let options = RenderOptions {
@@ -935,6 +1056,7 @@ impl Page {
         if let Some(js) = &self.js {
             for (i, (src, code)) in scripts.iter().enumerate() {
                 let name = src.clone().unwrap_or_else(|| format!("inline-{i}.js"));
+                let t0 = std::time::Instant::now();
                 if let Err(err) = js.eval(code, &name) {
                     let _ = self.state.event_tx.send(EngineEvent::ConsoleMessage {
                         tab: self.state.tab,
@@ -942,10 +1064,22 @@ impl Page {
                         text: format!("{name}: {err}"),
                     });
                 }
+                if std::env::var("ROWSER_UI_TRACE").is_ok() && t0.elapsed() > std::time::Duration::from_millis(300) {
+                    eprintln!(
+                        "[page-{}] script {} ({}) took {}ms",
+                        self.state.tab,
+                        i,
+                        name,
+                        t0.elapsed().as_millis()
+                    );
+                }
             }
         }
         self.scripts = scripts;
         self.mark_if_dirty();
+        if std::env::var("ROWSER_UI_TRACE").is_ok() {
+            eprintln!("[page-{}] run_scripts done", self.state.tab);
+        }
     }
 
     fn spawn_worker(&mut self, worker: u64, code: String) {
@@ -981,6 +1115,10 @@ impl Page {
     }
 
     fn idle(&mut self) {
+        // Resume any microtasks left queued by a bounded pump_jobs() yield.
+        if let Some(js) = &self.js {
+            js.pump_jobs();
+        }
         if self.dirty && !self.suspended && !self.navigating && self.dom.is_some() {
             self.dirty = false;
             self.render_pipeline();

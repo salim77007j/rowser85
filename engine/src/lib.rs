@@ -361,6 +361,8 @@ struct PageHandle {
     pending_subresources: std::collections::HashSet<String>,
     /// WebSocket command channels for the tab.
     ws_senders: HashMap<u64, std::sync::mpsc::Sender<WsCommand>>,
+    /// Rate limit for background-tab timer delivery (Chrome-style throttle).
+    last_bg_timer: Option<std::time::Instant>,
 }
 
 /// A request queued for CNAME-cloaking verification.
@@ -776,6 +778,7 @@ fn create_tab(state: &EngineLoop, requested: TabId, url: Option<String>) {
             suspended: false,
             pending_subresources: std::collections::HashSet::new(),
             ws_senders: HashMap::new(),
+            last_bg_timer: None,
         },
     );
     state.broadcast(EngineEvent::TabCreated(tab));
@@ -883,13 +886,29 @@ fn handle_internal(state: &EngineLoop, internal: Internal) {
             });
         }
         Internal::TimerFired { tab, timer } => {
-            let suspended = state
-                .tabs
-                .lock()
-                .unwrap()
-                .get(&tab)
-                .map(|h| h.suspended)
-                .unwrap_or(true);
+            // Chrome-style background timer throttle: a tab backgrounded for
+            // more than 5s gets at most one timer delivery per second (JS
+            // animation loops in hidden tabs otherwise burn a full core
+            // in the page thread).
+            let now = std::time::Instant::now();
+            let mut tabs = state.tabs.lock().unwrap();
+            let Some(handle) = tabs.get_mut(&tab) else { return };
+            let suspended = handle.suspended;
+            let backgrounded_long = handle
+                .backgrounded_since
+                .map(|t| t.elapsed() > Duration::from_secs(5))
+                .unwrap_or(false);
+            if backgrounded_long && !suspended {
+                if handle
+                    .last_bg_timer
+                    .map(|t| t.elapsed() < Duration::from_secs(1))
+                    .unwrap_or(false)
+                {
+                    return; // throttled: drop this fire
+                }
+                handle.last_bg_timer = Some(now);
+            }
+            drop(tabs);
             if !suspended {
                 send_page(&state.tabs, tab, |tx| {
                     tx.send(page::Message::JsEvent(JsIntoEvent::TimerFired(timer)))

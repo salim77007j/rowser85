@@ -6,3 +6,4 @@ Cargo.lock.orig
 profile/
 fuzz-artifacts/
 dist/
+compare/chrome-linux64/

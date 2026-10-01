@@ -1,0 +1,13 @@
+== bench: rowser ==
+cold-start (5 runs, first-paint at 20fps):
+  run1: 500ms (first change at frame 1)
+  run2: 500ms (first change at frame 1)
+  run3: 500ms (first change at frame 1)
+  run4: 500ms (first change at frame 1)
+  run5: 500ms (first change at frame 1)
+ram-after-load (same 5 sites):
+  VmRSS(tree)=283.6MB  VmHWM(tree)=287.2MB  procs=1
+cpu-idle: 109.1% (15s, 5 tabs loaded)
+cpu-scroll: 164.0% (12s of XTEST scrolling)
+shutdown: 4ms (SIGTERM)
+done

@@ -49,3 +49,74 @@ PASS 19-multi-tabs  rss=399.8MB
 == summary ==
 failed stages: 0
 passed stages: 24
+== phase: sites ==
+== phase: sites ==
+PASS 01-newtab  rss=146.5MB
+PASS 02-example-com  rss=170.2MB
+PASS 03-wikipedia  rss=173.9MB
+PASS 04-github  rss=243.5MB
+PASS 05-hackernews  rss=254.7MB
+PASS 05b-rustlang  rss=272.0MB
+PASS 05c-example-2  rss=277.9MB
+PASS 05d-mozilla  rss=300.6MB
+PASS 05e-cern  rss=313.1MB
+PASS 06-search  rss=385.0MB
+== summary ==
+failed stages: 0
+passed stages: 34
+== phase: features ==
+FAIL 07-suggestions (frame unchanged vs previous stage)
+FAIL 08-bookmarked (frame unchanged vs previous stage)
+FAIL 09-bookmarks-manager (frame unchanged vs previous stage)
+FAIL 10-history (frame unchanged vs previous stage)
+FAIL 11-privacy (frame unchanged vs previous stage)
+FAIL 12-settings-dark (frame unchanged vs previous stage)
+FAIL 13-find-in-page (frame unchanged vs previous stage)
+FAIL 14-zoom-in (frame unchanged vs previous stage)
+FAIL 15-devtools (frame unchanged vs previous stage)
+FAIL 16-downloads (frame unchanged vs previous stage)
+FAIL 17-print-dialog (frame unchanged vs previous stage)
+== phase: sites ==
+PASS 01-newtab  rss=149.6MB
+PASS 02-example-com  rss=166.4MB
+PASS 03-wikipedia  rss=178.5MB
+PASS 04-github  rss=249.2MB
+PASS 05-hackernews  rss=260.6MB
+PASS 05b-rustlang  rss=277.9MB
+PASS 05c-example-2  rss=283.6MB
+PASS 05d-mozilla  rss=306.5MB
+PASS 05e-cern  rss=318.8MB
+PASS 06-search  rss=382.0MB
+== summary ==
+failed stages: 0
+passed stages: 44
+== phase: features ==
+PASS 07-suggestions  rss=382.0MB
+PASS 08-bookmarked  rss=382.0MB
+PASS 09-bookmarks-manager  rss=382.0MB
+PASS 10-history  rss=382.0MB
+PASS 11-privacy  rss=382.0MB
+PASS 12-settings-dark  rss=382.0MB
+PASS 13-find-in-page  rss=382.0MB
+PASS 14-zoom-in  rss=382.0MB
+PASS 15-devtools  rss=352.2MB
+PASS 16-downloads  rss=352.2MB
+PASS 17-print-dialog  rss=358.6MB
+PASS 18-tab-context-menu  rss=364.2MB
+PASS 19-multi-tabs  rss=369.9MB
+== summary ==
+failed stages: 0
+passed stages: 57
+== phase: session restore ==
+PASS 20-session-restore  rss=327.2MB
+== summary ==
+failed stages: 0
+passed stages: 58
+PASS 21-window-1080p  rss=328.5MB
+== summary ==
+failed stages: 0
+passed stages: 59
+PASS 22-window-768p  rss=325.6MB
+== summary ==
+failed stages: 0
+passed stages: 60

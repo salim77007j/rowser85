@@ -83,11 +83,18 @@ newtab_nav() { # Ctrl+T then navigate (one attempt)
 }
 
 stop_browser() {
+  # SIGTERM first (graceful engine shutdown closes the DB), then wait.
   pkill -f "$BROWSER" 2>/dev/null
+  pkill -f "rowser85/target/debug/rowser" 2>/dev/null   # stray debug instance
+  pkill -f "rowser85/dist/rowser" 2>/dev/null           # stray artifact instance
   for _ in $(seq 1 30); do
+    pgrep -f "rowser85/target/debug/rowser" >/dev/null && { sleep 0.3; continue; }
+    pgrep -f "rowser85/dist/rowser" >/dev/null && { sleep 0.3; continue; }
     pgrep -f "$BROWSER" >/dev/null || break
     sleep 0.3
   done
+  pkill -9 -f "rowser85/target/debug/rowser" 2>/dev/null
+  pkill -9 -f "rowser85/dist/rowser" 2>/dev/null
   pkill -9 -f "$BROWSER" 2>/dev/null
   sleep 0.5
 }

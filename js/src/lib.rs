@@ -340,11 +340,24 @@ impl JsRuntime {
         self.pump_jobs();
     }
 
-    /// Pumps promise jobs until the queue is empty.
+    /// Pumps promise jobs until the queue is empty — BOUNDED. A page whose
+    /// JS perpetually re-schedules microtasks (`while (true) { await
+    /// Promise.resolve(); }` or a runaway prelude chain) would otherwise
+    /// wedge the page thread inside a single dispatch: no engine messages,
+    /// no renders, one core burned. Bounding each pump and resuming on the
+    /// next idle tick keeps the tab responsive while the storm runs.
     pub fn pump_jobs(&self) {
+        let started = std::time::Instant::now();
+        let mut pumped: u32 = 0;
         while self.runtime.is_job_pending() {
+            if pumped >= 10_000 || started.elapsed() > Duration::from_millis(50) {
+                return; // yield; remaining jobs are pumped on the next call
+            }
             match self.runtime.execute_pending_job() {
-                Ok(true) => continue,
+                Ok(true) => {
+                    pumped += 1;
+                    continue;
+                }
                 Ok(false) => break,
                 Err(err) => {
                     tracing::warn!(target: "rowser::js", "job error: {err:?}");

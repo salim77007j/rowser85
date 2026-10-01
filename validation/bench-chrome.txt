@@ -1,0 +1,13 @@
+== bench: chrome ==
+cold-start (5 runs, first-paint at 20fps):
+  run1: 500ms (first change at frame 1)
+  run2: 500ms (first change at frame 1)
+  run3: 500ms (first change at frame 1)
+  run4: 500ms (first change at frame 1)
+  run5: 500ms (first change at frame 1)
+ram-after-load (same 5 sites):
+  VmRSS(tree)=1700.4MB  VmHWM(tree)=1753.6MB  procs=13
+cpu-idle: 8.1% (15s, 5 tabs loaded)
+cpu-scroll: 2.2% (12s of XTEST scrolling)
+shutdown: 84ms (SIGTERM)
+done
