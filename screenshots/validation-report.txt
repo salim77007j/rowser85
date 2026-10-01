@@ -164,3 +164,71 @@ PASS 22-window-768p  rss=384.6MB
 == summary ==
 failed stages: 0
 passed stages: 86
+== phase: sites ==
+PASS 01-newtab  rss=149.4MB
+PASS 02-example-com  rss=167.5MB
+PASS 03-wikipedia  rss=178.4MB
+PASS 04-github  rss=252.0MB
+PASS 05-hackernews  rss=263.1MB
+PASS 05b-rustlang  rss=280.3MB
+PASS 05c-example-2  rss=284.2MB
+PASS 05d-mozilla  rss=307.3MB
+PASS 05e-cern  rss=319.6MB
+PASS 06-search  rss=386.9MB
+== summary ==
+failed stages: 0
+passed stages: 96
+== phase: features ==
+FAIL 07-suggestions (frame unchanged vs previous stage)
+FAIL 08-bookmarked (frame unchanged vs previous stage)
+FAIL 09-bookmarks-manager (frame unchanged vs previous stage)
+FAIL 10-history (frame unchanged vs previous stage)
+FAIL 11-privacy (frame unchanged vs previous stage)
+FAIL 12-settings-dark (frame unchanged vs previous stage)
+FAIL 13-find-in-page (frame unchanged vs previous stage)
+FAIL 14-zoom-in (frame unchanged vs previous stage)
+FAIL 15-devtools (frame unchanged vs previous stage)
+== phase: sites ==
+PASS 01-newtab  rss=149.4MB
+PASS 02-example-com  rss=168.1MB
+PASS 03-wikipedia  rss=178.9MB
+PASS 04-github  rss=252.5MB
+PASS 05-hackernews  rss=263.6MB
+PASS 05b-rustlang  rss=280.6MB
+PASS 05c-example-2  rss=284.5MB
+PASS 05d-mozilla  rss=307.5MB
+PASS 05e-cern  rss=320.0MB
+PASS 06-search  rss=384.8MB
+== summary ==
+failed stages: 0
+passed stages: 106
+== phase: features ==
+PASS 07-suggestions  rss=384.8MB
+PASS 08-bookmarked  rss=384.8MB
+PASS 09-bookmarks-manager  rss=384.8MB
+PASS 10-history  rss=384.8MB
+PASS 11-privacy  rss=384.8MB
+PASS 12-settings-dark  rss=384.8MB
+PASS 13-find-in-page  rss=384.8MB
+PASS 14-zoom-in  rss=356.8MB
+PASS 15-devtools  rss=356.8MB
+PASS 16-downloads  rss=356.8MB
+PASS 17-print-dialog  rss=366.1MB
+PASS 18-tab-context-menu  rss=368.9MB
+PASS 19-multi-tabs  rss=374.6MB
+== summary ==
+failed stages: 0
+passed stages: 119
+== phase: session restore ==
+PASS 20-session-restore  rss=332.3MB
+== summary ==
+failed stages: 0
+passed stages: 120
+PASS 21-window-1080p  rss=331.7MB
+== summary ==
+failed stages: 0
+passed stages: 121
+PASS 22-window-768p  rss=331.9MB
+== summary ==
+failed stages: 0
+passed stages: 122
