@@ -1,0 +1,32 @@
+{
+  "name": "Rrowser85 palettes",
+  "source": "ui/src/theme.rs (authoritative; this file is an export for tooling)",
+  "modes": {
+    "light": {
+      "chrome_bg": "#F8F9FA",
+      "toolbar_bg": "#FFFFFF",
+      "surface": "#FFFFFF",
+      "elevated": "#FFFFFF",
+      "border": "#DADCE0",
+      "text": "#202124",
+      "text_dim": "#5F6368",
+      "hover": "#E8EAED"
+    },
+    "dark": {
+      "chrome_bg": "#292A31",
+      "toolbar_bg": "#35363D",
+      "surface": "#41424A",
+      "elevated": "#2B2C33",
+      "border": "#3C3D45",
+      "text": "#E8EAED",
+      "text_dim": "#9AA0A6",
+      "hover": "#2F3038"
+    }
+  },
+  "accents": {
+    "default": "#1A73E8",
+    "presets": ["#1A73E8", "#8430CE", "#D93025", "#188038", "#E37400", "#00838F"],
+    "on_accent": "#FFFFFF"
+  },
+  "design_reference": "Material-flat hybrid per design/wed44.png + design/wed45.png"
+}
