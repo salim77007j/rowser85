@@ -5,3 +5,4 @@ Cargo.lock.orig
 **/*.rs.bk
 profile/
 fuzz-artifacts/
+dist/
