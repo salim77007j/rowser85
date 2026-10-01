@@ -65,22 +65,24 @@ jobs:
       - name: Install fonts
         run: sudo apt-get update && sudo apt-get install -y fonts-dejavu-core
       - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+      # std is built from source with the same sanitizer flags so its
+      # synchronisation (OnceLock futexes, mpmc channels) is instrumented:
+      # no ABI-mismatch hacks, and TSan sees the real happens-before edges
+      # instead of reporting std-internal false positives.
       - name: Sanitized tests (${{ matrix.sanitizer }})
         env:
-          # `core`/std are precompiled without instrumentation; the ABI
-          # guard must be relaxed for mixed builds. TSan races whose stacks
-          # are entirely std-internal (the libtest harness's own channels)
-          # are filtered by ci/tsan-filter.py; workspace-frame races fail.
-          RUSTFLAGS: "-Z sanitizer=${{ matrix.sanitizer }} -C unsafe-allow-abi-mismatch=sanitizer"
+          RUSTFLAGS: "-Z sanitizer=${{ matrix.sanitizer }}"
           ASAN_OPTIONS: detect_leaks=1
-          TSAN_OPTIONS: halt_on_error=0 exitcode=0
+          TSAN_OPTIONS: halt_on_error=0
         run: |
           set -o pipefail
-          # Lib + integration tests only: doctests are compile-checked in the
-          # main matrix; the rustdoc harness process adds TSan noise, not
-          # signal.
-          cargo test --workspace --exclude rowser-benchmarks --lib --tests \
-            --target x86_64-unknown-linux-gnu -- --test-threads=2 2>&1 | tee /tmp/sanitized.log
+          # Lib + integration tests (doctests are compile-checked in the
+          # main matrix; rustdoc's harness adds noise, not signal).
+          cargo test -Z build-std --workspace --exclude rowser-benchmarks \
+            --lib --tests --target x86_64-unknown-linux-gnu \
+            -- --test-threads=2 2>&1 | tee /tmp/sanitized.log
           if [ "${{ matrix.sanitizer }}" = "thread" ]; then
             python3 ci/tsan-filter.py /tmp/sanitized.log
           fi
