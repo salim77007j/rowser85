@@ -68,13 +68,19 @@ jobs:
       - name: Sanitized tests (${{ matrix.sanitizer }})
         env:
           # `core`/std are precompiled without instrumentation; the ABI
-          # guard must be relaxed for mixed builds (std-internal races are
-          # out of scope — we detect races in engine code).
+          # guard must be relaxed for mixed builds. TSan races whose stacks
+          # are entirely std-internal (the libtest harness's own channels)
+          # are filtered by ci/tsan-filter.py; workspace-frame races fail.
           RUSTFLAGS: "-Z sanitizer=${{ matrix.sanitizer }} -C unsafe-allow-abi-mismatch=sanitizer"
           ASAN_OPTIONS: detect_leaks=1
+          TSAN_OPTIONS: halt_on_error=0 exitcode=0
         run: |
+          set -o pipefail
           cargo test --workspace --exclude rowser-benchmarks --target x86_64-unknown-linux-gnu \
-            -- --test-threads=2
+            -- --test-threads=2 2>&1 | tee /tmp/sanitized.log
+          if [ "${{ matrix.sanitizer }}" = "thread" ]; then
+            python3 ci/tsan-filter.py /tmp/sanitized.log
+          fi
 
   benchmark-baseline:
     name: benchmarks / baseline artifact
