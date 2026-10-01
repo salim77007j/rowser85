@@ -67,9 +67,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@nightly
       - name: Sanitized tests (${{ matrix.sanitizer }})
         env:
-          RUSTFLAGS: "-Z sanitizer=${{ matrix.sanitizer }}"
-          # ASan needs a big shadow-friendly allocator setting; TSan is
-          # tolerant. Leak detection is on for address.
+          # `core`/std are precompiled without instrumentation; the ABI
+          # guard must be relaxed for mixed builds (std-internal races are
+          # out of scope — we detect races in engine code).
+          RUSTFLAGS: "-Z sanitizer=${{ matrix.sanitizer }} -C unsafe-allow-abi-mismatch=sanitizer"
           ASAN_OPTIONS: detect_leaks=1
         run: |
           cargo test --workspace --exclude rowser-benchmarks --target x86_64-unknown-linux-gnu \

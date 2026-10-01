@@ -17,7 +17,7 @@ if ! rustup toolchain list | grep -q nightly; then
   exit 1
 fi
 
-export RUSTFLAGS="-Z sanitizer=${SAN}"
+export RUSTFLAGS="-Z sanitizer=${SAN} -C unsafe-allow-abi-mismatch=sanitizer"
 export ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=1}"
 export TSAN_OPTIONS="${TSAN_OPTIONS:-halt_on_error=1}"
 
