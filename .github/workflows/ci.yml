@@ -76,8 +76,11 @@ jobs:
           TSAN_OPTIONS: halt_on_error=0 exitcode=0
         run: |
           set -o pipefail
-          cargo test --workspace --exclude rowser-benchmarks --target x86_64-unknown-linux-gnu \
-            -- --test-threads=2 2>&1 | tee /tmp/sanitized.log
+          # Lib + integration tests only: doctests are compile-checked in the
+          # main matrix; the rustdoc harness process adds TSan noise, not
+          # signal.
+          cargo test --workspace --exclude rowser-benchmarks --lib --tests \
+            --target x86_64-unknown-linux-gnu -- --test-threads=2 2>&1 | tee /tmp/sanitized.log
           if [ "${{ matrix.sanitizer }}" = "thread" ]; then
             python3 ci/tsan-filter.py /tmp/sanitized.log
           fi
