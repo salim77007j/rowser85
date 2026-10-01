@@ -460,10 +460,16 @@ impl Dom {
 
     /// Iterates `root`'s subtree in document order, **excluding** `root`.
     pub fn descendants(&self, root: NodeId) -> Descendants<'_> {
-        Descendants {
-            dom: self,
-            stack: self.first_child(root).into_iter().collect(),
+        // Seed the stack with the full sibling chain of `root`'s direct
+        // children in reverse document order (documents commonly have several
+        // root-level children: doctype, comments and the `<html>` element).
+        let mut stack = Vec::new();
+        let mut child = self.last_child(root);
+        while let Some(id) = child {
+            stack.push(id);
+            child = self.prev_sibling(id);
         }
+        Descendants { dom: self, stack }
     }
 
     /// Iterates all element descendants of `root` (excluding `root` unless it

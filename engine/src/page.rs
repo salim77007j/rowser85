@@ -496,8 +496,11 @@ impl Page {
         if self.dom.is_none() {
             return;
         }
+        tracing::debug!(target: "rowser::engine", "tab {} subresources complete → render", self.state.tab);
         self.render_pipeline();
+        tracing::debug!(target: "rowser::engine", "tab {} render done → scripts", self.state.tab);
         self.run_scripts();
+        tracing::debug!(target: "rowser::engine", "tab {} scripts done → PageLoaded", self.state.tab);
         self.navigating = false;
         let title = self
             .document
@@ -517,6 +520,7 @@ impl Page {
 
     /// Style → layout → display list → paint.
     fn render_pipeline(&mut self) {
+        tracing::debug!(target: "rowser::engine", "render pipeline start");
         let Some(dom) = self.dom.clone() else { return };
         // Stylesheets.
         let media = MediaContext {

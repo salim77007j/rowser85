@@ -5,14 +5,19 @@
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 /// A tiny local HTTP/1.1 server for engine tests.
+///
+/// The accept loop terminates when [`LocalServer`] is dropped, so tests
+/// never leak the server thread (a bare `incoming()` loop would block
+/// `Drop`'s join forever).
 pub struct LocalServer {
     listener: TcpListener,
     routes: Arc<HashMap<String, (u16, String, Vec<u8>)>>,
     hits: Arc<AtomicU64>,
+    running: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -26,6 +31,7 @@ impl LocalServer {
             listener,
             routes: Arc::clone(&routes),
             hits: Arc::clone(&hits),
+            running: Arc::new(AtomicBool::new(true)),
             thread: None,
         };
         server
@@ -41,16 +47,20 @@ impl LocalServer {
         self.hits.load(Ordering::Relaxed)
     }
 
-    /// Serves until the process exits (call from a test thread).
+    /// Serves until dropped.
     pub fn serve(&mut self) {
         let listener = self.listener.try_clone().expect("clone listener");
         let routes = Arc::clone(&self.routes);
         let hits = Arc::clone(&self.hits);
+        let running = Arc::clone(&self.running);
         self.thread = Some(
             std::thread::Builder::new()
                 .name("test-http-server".into())
                 .spawn(move || {
                     for stream in listener.incoming() {
+                        if !running.load(Ordering::Relaxed) {
+                            break;
+                        }
                         let Ok(mut stream) = stream else { continue };
                         hits.fetch_add(1, Ordering::Relaxed);
                         let Some((status, ctype, body)) = serve_one(&mut stream, &routes) else {
@@ -66,8 +76,9 @@ impl LocalServer {
 
 impl Drop for LocalServer {
     fn drop(&mut self) {
-        // Drop the accept loop by connecting once (the thread ends when the
-        // listener is exhausted; tests are short-lived anyway).
+        // Stop the accept loop: flip the flag, then wake the accept() call
+        // with a self-connection so the thread observes the flag and exits.
+        self.running.store(false, Ordering::Relaxed);
         let _ = std::net::TcpStream::connect(self.listener.local_addr().unwrap());
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();

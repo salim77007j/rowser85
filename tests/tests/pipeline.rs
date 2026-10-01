@@ -9,12 +9,18 @@ use rowser_engine::EngineConfig;
 
 use rowser_tests::LocalServer;
 
-fn test_config() -> EngineConfig {
+fn test_config(label: &str) -> EngineConfig {
+    if std::env::var("ROWSER_TEST_LOG").is_ok() {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+            .with_target(true)
+            .try_init();
+    }
     EngineConfig {
+        // Unique per test (parallel test runs share one process).
         profile_dir: std::env::temp_dir().join(format!(
-            "rowser-e2e-{}-{}",
-            std::process::id(),
-            line!()
+            "rowser-e2e-{}-{label}",
+            std::process::id()
         )),
         ..EngineConfig::default()
     }
@@ -79,7 +85,7 @@ async fn full_pipeline_loads_renders_and_runs_scripts() {
     let url = server.url();
     server.serve();
 
-    let browser = BrowserApi::start(test_config()).expect("engine start");
+    let browser = BrowserApi::start(test_config("full-pipeline")).expect("engine start");
     let tab = browser.new_tab(Some(url.clone()));
 
     let mut events = browser.events();
@@ -142,7 +148,7 @@ async fn full_pipeline_loads_renders_and_runs_scripts() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn data_url_navigation_renders() {
-    let browser = BrowserApi::start(test_config()).expect("engine start");
+    let browser = BrowserApi::start(test_config("data-url")).expect("engine start");
     let html = "<html><body style='background-color: #00aa00'><p>data url page</p></body></html>";
     let data_url = format!("data:text/html;base64,{}", {
         use base64::Engine;
@@ -189,7 +195,7 @@ async fn tab_lifecycle_and_suspension() {
 
     let config = EngineConfig {
         suspend_after: Duration::from_millis(500),
-        ..test_config()
+        ..test_config("tab-lifecycle")
     };
     let browser = BrowserApi::start(config).expect("engine start");
     let tab = browser.new_tab(Some(url.clone()));

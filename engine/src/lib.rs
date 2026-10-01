@@ -373,31 +373,44 @@ impl Engine {
             next_tab: Arc::new(AtomicU64::new(1)),
         };
 
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .enable_all()
-            .build()?;
-
-        // The network context must be built inside the runtime.
-        let network = runtime.block_on(async {
-            rowser_networking::build_context(
-                Arc::clone(&storage),
-                config.privacy.clone(),
-                rowser_networking::HickoryDnsConfig::default(),
-                rowser_networking::H3Settings::default(),
-            )
-            .await
-        })?;
+        // The network context must be built inside the runtime. Build both the
+        // runtime and the contexts on a dedicated bootstrap thread so callers
+        // may themselves be running inside a tokio worker (driving a nested
+        // runtime from a worker thread would panic).
+        let storage_for_net = Arc::clone(&storage);
+        let privacy_config = config.privacy.clone();
+        let (runtime, network, resolver) = {
+            std::thread::scope(|scope| {
+                let handle = scope.spawn(move || -> anyhow::Result<_> {
+                    let runtime = tokio::runtime::Builder::new_multi_thread()
+                        .worker_threads(2)
+                        .enable_all()
+                        .build()?;
+                    let network = runtime.block_on(async {
+                        rowser_networking::build_context(
+                            storage_for_net,
+                            privacy_config,
+                            rowser_networking::HickoryDnsConfig::default(),
+                            rowser_networking::H3Settings::default(),
+                        )
+                        .await
+                    })?;
+                    // CNAME-cloaking gate's dedicated resolver.
+                    let resolver = runtime.block_on(async {
+                        rowser_networking::client::build_resolver(
+                            &rowser_networking::HickoryDnsConfig::default(),
+                        )
+                        .await
+                    })?;
+                    Ok((runtime, network, resolver))
+                });
+                handle.join().map_err(|_| anyhow::anyhow!("engine bootstrap thread panicked"))?
+            })
+        }?;
 
         // CNAME-cloaking gate thread: owns its own resolver + guard.
         let (cname_tx, cname_rx) = std::sync::mpsc::channel::<CnameCheck>();
         {
-            let resolver = runtime.block_on(async {
-                rowser_networking::client::build_resolver(
-                    &rowser_networking::HickoryDnsConfig::default(),
-                )
-                .await
-            })?;
             let cmd_tx_clone = cmd_tx.clone();
             std::thread::Builder::new()
                 .name("rowser-cname-gate".into())
@@ -640,7 +653,9 @@ fn create_tab(state: &EngineLoop, requested: TabId, url: Option<String>) {
             tx: page_tx,
             thread: Some(thread),
             focused: false,
-            backgrounded_since: None,
+            // Unfocused tabs count as backgrounded from creation: the
+            // suspension sweep may freeze them after the idle timeout.
+            backgrounded_since: Some(std::time::Instant::now()),
             memory: 0,
             suspended: false,
             pending_subresources: std::collections::HashSet::new(),
@@ -672,6 +687,7 @@ fn close_tab(state: &EngineLoop, tab: TabId) {
 fn handle_internal(state: &EngineLoop, internal: Internal) {
     match internal {
         Internal::FetchSubresources { tab, requests } => {
+            tracing::debug!(target: "rowser::engine", "fetch subresources: tab {tab}, {} requests", requests.len());
             {
                 let mut tabs = state.tabs.lock().unwrap();
                 let Some(handle) = tabs.get_mut(&tab) else { return };
@@ -992,9 +1008,12 @@ fn spawn_subresource_fetch(
     let network = Arc::clone(&state.network);
     let cmd_tx = state.cmd_tx.clone();
     let request_url = request.url.clone();
+    tracing::debug!(target: "rowser::engine", "spawning fetch task for {request_url}");
     state.runtime.spawn(async move {
+        tracing::debug!(target: "rowser::engine", "fetch task running for {request_url}");
         match rowser_networking::fetch(&network, request).await {
             Ok(response) => {
+                tracing::debug!(target: "rowser::engine", "fetch completed: {request_url} status {}", response.status);
                 let headers = serde_json::to_string(
                     &response.headers,
                 )
@@ -1008,6 +1027,7 @@ fn spawn_subresource_fetch(
                 }));
             }
             Err(err) => {
+                tracing::debug!(target: "rowser::engine", "fetch failed: {request_url}: {err}");
                 let _ = cmd_tx.send(Cmd::Internal(Internal::FetchFailed {
                     tab,
                     url: request_url,
