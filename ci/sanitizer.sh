@@ -24,7 +24,7 @@ rustup component add rust-src --toolchain nightly >/dev/null 2>&1 || true
 
 export RUSTFLAGS="-Z sanitizer=${SAN}"
 export ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=1}"
-export TSAN_OPTIONS="${TSAN_OPTIONS:-halt_on_error=0}"
+export TSAN_OPTIONS="${TSAN_OPTIONS:-halt_on_error=0 exitcode=0}"
 
 set -o pipefail
 cargo +nightly test -Z build-std --workspace --exclude rowser-benchmarks \

@@ -98,7 +98,14 @@ async fn full_pipeline_loads_renders_and_runs_scripts() {
     let mut loaded = false;
     let mut frame_ids = 0u64;
     let mut console_messages = 0usize;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    // Sanitizer builds run 10-20x slower; widen the deadline there.
+    let seconds = if std::env::var("TSAN_OPTIONS").is_ok() || std::env::var("ASAN_OPTIONS").is_ok()
+    {
+        120
+    } else {
+        20
+    };
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(seconds);
     'event_loop: loop {
         let event = tokio::time::timeout_at(deadline, events.recv())
             .await
