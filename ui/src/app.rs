@@ -509,6 +509,9 @@ impl BrowserApp {
     /// Handles engine events (frame textures, titles, find, console...).
     fn handle_events(&mut self, ctx: &Context) {
         let events = self.shell.poll_events();
+        if std::env::var("ROWSER_UI_TRACE").is_ok() && !events.is_empty() {
+            eprintln!("[frame] events={}", events.len());
+        }
         for event in events {
             match event {
                 EngineEvent::TabCreated(id) => {
@@ -1128,6 +1131,10 @@ fn refresh_frame(ctx: &Context, app: &mut BrowserApp, tab: TabId) {
 
 impl eframe::App for BrowserApp {
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
+        let trace = std::env::var("ROWSER_UI_TRACE").is_ok();
+        if trace {
+            eprintln!("[frame] start");
+        }
         if std::env::var("ROWSER_UI_DEBUG").is_ok() {
             for ev in ctx.input(|i| i.events.clone()) {
                 match ev {
@@ -1149,13 +1156,31 @@ impl eframe::App for BrowserApp {
                 }
             }
         }
+        if trace {
+            eprintln!("[frame] handle_events");
+        }
         self.handle_events(ctx);
+        if trace {
+            eprintln!("[frame] poll_print");
+        }
         self.poll_print();
+        if trace {
+            eprintln!("[frame] sync_theme");
+        }
         self.sync_theme(ctx);
+        if trace {
+            eprintln!("[frame] shortcuts");
+        }
         self.handle_shortcuts(ctx);
+        if trace {
+            eprintln!("[frame] draw");
+        }
         let mut chrome = std::mem::take(&mut self.chrome);
         chrome.draw(self, ctx);
         self.chrome = chrome;
+        if trace {
+            eprintln!("[frame] end");
+        }
 
         // Keep things alive: engine events wake us via the waker; otherwise
         // poll a few times a second (progress, downloads, suspension).

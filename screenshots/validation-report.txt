@@ -1,14 +1,51 @@
-== phase: sites ==
-PASS 01-newtab  rss=147.3MB
-PASS 02-example-com  rss=167.9MB
-FAIL 03-wikipedia (frame unchanged vs previous stage)
-PASS 04-github  rss=242.4MB
-PASS 05-hackernews  rss=253.6MB
-PASS 05b-rustlang  rss=257.8MB
-PASS 05c-example-2  rss=257.7MB
-PASS 05d-mozilla  rss=258.1MB
-PASS 05e-cern  rss=259.9MB
-PASS 06-search  rss=260.2MB
+PASS 22-window-768p  rss=361.6MB
 == summary ==
-failed stages: 1
-passed stages: 9
+failed stages: 0
+passed stages: 1
+== phase: sites ==
+FAIL 01-newtab (frame unchanged vs previous stage)
+FAIL 02-example-com (frame unchanged vs previous stage)
+FAIL 03-wikipedia (frame unchanged vs previous stage)
+FAIL 04-github (frame unchanged vs previous stage)
+FAIL 05-hackernews (frame unchanged vs previous stage)
+== phase: features ==
+FAIL 07-suggestions (frame unchanged vs previous stage)
+FAIL 08-bookmarked (frame unchanged vs previous stage)
+FAIL 09-bookmarks-manager (frame unchanged vs previous stage)
+FAIL 10-history (frame unchanged vs previous stage)
+FAIL 11-privacy (frame unchanged vs previous stage)
+FAIL 12-settings-dark (frame unchanged vs previous stage)
+FAIL 13-find-in-page (frame unchanged vs previous stage)
+FAIL 14-zoom-in (frame unchanged vs previous stage)
+FAIL 15-devtools (frame unchanged vs previous stage)
+== phase: sites ==
+PASS 01-newtab  rss=178.7MB
+PASS 02-example-com  rss=210.8MB
+PASS 03-wikipedia  rss=207.5MB
+PASS 04-github  rss=286.2MB
+PASS 05-hackernews  rss=297.3MB
+PASS 05b-rustlang  rss=307.0MB
+PASS 05c-example-2  rss=312.6MB
+PASS 05d-mozilla  rss=334.3MB
+PASS 05e-cern  rss=351.1MB
+PASS 06-search  rss=418.2MB
+== summary ==
+failed stages: 0
+passed stages: 11
+== phase: features ==
+PASS 07-suggestions  rss=418.2MB
+PASS 08-bookmarked  rss=418.2MB
+PASS 09-bookmarks-manager  rss=418.2MB
+PASS 10-history  rss=418.2MB
+PASS 11-privacy  rss=418.2MB
+PASS 12-settings-dark  rss=418.2MB
+PASS 13-find-in-page  rss=418.2MB
+PASS 14-zoom-in  rss=383.2MB
+PASS 15-devtools  rss=385.0MB
+PASS 16-downloads  rss=385.0MB
+PASS 17-print-dialog  rss=391.3MB
+PASS 18-tab-context-menu  rss=397.0MB
+PASS 19-multi-tabs  rss=399.8MB
+== summary ==
+failed stages: 0
+passed stages: 24

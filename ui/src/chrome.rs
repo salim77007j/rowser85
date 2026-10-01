@@ -1765,6 +1765,10 @@ impl Chrome {
                 }
             }
         }
+        // Escape dismisses the context menu (standard menu behavior).
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            app.ctx_menu = None;
+        }
     }
 
     // -----------------------------------------------------------------------

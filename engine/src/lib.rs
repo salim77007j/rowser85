@@ -344,7 +344,7 @@ impl Default for EngineConfig {
             profile_dir: std::env::temp_dir().join("rowser-profile"),
             privacy: PrivacySettings::default(),
             js: JsConfig::default(),
-            suspend_after: Duration::from_secs(300),
+            suspend_after: Duration::from_secs(60),
             memory_tick: Duration::from_secs(30),
             memory_budget_fraction: 0.35,
         }

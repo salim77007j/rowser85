@@ -17,7 +17,7 @@ export DISPLAY="${DISPLAY:-:99}"
 export LD_LIBRARY_PATH="/home/z/debs/extracted/usr/lib/x86_64-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 mkdir -p "$SHOT"
 REPORT="$SHOT/validation-report.txt"
-: > "$REPORT"
+if [ "$PHASE" = "all" ] || [ ! -f "$REPORT" ]; then : > "$REPORT"; fi
 
 last_hash=""
 fails=0
@@ -29,21 +29,27 @@ rss() { # peak/current RSS of the browser process, MB
   awk '/VmRSS/ {printf "%.1f", $2/1024}' "/proc/$pid/status" 2>/dev/null || echo "?"
 }
 
-# snap <name> [wait_seconds] — capture, verify frame changed vs previous
-# stage, retry capture until change or timeout; record PASS/FAIL + RSS.
+# snap <name> [wait_seconds] [retry_fn args…] — capture, verify the frame
+# CHANGED vs the previous stage; while unchanged, optionally RE-RUN the
+# interaction (retry_fn) before re-capturing. This survives load-dependent
+# input races: a dropped click/Enter simply gets retried as a whole stage.
 snap() {
-  local name="$1" secs="${2:-8}" hash tries=0
+  local name="$1" secs="${2:-8}"; shift 2 || true
+  local hash tries=0
   local out="$SHOT/$name.png"
   while [ $tries -le $((secs / 2)) ]; do
     ffmpeg -y -loglevel error -f x11grab -video_size "$RES" -i :99 \
       -frames:v 1 "$out" 2>/dev/null
     hash=$(md5sum "$out" 2>/dev/null | cut -d' ' -f1)
     if [ -n "$hash" ] && [ "$hash" != "$last_hash" ]; then
-      echo "PASS $name  rss=$(rss)MB" | tee -a "$REPORT"
+      local retr=""
+      [ "$tries" -gt 0 ] && retr=" (retried x$tries)"
+      echo "PASS $name  rss=$(rss)MB$retr" | tee -a "$REPORT"
       last_hash="$hash"
       return 0
     fi
-    tries=$((tries + 1)); sleep 2
+    if [ $# -gt 0 ]; then "$@"; else sleep 2; fi
+    tries=$((tries + 1)); sleep 1
   done
   echo "FAIL $name (frame unchanged vs previous stage)" | tee -a "$REPORT"
   fails=$((fails + 1))
@@ -57,25 +63,22 @@ reset_baseline() {
   last_hash=$(md5sum "$SHOT/.baseline.png" 2>/dev/null | cut -d' ' -f1)
 }
 
-nav() { # type into omnibox + Enter (real navigation)
+nav() { # type into omnibox + Enter (one real-navigation attempt)
   $X key Escape; sleep 0.4
-  $X click 680 61; sleep 0.8
-  $X type "$1"; sleep 0.4
+  $X click 680 61; sleep 1.0
+  $X type "$1"; sleep 0.5
   $X key Return
 }
 
-internal() { # navigate to an internal page
-  $X key Escape; sleep 0.3
-  $X click 680 61; sleep 0.8
-  $X type "$1"; sleep 0.4
-  $X key Return
+internal() { # navigate to an internal page (one attempt)
+  nav "$@"
 }
 
-newtab_nav() { # Ctrl+T then navigate
+newtab_nav() { # Ctrl+T then navigate (one attempt)
   $X key Escape; sleep 0.3
-  $X ctrl t; sleep 1.2
-  $X click 680 61; sleep 0.8
-  $X type "$1"; sleep 0.4
+  $X ctrl t; sleep 1.5
+  $X click 680 61; sleep 1.0
+  $X type "$1"; sleep 0.5
   $X key Return
 }
 
@@ -105,12 +108,19 @@ start_browser() { # start_browser [fresh|keep]
 }
 
 ensure_xvfb() { # the harness reaps background procs at command end;
-  # each run must bring up its own display server.
-  pgrep -f "Xvfb :99" >/dev/null || {
+  # each run must bring up its own display server — at the RIGHT resolution
+  # (a stale Xvfb at a different size makes every ffmpeg grab fail).
+  local want="${XVFB_RES:-1360x860}"
+  local current=""
+  if pgrep -f "Xvfb :99" >/dev/null; then
+    current=$(pgrep -af "Xvfb :99" | grep -oE '[0-9]+x[0-9]+x24' | head -1 | cut -dx -f1-2)
+  fi
+  if [ -z "$current" ] || [ "$current" != "$want" ]; then
+    pkill -f "Xvfb :99" 2>/dev/null; sleep 1
     rm -f /tmp/.X99-lock /tmp/.X11-unix/X99
-    Xvfb :99 -screen 0 "${XVFB_RES:-1360x860}x24" >/dev/null 2>&1 &
+    Xvfb :99 -screen 0 "${want}x24" >/dev/null 2>&1 &
     sleep 1.5
-  }
+  fi
 }
 ensure_xvfb
 
@@ -123,17 +133,17 @@ if [ "$PHASE" = "all" ] || [ "$PHASE" = "sites" ]; then
   sleep 2
   snap 01-newtab 6                                  # start page / quick dial
 
-  nav "example.com"; sleep 6;             snap 02-example-com 10
-  nav "en.wikipedia.org/wiki/Web_browser"; sleep 10; snap 03-wikipedia 12
+  nav "example.com"; sleep 4;              snap 02-example-com 12 nav "example.com"
+  nav "en.wikipedia.org/wiki/Web_browser"; sleep 6; snap 03-wikipedia 14 nav "en.wikipedia.org/wiki/Web_browser"
 
-  newtab_nav "github.com/rust-lang/rust"; sleep 12;  snap 04-github 14
-  newtab_nav "news.ycombinator.com";      sleep 10;  snap 05-hackernews 12
-  newtab_nav "www.rust-lang.org";         sleep 10;  snap 05b-rustlang 12
-  newtab_nav "example.com";               sleep 5;   snap 05c-example-2 8
-  newtab_nav "www.mozilla.org";           sleep 10;  snap 05d-mozilla 12
-  newtab_nav "info.cern.ch";              sleep 6;   snap 05e-cern 8
+  newtab_nav "github.com/rust-lang/rust"; sleep 8;  snap 04-github 16 newtab_nav "github.com/rust-lang/rust"
+  newtab_nav "news.ycombinator.com";      sleep 6;  snap 05-hackernews 14 newtab_nav "news.ycombinator.com"
+  newtab_nav "www.rust-lang.org";         sleep 6;  snap 05b-rustlang 14 newtab_nav "www.rust-lang.org"
+  newtab_nav "example.com";               sleep 3;  snap 05c-example-2 10 newtab_nav "example.com"
+  newtab_nav "www.mozilla.org";           sleep 6;  snap 05d-mozilla 14 newtab_nav "www.mozilla.org"
+  newtab_nav "info.cern.ch";              sleep 4;  snap 05e-cern 10 newtab_nav "info.cern.ch"
 
-  newtab_nav "rust programming language"; sleep 9;   snap 06-search 12
+  newtab_nav "rust programming language"; sleep 5;  snap 06-search 14 newtab_nav "rust programming language"
 fi
 
 # ------------------------------------------------------------- features ----
@@ -143,10 +153,13 @@ if [ "$PHASE" = "all" ] || [ "$PHASE" = "features" ]; then
     reset_baseline                 # standalone run: current frame = baseline
   fi
   # suggestions dropdown
-  $X key Escape; sleep 0.3
-  $X click 680 61; sleep 0.6
-  $X ctrl a; sleep 0.3
-  $X type "wiki"; sleep 1.5; snap 07-suggestions 6
+  sugg() {
+    $X key Escape; sleep 0.3
+    $X click 680 61; sleep 0.8
+    $X ctrl a; sleep 0.3
+    $X type "wiki"; sleep 1.2
+  }
+  sugg; snap 07-suggestions 10 sugg
   $X key Escape; sleep 0.5
 
   # bookmark via star (current tab: search results) then first tab
@@ -154,13 +167,13 @@ if [ "$PHASE" = "all" ] || [ "$PHASE" = "features" ]; then
   $X ctrl 1; sleep 1.2
   $X click 1210 61; sleep 1.0; snap 08-bookmarked 6
 
-  internal "rowser://bookmarks"; sleep 2;  snap 09-bookmarks-manager 6
+  internal "rowser://bookmarks"; sleep 2;  snap 09-bookmarks-manager 10 internal "rowser://bookmarks"
   $X key Escape; sleep 0.3
 
-  internal "rowser://history";  sleep 2;   snap 10-history 6
+  internal "rowser://history";  sleep 2;   snap 10-history 10 internal "rowser://history"
   $X key Escape; sleep 0.3
 
-  internal "rowser://privacy";  sleep 2;   snap 11-privacy 6
+  internal "rowser://privacy";  sleep 2;   snap 11-privacy 10 internal "rowser://privacy"
   $X key Escape; sleep 0.3
 
   # settings → appearance → dark
@@ -186,10 +199,13 @@ if [ "$PHASE" = "all" ] || [ "$PHASE" = "features" ]; then
   $X key F12; sleep 0.8
 
   # downloads: real file over the network
-  internal "rowser://downloads"; sleep 2
-  $X click 200 130; sleep 0.5
-  $X type "https://raw.githubusercontent.com/rust-lang/rust/master/README.md"
-  $X key Return; sleep 8;       snap 16-downloads 10
+  dl() {
+    internal "rowser://downloads"; sleep 1.5
+    $X click 200 130; sleep 0.5
+    $X type "https://raw.githubusercontent.com/rust-lang/rust/master/README.md"
+    $X key Return; sleep 4
+  }
+  dl; snap 16-downloads 14 dl
   $X key Escape; sleep 0.3
 
   # print dialog
@@ -201,7 +217,7 @@ if [ "$PHASE" = "all" ] || [ "$PHASE" = "features" ]; then
   $X key Escape; sleep 0.4
 
   # many-tabs overview
-  $X ctrl 2; sleep 1.5;         snap 19-multi-tabs 6
+  $X ctrl 2; sleep 1.5;         snap 19-multi-tabs 8
 fi
 
 # -------------------------------------------------------------- restore ----

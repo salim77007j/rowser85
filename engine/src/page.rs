@@ -849,7 +849,12 @@ impl Page {
         self.layout = Some(layout);
         self.rendered_dom_version = dom.borrow().version;
         self.display_list = None;
-        self.dirty = true;
+        // NOTE: do NOT leave `dirty` set here. idle() clears dirty before
+        // calling us; re-setting it made every tab re-render on every 250ms
+        // idle tick forever (static pages, background tabs included). That
+        // leak, multiplied across tabs, fed a FrameReady storm that
+        // eventually wedged the UI thread (exponential event batching).
+        self.dirty = false;
         self.repaint();
     }
 

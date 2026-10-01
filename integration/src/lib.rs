@@ -306,6 +306,83 @@ impl Shell {
                 drained.push(event);
             }
         }
+        // Coalesce FrameReady storms: the UI refreshes from the CURRENT
+        // snapshot, so for each tab only the newest FrameReady matters.
+        // Dropping stale ones bounds per-frame work and makes an event
+        // flood impossible to turn into a UI-thread wedge.
+        {
+            let mut last: std::collections::HashMap<rowser_api::TabId, usize> = Default::default();
+            for (i, event) in drained.iter().enumerate() {
+                if let EngineEvent::FrameReady { tab, .. } = event {
+                    last.insert(*tab, i);
+                }
+            }
+            if last.len()
+                < drained
+                    .iter()
+                    .filter(|e| matches!(e, EngineEvent::FrameReady { .. }))
+                    .count()
+            {
+                let mut idx = 0;
+                drained.retain(|event| {
+                    let keep = match event {
+                        EngineEvent::FrameReady { tab, .. } => {
+                            last.get(tab).is_none_or(|&i| i == idx)
+                        }
+                        _ => true,
+                    };
+                    idx += 1;
+                    keep
+                });
+            }
+        }
+        if std::env::var("ROWSER_UI_TRACE").is_ok() && !drained.is_empty() {
+            let mut counts: std::collections::BTreeMap<&str, usize> = Default::default();
+            for e in &drained {
+                let name = match e {
+                    EngineEvent::TabCreated(_) => "TabCreated",
+                    EngineEvent::TabClosed(_) => "TabClosed",
+                    EngineEvent::NavigationStarted { .. } => "NavigationStarted",
+                    EngineEvent::PageLoaded { .. } => "PageLoaded",
+                    EngineEvent::LoadProgress { .. } => "LoadProgress",
+                    EngineEvent::FrameReady { .. } => "FrameReady",
+                    EngineEvent::TitleChanged { .. } => "TitleChanged",
+                    EngineEvent::ConsoleMessage { .. } => "ConsoleMessage",
+                    EngineEvent::BlockedRequest { .. } => "BlockedRequest",
+                    EngineEvent::TabSuspended(_) => "TabSuspended",
+                    EngineEvent::TabResumed(_) => "TabResumed",
+                    _ => "Other",
+                };
+                *counts.entry(name).or_default() += 1;
+            }
+            let summary = counts
+                .iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let tabs = drained
+                .iter()
+                .filter_map(|e| match e {
+                    EngineEvent::FrameReady { tab, .. } => Some(format!("{tab}")),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            let tab_counts = {
+                let mut m: std::collections::BTreeMap<String, usize> = Default::default();
+                for t in &tabs {
+                    *m.entry(t.clone()).or_default() += 1;
+                }
+                m.iter()
+                    .map(|(k, v)| format!("{k}:{v}"))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            };
+            eprintln!(
+                "[shell] drained {} [{summary}] frames_by_tab={}",
+                drained.len(),
+                tab_counts
+            );
+        }
         for event in &drained {
             self.observe(event);
         }
