@@ -24,6 +24,43 @@
   };
   globalThis.console = console;
 
+  // ------------------------------------------------------------------ window
+  // Every real-world script reaches for `window` (and friends). Missing it
+  // was the single largest site-compatibility break: ALL of YouTube's inline
+  // scripts died with "window is not defined" before this alias existed.
+  const windowAlias = globalThis;
+  globalThis.window = windowAlias;
+  globalThis.self = windowAlias;
+  globalThis.top = windowAlias;
+  globalThis.parent = windowAlias;
+  globalThis.frames = windowAlias;
+  globalThis.name = '';
+  globalThis.closed = false;
+  globalThis.length = 0;
+  globalThis.scrollY = 0;
+  globalThis.scrollX = 0;
+  globalThis.pageYOffset = 0;
+  globalThis.pageXOffset = 0;
+  globalThis.scrollTo = function () {};
+  globalThis.scrollBy = function () {};
+  globalThis.focus = function () {};
+  globalThis.blur = function () {};
+  globalThis.print = function () {};
+  globalThis.open = function () { return null; };
+  globalThis.close = function () {};
+  globalThis.getComputedStyle = function (el, pseudo) {
+    // Minimal computed style: inline style reads; empty string otherwise.
+    const target = el;
+    return {
+      getPropertyValue(prop) { return target && target.style ? (target.style[prop] || '') : ''; },
+      get length() { return 0; },
+      get cssText() { return ''; },
+      item() { return ''; },
+    };
+  };
+  globalThis.getSelection = function () { return null; };
+
+
   // ------------------------------------------------------------------ timers
   const timers = new Map();
   let nextTimerId = 1;
@@ -192,12 +229,25 @@
       const handles = JSON.parse(__native_dom_querySelectorAll(String(sel)) || '[]');
       return handles.map(function (h) { return new Element(h); });
     }
+    getElementsByTagName(tag) { return this.querySelectorAll(String(tag)); }
+    getElementsByClassName(cls) { return this.querySelectorAll('.' + String(cls)); }
+    getElementsByName() { return []; }
     createElement(tag) { return new Element(__native_dom_createElement(String(tag))); }
     createTextNode(text) { return new Element(__native_dom_createTextNode(String(text))); }
+    createDocumentFragment() { return new Element(__native_dom_createElement('fragment')); }
     get body() { const h = __native_dom_body(); return h === null ? null : new Element(h); }
+    get head() { const h = __native_dom_querySelector('head'); return h === null ? null : new Element(h); }
     get documentElement() { const h = __native_dom_html(); return h === null ? null : new Element(h); }
     get title() { return __native_document_title(); }
+    set title(t) { /* engine-managed; JS title sets are a UI nicety for later */ }
     get readyState() { return 'complete'; }
+    get visibilityState() { return 'visible'; }
+    get hidden() { return false; }
+    get currentScript() { return null; }
+    get cookie() { return ''; }
+    set cookie(value) { /* engine cookie-jar integration is a documented gap */ }
+    get timeline() { return { currentTime: 0, play() {} }; }
+    getAnimations() { return []; }
     addEventListener(type, cb) { __native_document_addEventListener(String(type)); (this._ls = this._ls || {})[type] = cb; }
     removeEventListener(type) { if (this._ls) delete this._ls[type]; }
   }
@@ -205,6 +255,304 @@
   globalThis.Element = Element;
   globalThis.Node = Element;
   globalThis.Text = Element;
+
+  // ------------------------------------------------------------------ DOM classes
+  // `class X extends HTMLElement` is ubiquitous; without the HTML* element
+  // classes every modern framework's class registration throws.
+  const HTMLElementBase = class HTMLElement extends Element {};
+  const htmlClasses = {
+    HTMLElement: HTMLElementBase,
+    HTMLDivElement: class HTMLDivElement extends HTMLElementBase {},
+    HTMLSpanElement: class HTMLSpanElement extends HTMLElementBase {},
+    HTMLAnchorElement: class HTMLAnchorElement extends HTMLElementBase {},
+    HTMLImageElement: class HTMLImageElement extends HTMLElementBase {},
+    HTMLScriptElement: class HTMLScriptElement extends HTMLElementBase {},
+    HTMLStyleElement: class HTMLStyleElement extends HTMLElementBase {},
+    HTMLLinkElement: class HTMLLinkElement extends HTMLElementBase {},
+    HTMLInputElement: class HTMLInputElement extends HTMLElementBase {},
+    HTMLButtonElement: class HTMLButtonElement extends HTMLElementBase {},
+    HTMLFormElement: class HTMLFormElement extends HTMLElementBase {},
+    HTMLBodyElement: class HTMLBodyElement extends HTMLElementBase {},
+    HTMLHeadElement: class HTMLHeadElement extends HTMLElementBase {},
+    HTMLTemplateElement: class HTMLTemplateElement extends HTMLElementBase {
+      get content() { return this; }
+    },
+    HTMLVideoElement: class HTMLVideoElement extends HTMLElementBase {},
+    HTMLAudioElement: class HTMLAudioElement extends HTMLElementBase {},
+    HTMLCanvasElement: class HTMLCanvasElement extends HTMLElementBase {},
+    HTMLIFrameElement: class HTMLIFrameElement extends HTMLElementBase {},
+    HTMLUnknownElement: class HTMLUnknownElement extends HTMLElementBase {},
+    SVGSVGElement: class SVGSVGElement extends Element {},
+    SVGElement: class SVGElement extends Element {},
+  };
+  for (const name of Object.keys(htmlClasses)) globalThis[name] = htmlClasses[name];
+
+  // Event classes (constructors are feature-probed constantly).
+  globalThis.Event = class Event {
+    constructor(type, opts) {
+      this.type = String(type);
+      this.bubbles = !!(opts && opts.bubbles);
+      this.cancelable = !!(opts && opts.cancelable);
+      this.target = null;
+      this.defaultPrevented = false;
+    }
+    preventDefault() { this.defaultPrevented = true; }
+    stopPropagation() {}
+    stopImmediatePropagation() {}
+  };
+  globalThis.CustomEvent = class CustomEvent extends globalThis.Event {
+    constructor(type, opts) {
+      super(type, opts);
+      this.detail = opts && opts.detail;
+    }
+  };
+  globalThis.MouseEvent = class MouseEvent extends globalThis.Event {};
+  globalThis.KeyboardEvent = class KeyboardEvent extends globalThis.Event {};
+  globalThis.FocusEvent = class FocusEvent extends globalThis.Event {};
+  globalThis.EventTarget = class EventTarget {
+    addEventListener() {}
+    removeEventListener() {}
+    dispatchEvent() { return true; }
+  };
+
+  // WebComponents: registry + observers. These are *stubs* — custom elements
+  // register, scripts continue, upgrade callbacks are not synthesized.
+  const registry = new Map();
+  globalThis.customElements = {
+    define(name, ctor) { registry.set(String(name).toLowerCase(), ctor); },
+    get(name) { return registry.get(String(name).toLowerCase()); },
+    whenDefined(name) { return Promise.resolve(); },
+    upgrade() {},
+  };
+  globalThis.MutationObserver = class MutationObserver {
+    constructor(cb) { this._cb = cb; }
+    observe() {}
+    disconnect() {}
+    takeRecords() { return []; }
+  };
+  globalThis.IntersectionObserver = class IntersectionObserver {
+    constructor(cb) { this._cb = cb; }
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+    takeRecords() { return []; }
+  };
+  globalThis.ResizeObserver = class ResizeObserver {
+    constructor(cb) { this._cb = cb; }
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  };
+  globalThis.PerformanceObserver = class PerformanceObserver {
+    observe() {}
+    disconnect() {}
+    takeRecords() { return []; }
+  };
+
+  // Web Animations: element.animate() returning a resolved animation.
+  const animationStub = {
+    finished: Promise.resolve(),
+    currentTime: 0,
+    startTime: 0,
+    playState: 'finished',
+    play() {}, pause() {}, cancel() {}, finish() {}, reverse() {},
+    addEventListener() {}, removeEventListener() {},
+    onfinish: null,
+  };
+  Element.prototype.animate = function () { return animationStub; };
+  Element.prototype.getBoundingClientRect = function () {
+    return { x: 0, y: 0, top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0 };
+  };
+  Element.prototype.scrollIntoView = function () {};
+  Element.prototype.getBoundingClientRect.toString = function () { return 'function getBoundingClientRect() { [native code] }'; };
+  globalThis.Animation = class Animation {};
+  globalThis.KeyframeEffect = class KeyframeEffect {};
+
+  // ------------------------------------------------------------------ Node constants + tree walkers
+  const NODE_TYPE = {
+    ELEMENT_NODE: 1, ATTRIBUTE_NODE: 2, TEXT_NODE: 3, CDATA_SECTION_NODE: 4,
+    ENTITY_REFERENCE_NODE: 5, ENTITY_NODE: 6, PROCESSING_INSTRUCTION_NODE: 7,
+    COMMENT_NODE: 8, DOCUMENT_NODE: 9, DOCUMENT_TYPE_NODE: 10,
+    DOCUMENT_FRAGMENT_NODE: 11, NOTATION_NODE: 12,
+  };
+  for (const k of Object.keys(NODE_TYPE)) Element[k] = NODE_TYPE[k];
+  globalThis.NodeFilter = Object.assign(
+    {
+      FILTER_ACCEPT: 1, FILTER_REJECT: 2, FILTER_SKIP: 3,
+      SHOW_ALL: 0xFFFFFFFF, SHOW_ELEMENT: 0x1, SHOW_ATTRIBUTE: 0x2,
+      SHOW_TEXT: 0x4, SHOW_CDATA_SECTION: 0x8, SHOW_COMMENT: 0x80,
+      SHOW_DOCUMENT: 0x100, SHOW_DOCUMENT_TYPE: 0x200,
+      SHOW_DOCUMENT_FRAGMENT: 0x400,
+    },
+    { acceptNode() { return 1; } }
+  );
+  globalThis.TreeWalker = class TreeWalker {
+    constructor(root) { this.root = root; this.currentNode = root; }
+    nextNode() { return null; }
+    previousNode() { return null; }
+    firstChild() { return null; }
+    parentNode() { return null; }
+  };
+  globalThis.NodeIterator = class NodeIterator {
+    constructor(root) { this.root = root; }
+    nextNode() { return null; }
+    previousNode() { return null; }
+  };
+  globalThis.DOMParser = class DOMParser {
+    parseFromString() { return document; }
+  };
+  globalThis.XMLSerializer = class XMLSerializer {
+    serializeToString() { return ''; }
+  };
+
+  // ------------------------------------------------------------------ encoding
+  // Minimal UTF-8 TextEncoder/TextDecoder (QuickJS ships neither).
+  globalThis.TextEncoder = class TextEncoder {
+    encode(input) {
+      const str = String(input === undefined ? '' : input);
+      const out = [];
+      for (let i = 0; i < str.length; i++) {
+        let code = str.codePointAt(i);
+        if (code > 0xFFFF) i++; // surrogate pair consumed
+        if (code < 0x80) out.push(code);
+        else if (code < 0x800) {
+          out.push(0xC0 | (code >> 6), 0x80 | (code & 0x3F));
+        } else if (code < 0x10000) {
+          out.push(0xE0 | (code >> 12), 0x80 | ((code >> 6) & 0x3F), 0x80 | (code & 0x3F));
+        } else {
+          out.push(
+            0xF0 | (code >> 18), 0x80 | ((code >> 12) & 0x3F),
+            0x80 | ((code >> 6) & 0x3F), 0x80 | (code & 0x3F)
+          );
+        }
+      }
+      return new Uint8Array(out);
+    }
+  };
+  globalThis.TextDecoder = class TextDecoder {
+    decode(bytes) {
+      if (!bytes) return '';
+      const u8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+      let out = '';
+      let i = 0;
+      while (i < u8.length) {
+        const b = u8[i];
+        if (b < 0x80) { out += String.fromCharCode(b); i += 1; }
+        else if (b < 0xE0) {
+          out += String.fromCharCode(((b & 0x1F) << 6) | (u8[i + 1] & 0x3F)); i += 2;
+        } else if (b < 0xF0) {
+          out += String.fromCharCode(((b & 0x0F) << 12) | ((u8[i + 1] & 0x3F) << 6) | (u8[i + 2] & 0x3F)); i += 3;
+        } else {
+          const cp = ((b & 0x07) << 18) | ((u8[i + 1] & 0x3F) << 12) | ((u8[i + 2] & 0x3F) << 6) | (u8[i + 3] & 0x3F);
+          out += String.fromCodePoint(cp); i += 4;
+        }
+      }
+      return out;
+    }
+  };
+
+  // ------------------------------------------------------------------ crypto (non-security)
+  // Math.random-backed: fine for GUIDs and feature probes, NOT for keys.
+  globalThis.crypto = {
+    getRandomValues(array) {
+      for (let i = 0; i < array.length; i++) {
+        array[i] = Math.floor(Math.random() * 256);
+      }
+      return array;
+    },
+    randomUUID() {
+      const hex = '0123456789abcdef';
+      let uuid = '';
+      for (let i = 0; i < 36; i++) {
+        if (i === 8 || i === 13 || i === 18 || i === 23) uuid += '-';
+        else if (i === 14) uuid += '4';
+        else uuid += hex[Math.floor(Math.random() * 16)];
+      }
+      return uuid;
+    },
+    subtle: new Proxy({}, { get() { return function () { return Promise.resolve({}); }; } }),
+  };
+
+  // ------------------------------------------------------------------ URL
+  // Minimal URL (protocol//host/path?search#hash) — enough for link munging.
+  globalThis.URL = class URL {
+    constructor(input, base) {
+      let str = String(input);
+      if (base !== undefined && !/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(str)) {
+        str = String(base).replace(/\/[^/]*$/, '') + (str.startsWith('/') ? '' : '/') + str;
+      }
+      const m = /^([a-zA-Z][a-zA-Z0-9+.-]*:\/\/)?([^/?#]*)?([^?#]*)(\?[^#]*)?(#.*)?$/.exec(str);
+      this.protocol = (m[1] || '').replace('://', '').toLowerCase();
+      const hostPart = m[2] || '';
+      this.host = hostPart;
+      this.hostname = hostPart.split(':')[0];
+      this.port = hostPart.includes(':') ? hostPart.split(':')[1] : '';
+      this.pathname = m[3] || '/';
+      this.search = m[4] || '';
+      this.hash = m[5] || '';
+      this.searchParams = new URLSearchParams(this.search);
+      Object.defineProperty(this, 'href', {
+        get: () => this.toString(),
+        set: (v) => { __native_navigate(String(v)); },
+      });
+    }
+    toString() {
+      return (this.protocol ? this.protocol + '://' : '') + this.host + this.pathname + this.search + this.hash;
+    }
+    static createObjectURL() { return ''; }
+    static revokeObjectURL() {}
+  };
+  globalThis.URLSearchParams = class URLSearchParams {
+    constructor(init) {
+      this._pairs = [];
+      if (typeof init === 'string') {
+        const q = init.startsWith('?') ? init.slice(1) : init;
+        for (const part of q.split('&')) {
+          if (!part) continue;
+          const eq = part.indexOf('=');
+          const k = decodeURIComponent(eq < 0 ? part : part.slice(0, eq));
+          const v = eq < 0 ? '' : decodeURIComponent(part.slice(eq + 1));
+          this._pairs.push([k, v]);
+        }
+      } else if (init && typeof init.forEach === 'function') {
+        init.forEach((v, k) => this._pairs.push([String(k), String(v)]));
+      }
+    }
+    get(k) { const p = this._pairs.find((x) => x[0] === k); return p ? p[1] : null; }
+    getAll(k) { return this._pairs.filter((x) => x[0] === k).map((x) => x[1]); }
+    has(k) { return this._pairs.some((x) => x[0] === k); }
+    set(k, v) { this._pairs = this._pairs.filter((x) => x[0] !== k); this._pairs.push([k, String(v)]); }
+    append(k, v) { this._pairs.push([k, String(v)]); }
+    delete(k) { this._pairs = this._pairs.filter((x) => x[0] !== k); }
+    toString() { return this._pairs.map((p) => encodeURIComponent(p[0]) + '=' + encodeURIComponent(p[1])).join('&'); }
+    forEach(cb) { this._pairs.forEach((p) => cb(p[1], p[0])); }
+  };
+
+  // ------------------------------------------------------------------ abort + idle
+  globalThis.AbortSignal = class AbortSignal {
+    constructor() { this.aborted = false; this.reason = undefined; this.onabort = null; }
+    addEventListener(type, cb) { if (type === 'abort') { this._cb = cb; } }
+    removeEventListener() { this._cb = null; }
+    _abort(reason) {
+      if (this.aborted) return;
+      this.aborted = true;
+      this.reason = reason;
+      if (typeof this.onabort === 'function') { try { this.onabort({ type: 'abort' }); } catch (e) {} }
+      if (this._cb) { try { this._cb({ type: 'abort' }); } catch (e) {} }
+    }
+    static timeout() { return new AbortSignal(); }
+  };
+  globalThis.AbortController = class AbortController {
+    constructor() { this.signal = new AbortSignal(); }
+    abort(reason) { this.signal._abort(reason); }
+  };
+  globalThis.requestIdleCallback = function (cb) {
+    return setTimeout(function () { cb({ didTimeout: false, timeRemaining() { return 50; } }); }, 1);
+  };
+  globalThis.cancelIdleCallback = function (id) { clearTimeout(id); };
+  globalThis.structuredClone = function (value) {
+    return JSON.parse(JSON.stringify(value === undefined ? null : value));
+  };
   globalThis.__elementFromHandle = function (h) { return new Element(h); };
 
   // Window-level listeners + event dispatch (from the engine/UI).
@@ -282,6 +630,7 @@
   // ------------------------------------------------------------------ environment
   const env = JSON.parse(__native_env_info());
   const navigator = {
+    sendBeacon() { return true; },
     userAgent: env.userAgent,
     appVersion: '5.0 (Rrowser)',
     platform: env.platform,
@@ -307,15 +656,32 @@
     pixelDepth: env.screen.colorDepth,
   };
   globalThis.devicePixelRatio = 1;
+  // `location` is settable: assigning href (or calling assign/replace)
+  // navigates the tab via the engine.
   globalThis.location = {
-    href: env.location,
+    get href() { return env.location; },
+    set href(url) { __native_navigate(String(url)); },
     origin: env.origin,
     protocol: env.protocol,
     host: env.host,
+    hostname: env.host,
     pathname: env.pathname,
+    get search() { return ''; },
+    get hash() { return ''; },
+    assign(url) { __native_navigate(String(url)); },
+    replace(url) { __native_navigate(String(url)); },
+    reload() { __native_navigate(String(env.location)); },
     toString() { return env.location; },
   };
-  globalThis.history = { length: 1, back() {}, forward() {}, go() {} };
+  globalThis.origin = env.origin;
+  globalThis.history = {
+    length: 1,
+    back() {},
+    forward() {},
+    go() {},
+    pushState() {},
+    replaceState() {},
+  };
 
   // ------------------------------------------------------------------ misc
   globalThis.btoa = function (s) { return __native_b64_encode(String(s)); };
@@ -323,6 +689,30 @@
   globalThis.performance = {
     now() { return Date.now(); },
     timeOrigin: Date.now(),
+    // Navigation Timing (legacy field set; probed by many loaders).
+    timing: {
+      navigationStart: Date.now() - 500,
+      fetchStart: Date.now() - 400,
+      domainLookupStart: Date.now() - 390,
+      domainLookupEnd: Date.now() - 380,
+      connectStart: Date.now() - 370,
+      connectEnd: Date.now() - 300,
+      requestStart: Date.now() - 290,
+      responseStart: Date.now() - 100,
+      responseEnd: Date.now() - 50,
+      domLoading: Date.now() - 40,
+      domInteractive: Date.now() - 20,
+      domContentLoadedEventStart: Date.now() - 10,
+      domContentLoadedEventEnd: Date.now() - 5,
+      domComplete: Date.now(),
+      loadEventStart: Date.now(),
+      loadEventEnd: Date.now(),
+    },
+    getEntriesByType() { return []; },
+    getEntriesByName() { return []; },
+    getEntries() { return []; },
+    mark() {},
+    measure() {},
   };
   globalThis.alert = globalThis.confirm = globalThis.prompt = function () {};
   globalThis.requestAnimationFrame = function (cb) { return setTimeout(cb, 16); };

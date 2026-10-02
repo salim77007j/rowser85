@@ -437,12 +437,28 @@ impl Engine {
             next_tab: Arc::new(AtomicU64::new(1)),
         };
 
+        // One session-scoped anti-fingerprint profile: navigator.userAgent,
+        // network User-Agent, and downloads all present the SAME identity
+        // (per-tab profiles would let sites correlate the mismatch).
+        let session_seed = blake3::hash(
+            &std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or_default()
+                .to_le_bytes(),
+        );
+        let spoof = SpoofProfile::from_seed(*session_seed.as_bytes());
+
         // The network context must be built inside the runtime. Build both the
         // runtime and the contexts on a dedicated bootstrap thread so callers
         // may themselves be running inside a tokio worker (driving a nested
         // runtime from a worker thread would panic).
         let storage_for_net = Arc::clone(&storage);
         let privacy_config = config.privacy.clone();
+        let client_identity = rowser_networking::ClientIdentity {
+            user_agent: spoof.user_agent.clone(),
+            ..rowser_networking::ClientIdentity::default()
+        };
         let (runtime, network, resolver) = {
             std::thread::scope(|scope| {
                 let handle = scope.spawn(move || -> anyhow::Result<_> {
@@ -456,6 +472,7 @@ impl Engine {
                             privacy_config,
                             rowser_networking::HickoryDnsConfig::default(),
                             rowser_networking::H3Settings::default(),
+                            client_identity,
                         )
                         .await
                     })?;
@@ -490,6 +507,7 @@ impl Engine {
             storage,
             network: Arc::new(network),
             runtime,
+            spoof,
             blocklist: Mutex::new(Blocklist::with_builtin_rules()),
             cname_gate: cname_tx,
             cmd_tx: cmd_tx.clone(),
@@ -548,6 +566,9 @@ struct EngineLoop {
     storage: Arc<Storage>,
     network: Arc<rowser_networking::NetworkContext>,
     runtime: tokio::runtime::Runtime,
+    /// Session anti-fingerprint profile shared by every tab and the network
+    /// layer (identity consistency).
+    spoof: SpoofProfile,
     /// Ad/tracker blocklist (engine-loop-thread only: the adblock engine
     /// contains non-Send `Rc`s).
     blocklist: Mutex<Blocklist>,
@@ -736,8 +757,8 @@ fn handle_user(state: &EngineLoop, command: Command) -> bool {
 fn create_tab(state: &EngineLoop, requested: TabId, url: Option<String>) {
     let tab = requested;
     let (page_tx, page_rx) = std::sync::mpsc::channel::<page::Message>();
-    let seed = blake3::hash(format!("tab-{tab}").as_bytes());
-    let spoof = SpoofProfile::from_seed(*seed.as_bytes());
+    // All tabs share the session profile (identity consistency, see start).
+    let spoof = state.spoof.clone();
 
     {
         let mut snapshots = state.snapshots.lock().unwrap();
@@ -1000,6 +1021,13 @@ fn send_page(
 
 fn handle_page_command(state: &EngineLoop, tab: TabId, command: JsCommand) {
     match command {
+        // Navigation is handled by the page thread itself (history + reload
+        // semantics); forward it back down.
+        JsCommand::Navigate { .. } => {
+            send_page(&state.tabs, tab, |tx| {
+                tx.send(page::Message::JsCommand(command.clone()))
+            });
+        }
         JsCommand::TimerStart {
             id,
             delay_ms,
@@ -1046,7 +1074,22 @@ fn handle_page_command(state: &EngineLoop, tab: TabId, command: JsCommand) {
             send_page(&state.tabs, tab, |tx| tx.send(page::Message::MarkDirty));
         }
         JsCommand::WsOpen { id, url } => {
-            spawn_ws_task(state, tab, id, url);
+            let origin = {
+                let source = state.source_url(tab);
+                url::Url::parse(&source)
+                    .ok()
+                    .map(|u| {
+                        format!(
+                            "{}://{}{}",
+                            u.scheme(),
+                            u.host_str().unwrap_or_default(),
+                            u.port().map(|p| format!(":{p}")).unwrap_or_default()
+                        )
+                    })
+                    .filter(|_| !source.is_empty())
+            };
+            let user_agent = state.network.client.user_agent.clone();
+            spawn_ws_task(state, tab, id, url, origin, user_agent);
         }
         JsCommand::WsSend { id, data } => {
             let sender = {
@@ -1216,7 +1259,14 @@ fn spawn_subresource_fetch(
     });
 }
 
-fn spawn_ws_task(state: &EngineLoop, tab: TabId, socket: u64, url: String) {
+fn spawn_ws_task(
+    state: &EngineLoop,
+    tab: TabId,
+    socket: u64,
+    url: String,
+    origin: Option<String>,
+    user_agent: String,
+) {
     let cmd_tx = state.cmd_tx.clone();
     let (ws_tx, ws_rx) = std::sync::mpsc::channel::<WsCommand>();
     {
@@ -1226,7 +1276,7 @@ fn spawn_ws_task(state: &EngineLoop, tab: TabId, socket: u64, url: String) {
         }
     }
     state.runtime.spawn(async move {
-        match rowser_networking::ws::connect(&url).await {
+        match rowser_networking::ws::connect(&url, origin.as_deref(), &user_agent).await {
             Ok(mut socket_conn) => {
                 let _ = cmd_tx.send(Cmd::Internal(Internal::WsEvent {
                     tab,

@@ -4934,6 +4934,7 @@ dependencies = [
  "rowser-api",
  "rowser-engine",
  "rowser-shell",
+ "tracing-subscriber",
 ]
 
 [[package]]

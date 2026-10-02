@@ -29,8 +29,32 @@ pub use h3::H3Settings;
 pub use scheduler::{ResourcePriority, ResourceScheduler};
 
 use rowser_privacy::PrivacySettings;
+use rowser_privacy::fingerprint::{ACCEPT_LANGUAGE, USER_AGENT};
 use rowser_storage::cookies::{CookieJar, ThirdPartyPolicy};
 use rowser_storage::Storage;
+
+/// The identity every outgoing request presents (user agent + languages).
+///
+/// Sites increasingly hard-fail requests without a browser User-Agent
+/// (Wikipedia: 403 robot policy; Google/YouTube: h2 RST_STREAM protocol
+/// error), so this is applied to EVERY request on EVERY transport (h1/h2/h3,
+/// websockets, downloads) from ONE session-scoped value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientIdentity {
+    /// User-Agent string (must match `navigator.userAgent`).
+    pub user_agent: String,
+    /// Accept-Language header value.
+    pub accept_language: String,
+}
+
+impl Default for ClientIdentity {
+    fn default() -> Self {
+        ClientIdentity {
+            user_agent: USER_AGENT.to_owned(),
+            accept_language: ACCEPT_LANGUAGE.to_owned(),
+        }
+    }
+}
 
 /// Network-layer errors.
 #[derive(Debug, thiserror::Error)]
@@ -174,6 +198,8 @@ impl FetchResponse {
 pub struct NetworkContext {
     /// HTTP/1.1 + HTTP/2 client.
     pub http: client::HttpClient,
+    /// Session request identity (UA + languages) applied to all requests.
+    pub client: ClientIdentity,
     /// DNS resolver (DoH/DoT capable).
     pub resolver: hickory_resolver::TokioResolver,
     /// HTTP/3 pool.
@@ -194,12 +220,14 @@ pub async fn build_context(
     settings: PrivacySettings,
     dns: HickoryDnsConfig,
     h3_settings: H3Settings,
+    client: ClientIdentity,
 ) -> Result<NetworkContext, NetError> {
     let resolver = client::build_resolver(&dns).await?;
     let http = client::build_http_client(&resolver);
     let h3_pool = h3::H3Pool::new(h3_settings);
     Ok(NetworkContext {
         http,
+        client,
         resolver,
         h3: h3_pool,
         settings: std::sync::RwLock::new(settings),
@@ -272,6 +300,10 @@ pub async fn fetch(ctx: &NetworkContext, request: FetchRequest) -> Result<FetchR
                 .retain(|(n, _)| !n.eq_ignore_ascii_case("cookie"));
             current.headers.push(("cookie".into(), cookie_header));
         }
+
+        // 3. Standard browser headers (identity + fetch metadata). Applied
+        // on every hop so Sec-Fetch-Site is recomputed per redirect target.
+        apply_default_headers(&mut current, &ctx.client, &url);
 
         // 4. Dispatch.
         let response = dispatch(ctx, &current, &url).await?;
@@ -406,19 +438,93 @@ fn fetch_data_url(request: &FetchRequest) -> Result<FetchResponse, NetError> {
 }
 
 /// Builds a standard header list for a request (user agent etc.).
-pub fn default_headers(
-    profile: &rowser_privacy::fingerprint::SpoofProfile,
-) -> Vec<(String, String)> {
-    vec![
-        ("user-agent".to_owned(), profile.user_agent.clone()),
-        (
-            "accept".to_owned(),
-            "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
-                .to_owned(),
-        ),
-        ("accept-language".to_owned(), "en-US,en;q=0.9".to_owned()),
-        ("sec-fetch-mode".to_owned(), "navigate".to_owned()),
-    ]
+fn apply_default_headers(
+    request: &mut FetchRequest,
+    client: &ClientIdentity,
+    url: &Url,
+) {
+    fn has(headers: &[(String, String)], name: &str) -> bool {
+        headers.iter().any(|(n, _)| n.eq_ignore_ascii_case(name))
+    }
+    fn set(headers: &mut Vec<(String, String)>, name: &str, value: &str) {
+        headers.push((name.to_owned(), value.to_owned()));
+    }
+
+    // Identity headers — only if the caller did not provide them.
+    if !has(&request.headers, "user-agent") {
+        set(&mut request.headers, "user-agent", &client.user_agent);
+    }
+    if !has(&request.headers, "accept-language") {
+        set(&mut request.headers, "accept-language", &client.accept_language);
+    }
+    if !has(&request.headers, "accept") {
+        let accept = match request.resource_type {
+            ResourceKind::Document | ResourceKind::SubDocument => {
+                "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
+            }
+            ResourceKind::Stylesheet => "text/css,*/*;q=0.1",
+            ResourceKind::Image => {
+                "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8"
+            }
+            _ => "*/*",
+        };
+        set(&mut request.headers, "accept", accept);
+    }
+    if matches!(request.resource_type, ResourceKind::Document)
+        && !has(&request.headers, "upgrade-insecure-requests")
+    {
+        set(&mut request.headers, "upgrade-insecure-requests", "1");
+    }
+
+    // Sec-Fetch-* metadata. These are browser-controlled (the fetch spec
+    // forbids JS from setting them), so we always (re)compute them — which
+    // also keeps them correct across redirect hops.
+    let (mode, dest) = match request.resource_type {
+        ResourceKind::Document => ("navigate", "document"),
+        ResourceKind::SubDocument => ("navigate", "iframe"),
+        ResourceKind::Stylesheet => ("no-cors", "style"),
+        ResourceKind::Image => ("no-cors", "image"),
+        ResourceKind::Script => ("no-cors", "script"),
+        ResourceKind::Font => ("no-cors", "font"),
+        ResourceKind::Media => ("no-cors", "audio"),
+        ResourceKind::Xhr => ("cors", ""),
+        ResourceKind::WebSocket => ("websocket", ""),
+        ResourceKind::Other => ("no-cors", ""),
+    };
+    let site = fetch_site(url, &request.source_url);
+    request
+        .headers
+        .retain(|(n, _)| !(n.eq_ignore_ascii_case("sec-fetch-mode")
+            || n.eq_ignore_ascii_case("sec-fetch-dest")
+            || n.eq_ignore_ascii_case("sec-fetch-site")));
+    set(&mut request.headers, "sec-fetch-mode", mode);
+    if !dest.is_empty() {
+        set(&mut request.headers, "sec-fetch-dest", dest);
+    }
+    set(&mut request.headers, "sec-fetch-site", site);
+}
+
+/// Computes the Sec-Fetch-Site value for a request to `url` initiated from
+/// `source` (empty = browser-initiated).
+fn fetch_site(url: &Url, source: &str) -> &'static str {
+    let Some(source) = Url::parse(source).ok() else {
+        return "none";
+    };
+    let (target, initiator) = match (url.host_str(), source.host_str()) {
+        (Some(t), Some(i)) => (t, i),
+        _ => return "none",
+    };
+    if target.eq_ignore_ascii_case(initiator) {
+        "same-origin"
+    } else {
+        let t_reg = rowser_privacy::psl_registrable(target);
+        let i_reg = rowser_privacy::psl_registrable(initiator);
+        if !t_reg.is_empty() && t_reg.eq_ignore_ascii_case(&i_reg) {
+            "same-site"
+        } else {
+            "cross-site"
+        }
+    }
 }
 
 /// Converts our header pairs to `http` crate types.

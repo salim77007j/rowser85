@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
-use rowser_networking::{build_context, fetch, FetchRequest, NetworkContext};
+use rowser_networking::{build_context, fetch, ClientIdentity, FetchRequest, NetworkContext};
 use rowser_storage::Storage;
 
 use crate::Waker;
@@ -155,6 +155,7 @@ impl Downloads {
                 rowser_privacy::PrivacySettings::default(),
                 Default::default(),
                 Default::default(),
+                ClientIdentity::default(),
             )
             .await
         })?;

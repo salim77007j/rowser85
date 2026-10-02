@@ -16,6 +16,7 @@ async fn main() {
         rowser_privacy::PrivacySettings::default(),
         Default::default(),
         Default::default(),
+        rowser_networking::ClientIdentity::default(),
     )
     .await
     .expect("context");

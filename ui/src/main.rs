@@ -12,6 +12,15 @@ mod pages;
 mod theme;
 
 fn main() -> eframe::Result<()> {
+    // Engine diagnostics: RROWSER_LOG="rowser=debug" (default info) writes to
+    // stderr — invaluable for field debugging of load failures.
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_env("ROWSER_LOG")
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .with_target(false)
+        .init();
     let profile_dir = profile_dir();
     let shell = match rowser_shell::Shell::start(&profile_dir) {
         Ok(shell) => shell,

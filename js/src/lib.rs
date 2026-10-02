@@ -124,6 +124,11 @@ pub enum JsCommand {
         /// Formatted message.
         text: String,
     },
+    /// Script-initiated navigation (location.href assignment, .assign/.replace).
+    Navigate {
+        /// Absolute or page-relative URL.
+        url: String,
+    },
     /// The DOM was mutated; re-style/layout/render after the script task.
     MarkDirty,
     /// A worker context posted a message to its owning page (local routing;
@@ -285,8 +290,14 @@ impl JsRuntime {
             timer_count: Rc::new(Cell::new(0)),
         };
         js.install_natives(bridge)?;
-        js.context
-            .with(|ctx| ctx.eval::<(), _>(prelude::PRELUDE_JS))?;
+        js.context.with(|ctx| {
+            if let Err(e) = ctx.eval::<(), _>(prelude::PRELUDE_JS) {
+                let detail = exception_detail(&ctx)
+                    .unwrap_or_else(|| err_string(&e));
+                return Err(JsError::Eval(detail));
+            }
+            Ok(())
+        })?;
         Ok(js)
     }
 
@@ -295,16 +306,23 @@ impl JsRuntime {
         let code = code.to_owned();
         let filename = filename.to_owned();
         self.reset_watchdog();
-        let result: Result<String, rquickjs::Error> = self.context.with(|ctx| {
+        let result: Result<String, (rquickjs::Error, Option<String>)> = self.context.with(|ctx| {
             let mut options = rquickjs::context::EvalOptions::default();
-            options.filename = Some(filename);
+            options.filename = Some(filename.clone());
             options.strict = false;
-            let value: rquickjs::Value = ctx.eval_with_options(code, options)?;
-            stringify_value(&ctx, &value)
+            match ctx.eval_with_options::<rquickjs::Value, _>(code, options) {
+                Ok(value) => stringify_value(&ctx, &value).map_err(|e| (e, None)),
+                Err(e) => Err((e, exception_detail(&ctx))),
+            }
         });
         self.clear_watchdog();
         self.pump_jobs();
-        result.map_err(|e| JsError::Eval(format_js_error(&e)))
+        result.map_err(|(e, detail)| {
+            JsError::Eval(match detail {
+                Some(detail) if !detail.is_empty() => detail,
+                _ => format_js_error(&e),
+            })
+        })
     }
 
     /// Dispatches an engine event into JS (timer fired, fetch completed, ...).
@@ -463,6 +481,17 @@ impl JsRuntime {
                     timers.set(timers.get().saturating_sub(1));
                     if let Some(out) = &b.outgoing {
                         let _ = out.send(JsCommand::TimerClear { id });
+                    }
+                })?,
+            )?;
+
+            // --- navigation (location.href / assign / replace) ---
+            let b = Rc::clone(&bridge);
+            globals.set(
+                "__native_navigate",
+                Function::new(ctx.clone(), move |url: String| {
+                    if let Some(out) = &b.outgoing {
+                        let _ = out.send(JsCommand::Navigate { url });
                     }
                 })?,
             )?;
@@ -985,6 +1014,10 @@ fn stringify_value<'js>(
     }
 }
 
+fn err_string(err: &rquickjs::Error) -> String {
+    format!("{err}")
+}
+
 fn format_js_error(err: &rquickjs::Error) -> String {
     match err {
         rquickjs::Error::Exception => {
@@ -993,6 +1026,47 @@ fn format_js_error(err: &rquickjs::Error) -> String {
         }
         other => other.to_string(),
     }
+}
+
+/// Extracts a readable message + stack from the pending QuickJS exception.
+/// Must be called immediately after a failed eval (it consumes the pending
+/// exception so subsequent JS calls start from a clean state).
+fn exception_detail(ctx: &rquickjs::Ctx<'_>) -> Option<String> {
+    use rquickjs::FromJs;
+    if !ctx.has_exception() {
+        return None;
+    }
+    let exception = ctx.catch();
+    let mut out = String::new();
+    if let Some(obj) = exception.clone().into_object() {
+        if let Some(err) = rquickjs::Exception::from_object(obj) {
+            if let Some(message) = err.message() {
+                out.push_str(&message);
+            }
+            if let Some(stack) = err.stack() {
+                let frames: Vec<&str> = stack.lines().take(4).collect();
+                if !frames.is_empty() {
+                    if !out.is_empty() {
+                        out.push('\n');
+                    }
+                    out.push_str(&frames.join("\n"));
+                }
+            }
+        }
+    }
+    if out.is_empty() {
+        // Thrown non-error values (strings, numbers...).
+        if let Ok(coerced) = <rquickjs::Coerced<String>>::from_js(ctx, exception.clone()) {
+            out = coerced.0;
+        } else {
+            out = format!("uncaught {exception:?}");
+        }
+    }
+    if ctx.has_exception() {
+        // Reading properties of a non-error can raise; clear the residue.
+        let _ = ctx.catch();
+    }
+    Some(out)
 }
 
 #[cfg(test)]

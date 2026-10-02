@@ -16,6 +16,16 @@
 
 use serde::{Deserialize, Serialize};
 
+/// The user agent every session profile uses (Chrome-compatible, with a
+/// Rrowser brand token). Kept as a constant so the network layer, JS
+/// `navigator.userAgent`, and downloads all present the SAME identity — a
+/// mismatch between any of them is itself a fingerprinting signal.
+pub const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Rrowser/1.0 Chrome/140.0.0.0 Safari/537.36";
+
+/// Default Accept-Language presented on requests (negotiable via settings
+/// once locale support lands).
+pub const ACCEPT_LANGUAGE: &str = "en-US,en;q=0.9";
+
 /// Surfaces the engine spoofs.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SpoofProfile {
@@ -96,7 +106,7 @@ impl SpoofProfile {
 
         SpoofProfile {
             platform: "Win32".to_owned(),
-            user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Rrowser/1.0 Chrome/140.0.0.0 Safari/537.36".to_owned(),
+            user_agent: USER_AGENT.to_owned(),
             hardware_concurrency,
             device_memory: 8,
             screen_width,

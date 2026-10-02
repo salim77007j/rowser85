@@ -1,6 +1,7 @@
 //! WebSocket transport (tokio-tungstenite, rustls).
 
 use futures_util::{SinkExt, StreamExt};
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::NetError;
@@ -12,9 +13,28 @@ pub struct WebSocket {
     >,
 }
 
-/// Connects to a `ws://` or `wss://` endpoint.
-pub async fn connect(url: &str) -> Result<WebSocket, NetError> {
-    let (stream, _response) = tokio_tungstenite::connect_async(url)
+/// Connects to a `ws://` or `wss://` endpoint, presenting the session
+/// identity (`User-Agent`) and the initiating page's `Origin` on the
+/// handshake — both are commonly required by live/chat backends.
+pub async fn connect(
+    url: &str,
+    origin: Option<&str>,
+    user_agent: &str,
+) -> Result<WebSocket, NetError> {
+    let mut request = url
+        .into_client_request()
+        .map_err(|e| NetError::InvalidUrl(e.to_string()))?;
+    let headers = request.headers_mut();
+    use tokio_tungstenite::tungstenite::http::HeaderValue;
+    if let Ok(value) = HeaderValue::from_str(user_agent) {
+        headers.insert("user-agent", value);
+    }
+    if let Some(origin) = origin {
+        if let Ok(value) = HeaderValue::from_str(origin) {
+            headers.insert("origin", value);
+        }
+    }
+    let (stream, _response) = tokio_tungstenite::connect_async(request)
         .await
         .map_err(|e| NetError::Connect(e.to_string()))?;
     Ok(WebSocket { stream })

@@ -1104,6 +1104,9 @@ fn rgb_to_egui(rgb: &[u8]) -> Vec<egui::Color32> {
 
 fn refresh_frame(ctx: &Context, app: &mut BrowserApp, tab: TabId) {
     let Some(frame) = app.shell.browser().frame(tab) else {
+        if std::env::var("ROWSER_UI_TRACE").is_ok() {
+            eprintln!("[ui] refresh_frame({tab}): engine has NO frame");
+        }
         return;
     };
     let Some(t) = app.tabs.iter_mut().find(|t| t.id == tab) else {

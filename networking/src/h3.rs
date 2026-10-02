@@ -203,10 +203,13 @@ async fn exchange(
     key: &str,
     pool: &H3Pool,
 ) -> Result<FetchResponse, NetError> {
+    // NOTE: no explicit `host` header — h3 derives `:authority` from the URI
+    // and frontends (Google/YouTube) RST_STREAM requests that carry a
+    // redundant `host` header. Identity headers are injected by the fetch
+    // pipeline before dispatch.
     let builder = http::Request::builder()
         .method(request.method.as_str())
-        .uri(url.as_str())
-        .header("host", url.host_str().unwrap_or_default());
+        .uri(url.as_str());
     let mut req = builder
         .body(())
         .map_err(|e| NetError::Http(e.to_string()))?;

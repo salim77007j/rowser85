@@ -237,6 +237,9 @@ struct Page {
     active_match: Option<usize>,
     /// The current find query ("" = no search).
     find_query: String,
+    /// Script identities (URL or inline-N) already executed for this
+    /// document — Chrome's "execute once" semantics.
+    executed_scripts: std::collections::HashSet<String>,
 }
 
 impl Page {
@@ -273,6 +276,7 @@ impl Page {
             find_matches: Vec::new(),
             active_match: None,
             find_query: String::new(),
+            executed_scripts: std::collections::HashSet::new(),
         }
     }
 
@@ -380,6 +384,16 @@ impl Page {
             }
             JsCommand::MarkDirty => {
                 self.dirty = true;
+            }
+            JsCommand::Navigate { url } => {
+                // Script-initiated navigation (location.href = ...). Resolve
+                // against the current page URL so relative links work.
+                let absolute = url::Url::parse(&self.url)
+                    .and_then(|base| base.join(&url))
+                    .map(|joined| joined.to_string())
+                    .unwrap_or(url);
+                tracing::debug!(target: "rowser::engine", "tab {} JS navigation → {absolute}", self.state.tab);
+                self.navigate(absolute);
             }
             other => {
                 // Timers, fetches, websockets, console, worker spawns are
@@ -667,6 +681,7 @@ impl Page {
         self.images.clear();
         self.css_texts.clear();
         self.scripts.clear();
+        self.executed_scripts.clear();
         self.pending.clear();
         self.dirty = false;
         self.scroll_y = 0.0;
@@ -964,6 +979,7 @@ impl Page {
         if self.suspended || self.dom.is_none() {
             return;
         }
+        let trace = std::env::var("ROWSER_UI_TRACE").is_ok();
         let Some(layout) = self.layout.clone() else {
             return;
         };
@@ -995,6 +1011,15 @@ impl Page {
             self.painter
                 .render(&list, options, &mut self.layout_engine.font_system)
         {
+            if trace {
+                eprintln!(
+                    "[page-{}] painted frame id={} {}x{}",
+                    self.state.tab,
+                    frame.id,
+                    frame.width,
+                    frame.height
+                );
+            }
             let frame = Arc::new(frame);
             let content_size = layout.content_size;
             self.state
@@ -1009,45 +1034,63 @@ impl Page {
 
     fn run_scripts(&mut self) {
         let Some(dom) = self.dom.clone() else { return };
-        let (body, html) = {
-            let dom = dom.borrow();
-            let find = |tag: &str| {
-                dom.subtree_elements(dom.document())
-                    .find(|n| {
-                        dom.element(*n)
-                            .map(|e| &*e.name.local == tag)
-                            .unwrap_or(false)
-                    })
-                    .unwrap_or(0)
+        // ONE runtime per document. Re-creating it on every render round
+        // destroyed all JS state and re-executed every script (double
+        // bootstraps wedged JS-heavy sites like YouTube).
+        if self.js.is_none() {
+            let (body, html) = {
+                let dom = dom.borrow();
+                let find = |tag: &str| {
+                    dom.subtree_elements(dom.document())
+                        .find(|n| {
+                            dom.element(*n)
+                                .map(|e| &*e.name.local == tag)
+                                .unwrap_or(false)
+                        })
+                        .unwrap_or(0)
+                };
+                (find("body"), find("html"))
             };
-            (find("body"), find("html"))
-        };
-        let bridge = PageBridge {
-            dom: Rc::clone(&dom),
-            document: dom.borrow().document(),
-            body,
-            html,
-            url: self.url.clone(),
-            origin: url::Url::parse(&self.url)
-                .map(|u| u.origin().ascii_serialization())
-                .unwrap_or_default(),
-            storage: Some(Arc::clone(&self.state.storage)),
-            spoof: self.state.spoof.clone(),
-            outgoing: Some(self.js_tx.clone()),
-        };
-        match JsRuntime::new(self.state.js_config.clone(), bridge) {
-            Ok(runtime) => self.js = Some(runtime),
-            Err(err) => {
-                tracing::warn!(target: "rowser::engine", "js init failed: {err}");
-                return;
+            let bridge = PageBridge {
+                dom: Rc::clone(&dom),
+                document: dom.borrow().document(),
+                body,
+                html,
+                url: self.url.clone(),
+                origin: url::Url::parse(&self.url)
+                    .map(|u| u.origin().ascii_serialization())
+                    .unwrap_or_default(),
+                storage: Some(Arc::clone(&self.state.storage)),
+                spoof: self.state.spoof.clone(),
+                outgoing: Some(self.js_tx.clone()),
+            };
+            match JsRuntime::new(self.state.js_config.clone(), bridge) {
+                Ok(runtime) => self.js = Some(runtime),
+                Err(err) => {
+                    tracing::warn!(target: "rowser::engine", "js init failed: {err}");
+                    return;
+                }
             }
         }
         let scripts = std::mem::take(&mut self.scripts);
+        // Phase 1 (exclusive borrow): pick the not-yet-executed scripts.
+        let mut to_run: Vec<(usize, String, String)> = Vec::new();
+        for (i, (src, code)) in scripts.iter().enumerate() {
+            let name = src.clone().unwrap_or_else(|| format!("inline-{i}.js"));
+            // Chrome semantics: a script executes exactly once per document
+            // load — never again on re-render.
+            if self.executed_scripts.insert(name.clone()) {
+                to_run.push((i, name, code.clone()));
+            }
+        }
+        // Phase 2 (shared borrow of the runtime): execute.
         if let Some(js) = &self.js {
-            for (i, (src, code)) in scripts.iter().enumerate() {
-                let name = src.clone().unwrap_or_else(|| format!("inline-{i}.js"));
+            for (i, name, code) in &to_run {
                 let t0 = std::time::Instant::now();
-                if let Err(err) = js.eval(code, &name) {
+                if std::env::var("ROWSER_UI_TRACE").is_ok() {
+                    eprintln!("[page-{}] script {} START {}", self.state.tab, i, name);
+                }
+                if let Err(err) = js.eval(code, name) {
                     let _ = self.state.event_tx.send(EngineEvent::ConsoleMessage {
                         tab: self.state.tab,
                         level: "error".to_owned(),

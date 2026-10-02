@@ -175,10 +175,13 @@ pub async fn fetch_http(
     url: &Url,
 ) -> Result<FetchResponse, NetError> {
     let uri = url.as_str().to_owned();
+    // NOTE: hyper derives `:authority` from the URI for h2 and sets `Host` for
+    // h1 automatically. Sending an explicit `host` header in h2 is redundant
+    // and some frontends (Google/YouTube) RST_STREAM such requests with
+    // PROTOCOL_ERROR — so we do not add it.
     let mut builder = http::Request::builder()
         .method(request.method.as_str())
-        .uri(uri)
-        .header("host", url.host_str().unwrap_or_default());
+        .uri(uri);
     for (name, value) in &request.headers {
         if name.eq_ignore_ascii_case("host") {
             continue;
