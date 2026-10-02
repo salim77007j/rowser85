@@ -231,3 +231,73 @@ traces — the 240→900 char trace bump made stacks readable):
 * `scripts/yt-patient.sh`: single-navigation patient probe (the retry
   loop in earlier probes re-navigated and RESET hydration mid-flight —
   never trust a probe that resets what it measures).
+
+---
+
+## Session 6 (2026-10-02): the rendering overhaul — "jumbled text on a blank background"
+
+**Directive:** the browser rendered real pages as jumbled, reversed,
+overlapping text on wrongly-colored canvases. Mandate: make the engine
+render like a standard browser — glyph positioning, font fallback, CSS,
+advanced layout, layering, images.
+
+### Root causes found (each verified with a probe before fixing)
+
+1. **Glyph x doubling** (`layout/src/text.rs` `shape_at`): cosmic-text's
+   `LayoutGlyph::physical(offset, scale)` already adds the glyph's own
+   line-relative x; we passed `glyph.x` as the offset too — every glyph
+   landed at ~2x its x. THE "jumbled reversed" text.
+2. **Leaf origin** (`layout/src/lib.rs` `extract`): text leaves were
+   shaped at the PARENT box origin, discarding the leaf's own taffy
+   location — flex rows / grid tracks / table rows all overlapped at the
+   container corner.
+3. **Selector bucket case mismatch** (`parsing/src/selector_bucket.rs`):
+   ids/classes were indexed case-sensitively but looked up lowercased;
+   every camelCase id selector silently never matched (Wikipedia's
+   `.mw-body #bodyContent{grid-area:content}`).
+4. **Random canvas color** (`engine/src/page.rs` `page_background`):
+   returned the first opaque background in HashMap order — HN painted the
+   whole canvas orange. Now html -> body -> white (CSS propagation).
+5. **Unparsed `background:`/`border:` shorthands** (`parsing/src/css.rs`):
+   sites write the shorthand 100:1 vs the longhand; pages had no
+   backgrounds at all.
+6. **Font stack = entry #1 only** (`layout/src/text.rs`): unknown families
+   ("-apple-system") degraded to arbitrary faces. Full stack walk +
+   metric-compatibility aliases (Arial->Liberation Sans, Times->
+   Liberation Serif, ...) + fallback chain + installed-font probing via
+   fontdb.
+7. **No CSS grid** at all: grid-template-columns/rows, the
+   grid-template shorthand, grid-template-areas and grid-area placement
+   now flow through taffy (tracks: px/%/fr/minmax/min-max-content/
+   repeat; named areas resolve to explicit line placements).
+8. **Inline whitespace gluing** (`append_collapsed_text`): trailing
+   separator spaces were trimmed per text node — "is <a>app</a> for"
+   rendered "isappfor". Separators survive; trimmed once at leaf close.
+9. **No presentational attributes**: width/height/bgcolor attributes now
+   map to CSS when author CSS is silent (imgs were zero-size; HN's
+   orange banner is a bgcolor).
+10. **Images downloaded then dropped**: fetch matched the RESOLVED url
+    against the RAW src attribute — protocol-relative images never
+    attached. Both sides resolve now.
+11. **No inset / z-index / stacking**: top/left/right/bottom parse +
+    taffy inset mapping; display list paints positioned subtrees after
+    in-flow, ordered by (z-index, DOM order).
+
+### Verification
+- `rendering/examples/visual_probe.rs`: 6 synthetic pages (grid,
+  flex-row, font-stack, positioned, table, padding) — 6/6 PASS by
+  vision-model inspection, all before/after.
+- Live xvfb-run browser battery (`scripts/final-render-validation.sh`):
+  Wikipedia renders Vector 2022 (3-column grid, titlebar, serif H1, TOC
+  sidebar, Tools rail, readable paragraphs, fetched images); HN renders
+  orange banner + beige canvas + columnar rows.
+- Workspace tests green; clippy clean; committed as ab23e76.
+
+### Remaining known gaps
+- SVG images (Wikipedia logo) not rendered (no resvg integration yet).
+- Google serves a CAPTCHA from this datacenter IP — search results
+  unreachable from this environment (not a rendering issue).
+- inline-block approximated as inline; borders collapsed at table
+  edges; no border-radius/box-shadow/transforms.
+- `client-js` class toggles (Wikipedia's JS dropdowns) need the JS DOM
+  class APIs to fire for full Vector 2022 chrome.
