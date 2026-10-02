@@ -6,6 +6,15 @@ use std::sync::Arc;
 use rowser_media::isobmff::{Codec, StreamDemuxer};
 use rowser_media::{open_pipeline, MediaEvent, MediaNotification};
 
+/// Serializes the real-time playback tests: two concurrent media workers
+/// plus decoders starve each other on 2-core CI runners, which collapses
+/// the wall clock and hides frame advance.
+static REALTIME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn realtime_guard() -> std::sync::MutexGuard<'static, ()> {
+    REALTIME_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 fn load(name: &str) -> Vec<u8> {
     std::fs::read(format!("{}/testdata/{}", env!("CARGO_MANIFEST_DIR"), name))
         .expect("fixture present")
@@ -107,6 +116,7 @@ fn rejects_non_mp4() {
 /// the engine would (push chunks, play, wait, collect notifications).
 #[test]
 fn pipeline_decodes_video_and_audio() {
+    let _realtime = realtime_guard();
     let events: Arc<std::sync::Mutex<Vec<MediaEvent>>> =
         Arc::new(std::sync::Mutex::new(Vec::new()));
     let frames = Arc::new(AtomicU64::new(0));
@@ -170,6 +180,7 @@ fn pipeline_decodes_video_and_audio() {
 /// moving test pattern — this catches a stuck clock or repeated frame).
 #[test]
 fn video_frames_advance() {
+    let _realtime = realtime_guard();
     let (pipeline, ingress) = open_pipeline(Arc::new(|_| {}));
     let bytes = load("clock-mp4.mp4");
     for chunk in bytes.chunks(16384) {
@@ -194,7 +205,7 @@ fn video_frames_advance() {
                 seen.push(sig);
             }
         }
-        std::thread::sleep(std::time::Duration::from_millis(120));
+        std::thread::sleep(std::time::Duration::from_millis(60));
     }
     assert!(
         seen.len() >= 3,
