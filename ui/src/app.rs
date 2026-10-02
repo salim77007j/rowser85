@@ -375,7 +375,7 @@ impl BrowserApp {
             omnibox: String::new(),
             omnibox_focused: false,
             suggestions: Vec::new(),
-            sugg_index: 0,
+            sugg_index: usize::MAX,
             omnibox_rect: Rect::ZERO,
             toolbar_rect: Rect::ZERO,
             find_open: false,

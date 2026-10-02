@@ -110,6 +110,10 @@ pub enum DisplayMode {
     Flex,
     /// CSS grid container.
     Grid,
+    /// `display: contents` — the element generates NO box; its children
+    /// participate directly in the parent's layout (grid/flex items,
+    /// block siblings). Inheritance still flows through it.
+    Contents,
     /// Not rendered.
     None,
 }
@@ -443,6 +447,13 @@ pub struct StyleProps {
     pub grid_template_areas: Option<Vec<NamedAreaRaw>>,
     /// `grid-area` (name form).
     pub grid_area: Option<String>,
+    /// Raw custom properties (`--name: value`) declared by this rule.
+    /// Values are raw token text; resolution happens at compute time.
+    pub custom: Vec<(String, String)>,
+    /// Declarations whose value references `var(...)`: property name →
+    /// raw value text. Substituted against the element's custom map at
+    /// compute time, then re-parsed through the typed pipeline.
+    pub var_props: Vec<(String, String)>,
 }
 
 /// Fully resolved style for one element.
@@ -527,6 +538,10 @@ pub struct ComputedStyle {
     pub grid_template_areas: Vec<NamedAreaRaw>,
     /// `grid-area` name (placed against the parent's areas).
     pub grid_area: Option<String>,
+    /// Raw CSS custom properties (`--name: value`) visible to this element:
+    /// own declarations layered over the inherited set. `var()` references
+    /// in substituted declarations resolve against this map.
+    pub custom: HashMap<String, String>,
 }
 
 impl Default for ComputedStyle {
@@ -602,6 +617,7 @@ impl Default for ComputedStyle {
             grid_template_rows: Vec::new(),
             grid_template_areas: Vec::new(),
             grid_area: None,
+            custom: HashMap::new(),
         }
     }
 }
@@ -733,6 +749,11 @@ pub fn compute_styles(dom: &Dom, author: &[ParsedStylesheet], media: &MediaConte
 
 /// Applies one declaration set to the working style (non-deferred parts).
 fn apply_props(style: &mut ComputedStyle, props: &StyleProps, parent: &ComputedStyle) {
+    // Raw custom properties: later sources overwrite (sources are visited
+    // in cascade order, so the highest-priority declaration wins).
+    for (name, value) in &props.custom {
+        style.custom.insert(name.clone(), value.clone());
+    }
     let resolve_ems = |lpa: LengthOrAuto| -> LengthOrAuto {
         match lpa {
             LengthOrAuto::Length(Length::Em(n)) => {
@@ -865,6 +886,11 @@ fn inherited_from(parent: &ComputedStyle) -> ComputedStyle {
         font_style: parent.font_style,
         line_height: parent.line_height,
         text_align: parent.text_align,
+        // Custom properties inherit as raw tokens: a var() reference inside
+        // an inherited value resolves against THIS element's map, so a
+        // descendant redefinition of an inner token takes effect (the
+        // closest-ancestor-wins semantics of the CSS variables spec).
+        custom: parent.custom.clone(),
         ..ComputedStyle::default()
     }
 }
@@ -1063,7 +1089,105 @@ fn cascade_element(
         }
     }
 
+    // CSS custom properties: substitute var() references in the winning
+    // declarations and re-parse them through the typed pipeline. Runs LAST
+    // so the custom map (own + inherited declarations, cascade-ordered) is
+    // final. This is what makes design-token CSS (MDN, Tailwind-based
+    // sites, every modern component library) render: without it, every
+    // `background: var(--color)` declaration was silently dropped.
+    let mut var_winners: Vec<(String, String)> = Vec::new();
+    sources.for_each(|props| {
+        for (name, value) in &props.var_props {
+            if let Some(slot) = var_winners.iter_mut().find(|(n, _)| n == name) {
+                slot.1.clone_from(value);
+            } else {
+                var_winners.push((name.clone(), value.clone()));
+            }
+        }
+    });
+    for (name, raw) in var_winners {
+        if let Some(substituted) = substitute_vars(&raw, &style.custom, 0) {
+            let text = format!("{name}: {substituted}");
+            let props = crate::css::parse_style_attribute(&text);
+            apply_props(&mut style, &props, parent);
+        }
+        // Unresolvable var() = "invalid at computed-value time" → the
+        // declaration is dropped (the typed default stands), like the spec.
+    }
+
     style
+}
+
+/// Substitutes `var(--name)` and `var(--name, fallback)` references in a
+/// raw declaration value against the element's custom-property map.
+/// Returns `None` when a reference is unresolvable and has no fallback
+/// (the declaration becomes invalid). Values that themselves contain
+/// var() resolve recursively (bounded to guard cycles).
+fn substitute_vars(value: &str, customs: &HashMap<String, String>, depth: u32) -> Option<String> {
+    if depth > 4 {
+        return None;
+    }
+    let mut out = String::with_capacity(value.len());
+    let mut rest = value;
+    while let Some(pos) = rest.find("var(") {
+        out.push_str(&rest[..pos]);
+        let inner_start = pos + 4;
+        let after = &rest[inner_start..];
+        let close = matching_paren(after)?;
+        let inner = &after[..close];
+        // Split name / fallback at the FIRST top-level comma.
+        let (name, fallback) = match top_level_comma(inner) {
+            Some(idx) => (&inner[..idx], Some(inner[idx + 1..].trim())),
+            None => (inner, None),
+        };
+        let name = name.trim();
+        let replacement = match customs.get(name) {
+            Some(found) => Some(found.clone()),
+            None => fallback.map(str::to_string),
+        };
+        let resolved = match replacement {
+            Some(text) if text.contains("var(") => substitute_vars(&text, customs, depth + 1)?,
+            Some(text) => text,
+            None => return None,
+        };
+        out.push_str(&resolved);
+        rest = &after[close + 1..];
+    }
+    out.push_str(rest);
+    Some(out)
+}
+
+/// Index of the `)` closing the parenthesized expression starting at
+/// position 0 of `s` (which must be inside the parens).
+fn matching_paren(s: &str) -> Option<usize> {
+    let mut depth = 1usize;
+    for (i, c) in s.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Index of the first top-level comma (paren depth 0), if any.
+fn top_level_comma(s: &str) -> Option<usize> {
+    let mut depth = 0usize;
+    for (i, c) in s.char_indices() {
+        match c {
+            '(' | '[' => depth += 1,
+            ')' | ']' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => return Some(i),
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Parses a legacy `bgcolor`-style color attribute (#rgb hex or color name).
@@ -1224,5 +1348,109 @@ mod tests {
             map.get(find("body")).unwrap().color,
             Rgba::new_opaque(0x33, 0x33, 0x33)
         );
+    }
+}
+
+#[cfg(test)]
+mod custom_property_tests {
+    use super::*;
+    use crate::css::parse_stylesheet;
+    use crate::html::parse_html;
+
+    fn first_tag(doc: &crate::html::Document, tag: &str) -> rowser_dom::NodeId {
+        doc.dom
+            .subtree_elements(doc.dom.document())
+            .find(|n| {
+                doc.dom
+                    .element(*n)
+                    .map(|e| &*e.name.local == tag)
+                    .unwrap_or(false)
+            })
+            .expect(tag)
+    }
+
+    /// The design-token pattern every modern site uses: tokens on :root,
+    /// consumed through var() in descendant rules. Previously the whole
+    /// vendor sheet dropped on first error and var() declarations were
+    /// silently discarded — pages rendered unstyled.
+    #[test]
+    fn var_substitution_and_inheritance() {
+        let html = br#"<html><body><p class="a">x</p><p class="b">y</p></body></html>"#;
+        let css = r#"
+            :root { --brand: #ff6600; --ink: #333333; }
+            p.a { color: var(--brand); background-color: var(--ink); }
+            p.b { color: var(--missing, #0000ff); }
+        "#;
+        let doc = parse_html(html);
+        let sheet = parse_stylesheet(css, &MediaContext::default());
+        let map = compute_styles(&doc.dom, &[sheet], &MediaContext::default());
+        let a = map.get(first_tag(&doc, "p")).expect("p.a style");
+        // Direct token reference.
+        assert_eq!(a.color, Rgba::new_opaque(0xff, 0x66, 0x00));
+        assert_eq!(a.background_color, Rgba::new_opaque(0x33, 0x33, 0x33));
+        // Fallback when the token is undefined.
+        let b = map
+            .get(
+                doc.dom
+                    .subtree_elements(doc.dom.document())
+                    .filter(|n| {
+                        doc.dom
+                            .element(*n)
+                            .map(|e| &*e.name.local == "p")
+                            .unwrap_or(false)
+                    })
+                    .nth(1)
+                    .expect("second p"),
+            )
+            .expect("p.b style");
+        assert_eq!(b.color, Rgba::new_opaque(0x00, 0x00, 0xff));
+    }
+
+    /// Chained tokens (`--a: var(--b)`) resolve at the consuming element,
+    /// and a descendant redefinition of the inner token wins there.
+    #[test]
+    fn chained_tokens_and_redefinition() {
+        let html = br#"<html><body><div id="outer"><p class="t">x</p></div><div id="inner" class="redefine"><p class="t">y</p></div></body></html>"#;
+        let css = r#"
+            :root { --a: var(--b); --b: #111111; }
+            .redefine { --b: #222222; }
+            p.t { color: var(--a); }
+        "#;
+        let doc = parse_html(html);
+        let sheet = parse_stylesheet(css, &MediaContext::default());
+        let map = compute_styles(&doc.dom, &[sheet], &MediaContext::default());
+        let ps: Vec<NodeId> = doc
+            .dom
+            .subtree_elements(doc.dom.document())
+            .filter(|n| {
+                doc.dom
+                    .element(*n)
+                    .map(|e| &*e.name.local == "p")
+                    .unwrap_or(false)
+            })
+            .collect();
+        assert_eq!(ps.len(), 2);
+        assert_eq!(
+            map.get(ps[0]).unwrap().color,
+            Rgba::new_opaque(0x11, 0x11, 0x11)
+        );
+        assert_eq!(
+            map.get(ps[1]).unwrap().color,
+            Rgba::new_opaque(0x22, 0x22, 0x22)
+        );
+    }
+
+    /// Unresolvable var() without fallback drops the declaration (the
+    /// inherited/initial value stands) — never a parse failure.
+    #[test]
+    fn unresolvable_var_drops_declaration() {
+        let html = br#"<html><body><p class="u">x</p></body></html>"#;
+        let css = "p.u { color: var(--nope); background-color: #abcdef; }";
+        let doc = parse_html(html);
+        let sheet = parse_stylesheet(css, &MediaContext::default());
+        let map = compute_styles(&doc.dom, &[sheet], &MediaContext::default());
+        let s = map.get(first_tag(&doc, "p")).expect("style");
+        assert_eq!(s.color, Rgba::new_opaque(0, 0, 0), "dropped → initial");
+        assert_eq!(s.background_color, Rgba::new_opaque(0xab, 0xcd, 0xef));
     }
 }

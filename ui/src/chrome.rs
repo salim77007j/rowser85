@@ -459,7 +459,7 @@ impl Chrome {
                         field_clicked = field_response.clicked();
                         if field_response.changed() {
                             app.omnibox_focused = true;
-                            app.sugg_index = 0;
+                            app.sugg_index = usize::MAX;
                         }
                         if field_response.has_focus() {
                             app.omnibox_focused = true;
@@ -476,7 +476,20 @@ impl Chrome {
                             );
                         }
                         if enter_pressed {
-                            if let Some(selected) = app.suggestions.get(app.sugg_index) {
+                            // Chrome semantics: with NO suggestion actively
+                            // highlighted (sugg_index = usize::MAX sentinel),
+                            // Enter navigates the typed text — a URL goes to
+                            // the site, anything else goes to the search
+                            // engine. Suggestions apply only when the user
+                            // moved the selection with the arrow keys. The
+                            // previous behaviour always picked suggestions[0]
+                            // (the Search row), so typing "example.com" +
+                            // Enter performed a Google SEARCH for it.
+                            if let Some(selected) = app
+                                .suggestions
+                                .get(app.sugg_index)
+                                .filter(|_| app.sugg_index != usize::MAX)
+                            {
                                 app.navigate_url(selected.url.clone());
                             } else {
                                 let input = app.omnibox.clone();
@@ -1481,15 +1494,25 @@ impl Chrome {
             {
                 match key {
                     egui::Key::ArrowDown if !app.suggestions.is_empty() => {
-                        app.sugg_index = (app.sugg_index + 1) % app.suggestions.len();
+                        app.sugg_index = if app.sugg_index == usize::MAX {
+                            0
+                        } else {
+                            (app.sugg_index + 1) % app.suggestions.len()
+                        };
                     }
                     egui::Key::ArrowUp if !app.suggestions.is_empty() => {
-                        app.sugg_index =
-                            (app.sugg_index + app.suggestions.len() - 1) % app.suggestions.len();
+                        app.sugg_index = if app.sugg_index == usize::MAX {
+                            app.suggestions.len() - 1
+                        } else if app.sugg_index == 0 {
+                            usize::MAX
+                        } else {
+                            app.sugg_index - 1
+                        };
                     }
                     egui::Key::Escape if app.omnibox_focused => {
                         app.omnibox_focused = false;
                         app.suggestions.clear();
+                        app.sugg_index = usize::MAX;
                         ctx.memory_mut(|m| m.surrender_focus(Id::new("omnibox-field")));
                     }
                     _ => {}

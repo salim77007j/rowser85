@@ -237,6 +237,8 @@ fn taffy_style(cs: &ComputedStyle) -> Style {
         DisplayMode::Flex => TaffyDisplay::Flex,
         DisplayMode::Grid => TaffyDisplay::Grid,
         DisplayMode::Inline => TaffyDisplay::Block,
+        // Contents elements never reach taffy (no box); defensive fallback.
+        DisplayMode::Contents => TaffyDisplay::Block,
         DisplayMode::None => TaffyDisplay::None,
     };
     let border = TaffyRect {
@@ -335,11 +337,26 @@ fn taffy_style(cs: &ComputedStyle) -> Style {
             height: LengthPercentage::length(cs.gap_row),
         },
         // CSS grid templates: track sizing (px, %, fr, min/max-content).
-        grid_template_columns: cs
-            .grid_template_columns
-            .iter()
-            .map(track_sizing_fn)
-            .collect(),
+        // CSS: a grid with NO explicit column template stacks items in ONE
+        // auto column (each child in its own row) — that's what Chrome does
+        // for `dl{display:grid}` sidebars. Taffy instead spreads children
+        // across implicit columns in a single row, colliding them (MDN's
+        // dt/dl terms overlapped at the same y). Force a single auto track
+        // when the author specified none.
+        grid_template_columns: {
+            let mut tracks: Vec<GridTemplateComponent<String>> = cs
+                .grid_template_columns
+                .iter()
+                .map(track_sizing_fn)
+                .collect();
+            if tracks.is_empty() {
+                tracks.push(GridTemplateComponent::Single(minmax(
+                    track_auto(),
+                    track_auto(),
+                )));
+            }
+            tracks
+        },
         grid_template_rows: cs.grid_template_rows.iter().map(track_sizing_fn).collect(),
         ..Style::default()
     }
@@ -413,64 +430,20 @@ fn build_box(
     let defaults = SpanStyle::from_style(style);
     let ctx = defaults.clone();
 
-    for child in dom.flat_children(node) {
-        match dom.kind(child) {
-            rowser_dom::NodeKind::Text(t) => {
-                append_collapsed_text(&mut text, &mut spans, t, &ctx);
-            }
-            rowser_dom::NodeKind::Element(_) => {
-                let child_style = styles.get(child);
-                let display = child_style
-                    .map(|s| s.display)
-                    .unwrap_or(DisplayMode::Inline);
-                match display {
-                    DisplayMode::Inline => {
-                        // Block-in-inline: an inline element whose subtree
-                        // contains block content (e.g. <center><table>,
-                        // <a><div>card</div></a>) must not be flattened into
-                        // text — that would drop the block boxes entirely.
-                        // Promote it to a box; recursion handles nesting.
-                        if has_block_descendant(dom, styles, child) {
-                            if let Some(t) = build_box(
-                                dom,
-                                styles,
-                                tree,
-                                child,
-                                dom_to_taffy,
-                                taffy_to_dom,
-                                intrinsic,
-                                &own_areas,
-                            ) {
-                                children.push(t);
-                            }
-                        } else {
-                            let mut inner = ctx.clone();
-                            if let Some(cs) = child_style {
-                                inner.merge_from(cs);
-                            }
-                            collect_inline(dom, styles, child, inner, &mut text, &mut spans);
-                        }
-                    }
-                    DisplayMode::None => {}
-                    _ => {
-                        if let Some(t) = build_box(
-                            dom,
-                            styles,
-                            tree,
-                            child,
-                            dom_to_taffy,
-                            taffy_to_dom,
-                            intrinsic,
-                            &own_areas,
-                        ) {
-                            children.push(t);
-                        }
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
+    collect_children(
+        dom,
+        styles,
+        tree,
+        node,
+        dom_to_taffy,
+        taffy_to_dom,
+        intrinsic,
+        &own_areas,
+        &mut children,
+        &mut text,
+        &mut spans,
+        &ctx,
+    );
 
     // Text leaf: a taffy leaf carrying the flattened text.
     if !text.is_empty() || children.is_empty() {
@@ -567,8 +540,112 @@ fn build_box(
     Some(taffy_node)
 }
 
+/// Iterates `node`'s children, splicing boxes and inline text into the
+/// parent's accumulation. `display: contents` children are transparent:
+/// their OWN children are collected here as if direct children (inherited
+/// span styles still flow through them).
+#[allow(clippy::too_many_arguments)]
+fn collect_children(
+    dom: &Dom,
+    styles: &StyleMap,
+    tree: &mut TaffyTree<TextLeaf>,
+    node: NodeId,
+    dom_to_taffy: &mut HashMap<NodeId, TaffyNode>,
+    taffy_to_dom: &mut HashMap<TaffyNode, NodeId>,
+    intrinsic: &HashMap<NodeId, (f32, f32)>,
+    parent_areas: &[rowser_parsing::cascade::NamedAreaRaw],
+    children: &mut Vec<TaffyNode>,
+    text: &mut String,
+    spans: &mut Vec<(std::ops::Range<usize>, SpanStyle)>,
+    ctx: &SpanStyle,
+) {
+    for child in dom.flat_children(node) {
+        match dom.kind(child) {
+            rowser_dom::NodeKind::Text(t) => {
+                append_collapsed_text(text, spans, t, ctx);
+            }
+            rowser_dom::NodeKind::Element(_) => {
+                let child_style = styles.get(child);
+                let display = child_style
+                    .map(|s| s.display)
+                    .unwrap_or(DisplayMode::Inline);
+                match display {
+                    DisplayMode::Inline => {
+                        // Block-in-inline: an inline element whose subtree
+                        // contains block content (e.g. <center><table>,
+                        // <a><div>card</div></a>) must not be flattened into
+                        // text — that would drop the block boxes entirely.
+                        // Promote it to a box; recursion handles nesting.
+                        if has_block_descendant(dom, styles, child) {
+                            if let Some(t) = build_box(
+                                dom,
+                                styles,
+                                tree,
+                                child,
+                                dom_to_taffy,
+                                taffy_to_dom,
+                                intrinsic,
+                                parent_areas,
+                            ) {
+                                children.push(t);
+                            }
+                        } else {
+                            let mut inner = ctx.clone();
+                            if let Some(cs) = child_style {
+                                inner.merge_from(cs);
+                            }
+                            collect_inline(dom, styles, child, inner, text, spans);
+                        }
+                    }
+                    DisplayMode::None => {}
+                    DisplayMode::Contents => {
+                        // No box for this element: its children participate
+                        // HERE (grid/flex items of the grandparent, block
+                        // siblings, or inline text). Inherited span styling
+                        // flows through the contents element.
+                        let mut inner = ctx.clone();
+                        if let Some(cs) = child_style {
+                            inner.merge_from(cs);
+                        }
+                        collect_children(
+                            dom,
+                            styles,
+                            tree,
+                            child,
+                            dom_to_taffy,
+                            taffy_to_dom,
+                            intrinsic,
+                            parent_areas,
+                            children,
+                            text,
+                            spans,
+                            &inner,
+                        );
+                    }
+                    _ => {
+                        if let Some(t) = build_box(
+                            dom,
+                            styles,
+                            tree,
+                            child,
+                            dom_to_taffy,
+                            taffy_to_dom,
+                            intrinsic,
+                            parent_areas,
+                        ) {
+                            children.push(t);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 /// True when the element subtree (excluding the element itself) contains
 /// block-level content — used to promote block-in-inline wrappers to boxes.
+/// `display: contents` elements are transparent: their children count.
 fn has_block_descendant(dom: &Dom, styles: &StyleMap, node: NodeId) -> bool {
     for child in dom.flat_children(node) {
         if dom.element(child).is_some() {
@@ -579,7 +656,7 @@ fn has_block_descendant(dom: &Dom, styles: &StyleMap, node: NodeId) -> bool {
             match display {
                 DisplayMode::Block | DisplayMode::Flex | DisplayMode::Grid => return true,
                 DisplayMode::None => continue,
-                DisplayMode::Inline => {
+                DisplayMode::Inline | DisplayMode::Contents => {
                     if has_block_descendant(dom, styles, child) {
                         return true;
                     }

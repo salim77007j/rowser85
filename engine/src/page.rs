@@ -297,6 +297,10 @@ struct Page {
     /// Script identities (URL or inline-N) already executed for this
     /// document — Chrome's "execute once" semantics.
     executed_scripts: std::collections::HashSet<String>,
+    /// Watchdog: when a navigation's subresources have not all settled by
+    /// this deadline, the page force-completes the load (render with what
+    /// arrived) instead of spinning on the loading screen forever.
+    load_deadline: Option<std::time::Instant>,
     /// Playing / loaded media elements keyed by node handle.
     media_slots: HashMap<u64, MediaSlot>,
     /// MSE MediaSource states keyed by MediaSource id.
@@ -351,6 +355,7 @@ impl Page {
             active_match: None,
             find_query: String::new(),
             executed_scripts: std::collections::HashSet::new(),
+            load_deadline: None,
             media_slots: HashMap::new(),
             mse_sources: HashMap::new(),
             sb_lanes: HashMap::new(),
@@ -373,14 +378,29 @@ impl Page {
                 pending,
                 ..
             } => {
-                self.subresource_fetched(url, body, &headers);
-                if pending == 0 {
+                let kind = self.subresource_fetched(url, body, &headers);
+                // The engine-side `pending` count in this message is racy for
+                // the DOCUMENT completion: the page issues its subresource
+                // batch only while handling this very message, so the engine
+                // counted 0 in-flight at send time and reported "all done" —
+                // painting the page before any stylesheet arrived (the
+                // unstyled first paint). The page's own pending map is the
+                // source of truth; the document kind self-manages completion
+                // inside document_fetched.
+                let _ = pending;
+                let was_document = matches!(kind, Some(SubresourceKind::Document));
+                if !was_document && self.pending.is_empty() && self.dom.is_some() {
                     self.subresources_complete();
                 }
             }
             Message::SubresourceFailed { url, pending, .. } => {
                 self.pending.remove(&url);
-                if pending == 0 {
+                let _ = pending;
+                // Page-side truth (same race as above): only complete when
+                // nothing we asked for is still outstanding. A failed
+                // *document* leaves dom empty — subresources_complete ends
+                // the loading state for the error page.
+                if self.pending.is_empty() {
                     self.subresources_complete();
                 }
             }
@@ -566,6 +586,10 @@ impl Page {
             snapshot.can_go_forward = forward;
         });
         self.pending.insert(url.clone(), SubresourceKind::Document);
+        // Watchdog: if subresources have not settled by this point, render
+        // with whatever arrived (bounded loading — matches the "render what
+        // you have" behaviour of mainstream browsers on slow networks).
+        self.load_deadline = Some(std::time::Instant::now() + Duration::from_secs(15));
         self.request_subresources(&[(url, SubresourceKind::Document)]);
     }
 
@@ -960,10 +984,13 @@ impl Page {
             .or_else(|| Some(self.url.clone()))
     }
 
-    fn subresource_fetched(&mut self, url: String, body: Vec<u8>, headers: &str) {
-        let Some(kind) = self.pending.remove(&url) else {
-            return;
-        };
+    fn subresource_fetched(
+        &mut self,
+        url: String,
+        body: Vec<u8>,
+        headers: &str,
+    ) -> Option<SubresourceKind> {
+        let kind = self.pending.remove(&url)?;
         match kind {
             SubresourceKind::Document => {
                 // Content-type backstop: an extension-less media URL still
@@ -974,10 +1001,12 @@ impl Page {
                 } else {
                     self.document_fetched(url, body);
                 }
+                Some(SubresourceKind::Document)
             }
             SubresourceKind::Stylesheet => {
                 let text = String::from_utf8_lossy(&body).into_owned();
                 self.css_texts.push(text);
+                Some(SubresourceKind::Stylesheet)
             }
             SubresourceKind::Script => {
                 let text = String::from_utf8_lossy(&body).into_owned();
@@ -993,6 +1022,7 @@ impl Page {
                     Some(entry) => entry.1 = text,
                     None => self.scripts.push((Some(url), text, 0)),
                 }
+                Some(SubresourceKind::Script)
             }
             SubresourceKind::Image => {
                 if let Some(image) = DecodedImage::decode(&body) {
@@ -1032,12 +1062,14 @@ impl Page {
                     }
                     self.dirty = true;
                 }
+                Some(SubresourceKind::Image)
             }
             SubresourceKind::Media => {
                 // Media never uses the buffered subresource path (it would
                 // hold whole videos in memory); the streaming loader feeds
                 // Message::MediaData instead. A late completion here means
                 // the navigation moved on: drop the bytes.
+                Some(SubresourceKind::Media)
             }
         }
     }
@@ -1163,6 +1195,7 @@ impl Page {
         if trace {
             eprintln!("[page-{}] subresources_complete → render", self.state.tab);
         }
+        self.load_deadline = None;
         if self.dom.is_none() {
             // Internal (rowser://) or unreachable pages: end the load state.
             self.navigating = false;
@@ -1979,6 +2012,27 @@ impl Page {
         // Resume any microtasks left queued by a bounded pump_jobs() yield.
         if let Some(js) = &self.js {
             js.pump_jobs();
+        }
+        // Load watchdog: a navigation whose subresources never all settle
+        // must not spin on the loading screen forever (hung third-party
+        // fetches, silent engine-side drops). Force-complete with what we
+        // have — the stylesheet set that DID arrive is applied.
+        if self.navigating
+            && !self.pending.is_empty()
+            && self
+                .load_deadline
+                .is_some_and(|deadline| std::time::Instant::now() > deadline)
+        {
+            let stuck: Vec<String> = self.pending.keys().cloned().collect();
+            tracing::warn!(
+                "load watchdog fired (tab {}): rendering without {} stuck subresource(s): {}",
+                self.state.tab,
+                stuck.len(),
+                stuck.iter().take(6).cloned().collect::<Vec<_>>().join(", ")
+            );
+            self.pending.clear();
+            self.load_deadline = None;
+            self.subresources_complete();
         }
         if self.dirty && !self.suspended && !self.navigating && self.dom.is_some() {
             self.dirty = false;

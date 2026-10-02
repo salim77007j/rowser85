@@ -20,6 +20,7 @@ use lightningcss::properties::size::{MaxSize, Size};
 use lightningcss::properties::text::TextAlign as LcTextAlign;
 use lightningcss::properties::Property;
 use lightningcss::rules::style::StyleRule;
+use lightningcss::rules::supports::SupportsCondition;
 use lightningcss::rules::CssRule;
 use lightningcss::stylesheet::{ParserOptions, PrinterOptions, StyleSheet};
 use lightningcss::traits::ToCss;
@@ -82,9 +83,23 @@ impl Default for MediaContext {
 }
 
 /// Parses a stylesheet, evaluating media queries against `media`.
+///
+/// `error_recovery: true` is load-bearing: real-world CSS (Tailwind
+/// vendor sheets, `@property`, custom properties, modern color functions)
+/// contains declarations lightningcss's strict mode rejects — and with
+/// error recovery OFF the whole stylesheet is dropped on the FIRST bad
+/// rule. That turned 73KB of Tailwind into 0 rules: pages rendered as
+/// unstyled text. CSS spec error recovery is per-declaration; this flag
+/// gives us that behaviour.
 pub fn parse_stylesheet(css: &str, media: &MediaContext) -> ParsedStylesheet {
     let mut out = ParsedStylesheet::default();
-    let Ok(sheet) = StyleSheet::parse(css, ParserOptions::default()) else {
+    let Ok(sheet) = StyleSheet::parse(
+        css,
+        ParserOptions {
+            error_recovery: true,
+            ..ParserOptions::default()
+        },
+    ) else {
         return out;
     };
     let mut order = 0u32;
@@ -107,11 +122,12 @@ fn collect_rules(
                 }
             }
             CssRule::Supports(supports_rule) => {
-                if supports_rule
-                    .condition
-                    .to_css_string(PrinterOptions::default())
-                    .is_ok()
-                {
+                // Evaluate @supports truthfully. Previously every condition
+                // serialized fine and was treated as TRUE — so postcss
+                // light-dark() polyfills ("@supports not (color: light-dark())"
+                // fallbacks) cascaded OVER the native branch, leaving every
+                // var()-based background unresolvable and pages colorless.
+                if supports_condition_matches(&supports_rule.condition) {
                     collect_rules(&supports_rule.rules.0, media, out, order);
                 }
             }
@@ -129,6 +145,34 @@ fn collect_rules(
             _ => {}
         }
     }
+}
+
+/// Truthful `@supports` evaluation. A declaration condition counts as
+/// supported when the typed pipeline can parse it (e.g. we DO support
+/// `color: light-dark(...)`); unknown-but-parseable properties over-report
+/// support (safe superset), `Unknown(...)` conditions report false.
+fn supports_condition_matches(condition: &SupportsCondition<'_>) -> bool {
+    match condition {
+        SupportsCondition::Not(inner) => !supports_condition_matches(inner),
+        SupportsCondition::And(list) => list.iter().all(supports_condition_matches),
+        SupportsCondition::Or(list) => list.iter().any(supports_condition_matches),
+        SupportsCondition::Declaration { property_id, value } => {
+            declaration_supported(property_id.name(), value)
+        }
+        SupportsCondition::Selector(_) => true,
+        SupportsCondition::Unknown(_) => false,
+    }
+}
+
+/// True when `prop: value` parses into at least one typed declaration.
+fn declaration_supported(property: &str, value: &str) -> bool {
+    let text = format!("{property}:{value}");
+    let options = ParserOptions {
+        error_recovery: true,
+        ..ParserOptions::default()
+    };
+    let parsed = DeclarationBlock::parse_string(&text, options);
+    matches!(parsed, Ok(block) if !(block.declarations.is_empty() && block.important_declarations.is_empty()))
 }
 
 fn collect_style_rule(rule: &StyleRule<'_>, out: &mut ParsedStylesheet, order: &mut u32) {
@@ -152,6 +196,14 @@ fn collect_style_rule(rule: &StyleRule<'_>, out: &mut ParsedStylesheet, order: &
     for decl in &rule.declarations.important_declarations {
         apply_property(&mut important, decl);
     }
+    // Raw token capture: custom properties (`--name: value`) and
+    // declarations referencing `var(...)` do not survive the typed Property
+    // pipeline. Serialize the declaration block and mine it for raw text —
+    // the cascade resolves custom properties and substitutes var() at
+    // compute time (where the custom map + inheritance are known).
+    if let Ok(block_text) = rule.declarations.to_css_string(PrinterOptions::default()) {
+        split_raw_declarations(&block_text, &mut props, &mut important);
+    }
     out.rules.push(StyleRuleEntry {
         selector_text,
         selectors,
@@ -166,7 +218,14 @@ fn collect_style_rule(rule: &StyleRule<'_>, out: &mut ParsedStylesheet, order: &
 /// Inline `style="..."` attribute parsing.
 pub fn parse_style_attribute(css: &str) -> StyleProps {
     let mut props = StyleProps::default();
-    if let Ok(block) = DeclarationBlock::parse_string(css, ParserOptions::default()) {
+    let mut sink = StyleProps::default();
+    if let Ok(block) = DeclarationBlock::parse_string(
+        css,
+        ParserOptions {
+            error_recovery: true,
+            ..ParserOptions::default()
+        },
+    ) {
         for decl in &block.declarations {
             apply_property(&mut props, decl);
         }
@@ -174,8 +233,52 @@ pub fn parse_style_attribute(css: &str) -> StyleProps {
         for decl in &block.important_declarations {
             apply_property(&mut props, decl);
         }
+        if let Ok(block_text) = block.to_css_string(PrinterOptions::default()) {
+            split_raw_declarations(&block_text, &mut props, &mut sink);
+        }
     }
     props
+}
+
+/// Mines a serialized declaration block for raw tokens the typed pipeline
+/// cannot express:
+/// * `--custom: value` → `custom` (cascade + inherit, substituted at use)
+/// * `prop: value-with-var(...)` → `var_props` (substituted at compute time)
+///
+/// Declarations are split on `;` — safe because the serializer emits
+/// semicolons inside strings/functions verbatim, and custom-property values
+/// holding raw `;` inside quotes are vanishingly rare on the real web.
+fn split_raw_declarations(block: &str, normal: &mut StyleProps, important: &mut StyleProps) {
+    for decl in block.split(';') {
+        let decl = decl.trim();
+        if decl.is_empty() {
+            continue;
+        }
+        let Some((name_part, value_part)) = decl.split_once(':') else {
+            continue;
+        };
+        let name = name_part.trim();
+        if name.is_empty() {
+            continue;
+        }
+        let mut value = value_part.trim().to_string();
+        let is_important = value.to_ascii_lowercase().ends_with("!important");
+        if is_important {
+            let keep = value.len().saturating_sub("!important".len());
+            value.truncate(keep);
+            value = value.trim_end().to_string();
+        }
+        let target: &mut StyleProps = if is_important {
+            &mut *important
+        } else {
+            &mut *normal
+        };
+        if name.starts_with("--") {
+            target.custom.push((name.to_string(), value));
+        } else if value.contains("var(") {
+            target.var_props.push((name.to_string(), value));
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -248,7 +351,11 @@ pub fn convert_color(color: &CssColor) -> Rgba {
             }
         },
         CssColor::Predefined(_) | CssColor::Float(_) => Rgba::new_opaque(128, 128, 128),
-        CssColor::LightDark(_light, dark) => convert_color(dark),
+        // `light-dark(a, b)` resolves against color-scheme; the engine's
+        // canvas is light-mode (MediaContext.dark_mode = false), so pick the
+        // LIGHT argument. Taking the dark one painted example.com's light
+        // background #222 charcoal.
+        CssColor::LightDark(light, _dark) => convert_color(light),
         CssColor::System(_) => Rgba::new_opaque(0, 0, 0),
     }
 }
@@ -758,7 +865,10 @@ fn convert_display(value: &Display) -> DisplayMode {
     match value {
         Display::Keyword(keyword) => match keyword {
             DisplayKeyword::None => DisplayMode::None,
-            DisplayKeyword::Contents => DisplayMode::Inline,
+            // display:contents — a REAL box-less element (children compose
+            // into the grandparent). Mapping it to Inline collapsed layouts
+            // like MDN's main.layout__content.
+            DisplayKeyword::Contents => DisplayMode::Contents,
             // Table parts: match the UA stylesheet's table→flex mapping so
             // author `display: table-row` keeps cells side by side.
             DisplayKeyword::TableRow
@@ -972,16 +1082,92 @@ fn feature_viewport_value(
     }
 }
 
+/// Evaluates a media-feature length to px. Media queries are evaluated
+/// against the INITIAL font (16px), so `em` = `rem` = 16px here — NOT the
+/// author's root font size. Supports the math functions real design
+/// systems use for breakpoints (`calc`, `min`, `max`, `clamp`) — MDN's
+/// layout columns collapse without them: every `rem`/`calc()` breakpoint
+/// previously evaluated to "no value" → query false → single-column layout.
 fn media_length(value: &lightningcss::media_query::MediaFeatureValue<'_>) -> Option<f32> {
     use lightningcss::media_query::MediaFeatureValue;
     match value {
-        MediaFeatureValue::Length(lightningcss::values::length::Length::Value(v)) => {
-            match convert_length_value(v) {
-                crate::css::Length::Px(px) => Some(px),
-                _ => None,
-            }
-        }
+        MediaFeatureValue::Length(length) => media_calc_px(length),
         _ => None,
+    }
+}
+
+/// Media-query font size: em and rem both resolve against the initial
+/// 16px in media features (CSS Media Queries spec).
+const MQ_FONT_PX: f32 = 16.0;
+
+/// Evaluates a `Calc<Length>` (or plain length) to px for media matching.
+fn media_calc_px(length: &lightningcss::values::length::Length) -> Option<f32> {
+    use lightningcss::values::length::Length;
+    match length {
+        Length::Value(v) => media_length_value_px(v),
+        Length::Calc(calc) => eval_calc_px(calc),
+    }
+}
+
+/// One literal length unit → px for media context (vw/vh unsupported here;
+/// they are vanishingly rare in breakpoints).
+fn media_length_value_px(v: &lightningcss::values::length::LengthValue) -> Option<f32> {
+    use lightningcss::values::length::LengthValue;
+    Some(match v {
+        LengthValue::Px(n) => *n,
+        LengthValue::Em(n) | LengthValue::Rem(n) => n * MQ_FONT_PX,
+        LengthValue::Cm(n) => n * 96.0 / 2.54,
+        LengthValue::Mm(n) => n * 96.0 / 25.4,
+        LengthValue::Q(n) => n * 96.0 / 101.6,
+        LengthValue::In(n) => n * 96.0,
+        LengthValue::Pt(n) => n * 96.0 / 72.0,
+        LengthValue::Pc(n) => n * 16.0,
+        _ => return None,
+    })
+}
+
+/// Recursive evaluator over lightningcss's calc tree.
+fn eval_calc_px(
+    calc: &lightningcss::values::calc::Calc<lightningcss::values::length::Length>,
+) -> Option<f32> {
+    use lightningcss::values::calc::{Calc, MathFunction};
+    match calc {
+        Calc::Value(v) => media_calc_px(v),
+        Calc::Number(n) => Some(*n),
+        Calc::Sum(a, b) => Some(eval_calc_px(a)? + eval_calc_px(b)?),
+        Calc::Product(k, inner) => Some(k * eval_calc_px(inner)?),
+        Calc::Function(f) => match &**f {
+            MathFunction::Calc(inner) => eval_calc_px(inner),
+            MathFunction::Min(args) => {
+                let mut out: Option<f32> = None;
+                for arg in args {
+                    let v = eval_calc_px(arg)?;
+                    out = Some(match out {
+                        Some(cur) => cur.min(v),
+                        None => v,
+                    });
+                }
+                out
+            }
+            MathFunction::Max(args) => {
+                let mut out: Option<f32> = None;
+                for arg in args {
+                    let v = eval_calc_px(arg)?;
+                    out = Some(match out {
+                        Some(cur) => cur.max(v),
+                        None => v,
+                    });
+                }
+                out
+            }
+            MathFunction::Clamp(min, val, max) => {
+                let lo = eval_calc_px(min)?;
+                let v = eval_calc_px(val)?;
+                let hi = eval_calc_px(max)?;
+                Some(v.max(lo).min(hi))
+            }
+            _ => None,
+        },
     }
 }
 

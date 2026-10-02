@@ -161,6 +161,16 @@ fn walk(dom: &Dom, ctx: &mut WalkCtx<'_>, node: NodeId, list: &mut DisplayList) 
     if style.display == DisplayMode::None {
         return;
     }
+    // display:contents — no box of its own (no rect, no background):
+    // its children paint HERE, in document order.
+    if style.display == DisplayMode::Contents {
+        for child in dom.flat_children(node) {
+            if dom.element(child).is_some() {
+                walk(dom, ctx, child, list);
+            }
+        }
+        return;
+    }
     let Some(rect) = ctx.layout.rects.get(&node) else {
         return;
     };

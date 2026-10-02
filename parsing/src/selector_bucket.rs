@@ -61,6 +61,21 @@ impl RuleIndex {
                     self.universal.push(i);
                     pos += 1;
                 }
+                // Pseudo-class / pseudo-element: the identifier after ':'
+                // is a pseudo NAME, not a tag. Bucketing it as one made
+                // ":root" land in by_tag["root"] — unreachable for every
+                // element (design tokens defined on :root never cascaded).
+                // Skip the name; parenthesized arguments are scanned by the
+                // main loop, which over-buckets them safely.
+                b':' => {
+                    pos += 1;
+                    // Pseudo-elements (::before) consume both colons.
+                    if pos < bytes.len() && bytes[pos] == b':' {
+                        pos += 1;
+                    }
+                    let (_name, next) = scan_ident(bytes, pos);
+                    pos = next.max(pos + 1);
+                }
                 b if b.is_ascii_alphanumeric() || b == b'_' || b == b'-' || b == b'\\' => {
                     let (ident, next) = scan_ident(bytes, pos);
                     if !ident.is_empty() {
