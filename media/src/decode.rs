@@ -12,6 +12,9 @@ pub struct VideoDecoder {
     parameter_sets_sent: bool,
     /// Annex-B conversion scratch buffer.
     annexb: Vec<u8>,
+    /// Annex-B mode: input samples are already start-code NALUs with
+    /// in-band parameter sets (MPEG-TS sources).
+    annexb_mode: bool,
 }
 
 impl VideoDecoder {
@@ -25,6 +28,21 @@ impl VideoDecoder {
             parameter_sets,
             parameter_sets_sent: false,
             annexb: Vec::with_capacity(256 * 1024),
+            annexb_mode: false,
+        })
+    }
+
+    /// Creates a decoder for Annex-B byte streams (MPEG-TS), where
+    /// parameter sets travel in-band with the samples.
+    pub fn new_annexb() -> Result<VideoDecoder, String> {
+        let decoder =
+            openh264::decoder::Decoder::new().map_err(|e| format!("openh264 init failed: {e}"))?;
+        Ok(VideoDecoder {
+            decoder,
+            parameter_sets: Vec::new(),
+            parameter_sets_sent: true,
+            annexb: Vec::with_capacity(256 * 1024),
+            annexb_mode: true,
         })
     }
 
@@ -32,11 +50,15 @@ impl VideoDecoder {
     /// RGBA8. Returns `(width, height, rgba)`.
     pub fn decode(&mut self, sample: &[u8]) -> Option<(u32, u32, std::sync::Arc<Vec<u8>>)> {
         self.annexb.clear();
-        if !self.parameter_sets.is_empty() && !self.parameter_sets_sent {
-            self.annexb.extend_from_slice(&self.parameter_sets);
-            self.parameter_sets_sent = true;
+        if self.annexb_mode {
+            self.annexb.extend_from_slice(sample);
+        } else {
+            if !self.parameter_sets.is_empty() && !self.parameter_sets_sent {
+                self.annexb.extend_from_slice(&self.parameter_sets);
+                self.parameter_sets_sent = true;
+            }
+            sample_to_annexb(&self.parameter_sets, sample, &mut self.annexb);
         }
-        sample_to_annexb(&self.parameter_sets, sample, &mut self.annexb);
         if self.annexb.is_empty() {
             return None;
         }

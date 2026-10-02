@@ -25,6 +25,7 @@
 pub mod audio;
 pub mod decode;
 pub mod isobmff;
+pub mod mpegts;
 pub mod pipeline;
 
 pub use pipeline::{MediaInfo, MediaIngress, MediaPipeline};

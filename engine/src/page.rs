@@ -129,6 +129,9 @@ pub enum Message {
         /// JSON detail payload.
         detail: String,
     },
+    /// The navigation target is a media resource: render the built-in
+    /// media viewer document instead of parsing fetched bytes.
+    MediaDocument(String),
     /// Terminate the page thread.
     Shutdown,
 }
@@ -141,6 +144,9 @@ struct MediaSlot {
     autoplay: bool,
     loop_playback: bool,
     started: bool,
+    /// Mirrored mute state (the pipeline has no getter; native controls
+    /// toggle from here).
+    muted: bool,
 }
 
 /// Page-side MSE state: appended-but-unattached bytes per SourceBuffer.
@@ -302,6 +308,10 @@ struct Page {
     video_frames: ImageMap,
     /// Media state mirror shared with the JS runtime natives.
     media_mirror: rowser_js::MediaMirrorMap,
+    /// Layout rects shared with the JS natives (getBoundingClientRect).
+    rect_mirror: rowser_js::RectMirrorMap,
+    /// (scroll_y, viewport_width, viewport_height) shared with JS natives.
+    viewport_mirror: rowser_js::ViewportMirror,
 }
 
 impl Page {
@@ -344,6 +354,8 @@ impl Page {
             sb_lanes: HashMap::new(),
             video_frames: ImageMap::new(),
             media_mirror: Rc::new(RefCell::new(HashMap::new())),
+            rect_mirror: Rc::new(RefCell::new(HashMap::new())),
+            viewport_mirror: Rc::new(RefCell::new((0.0, 0.0, 0.0))),
         }
     }
 
@@ -352,9 +364,13 @@ impl Page {
             Message::Shutdown => return true,
             Message::Navigate(url) => self.navigate(url),
             Message::SubresourceFetched {
-                url, body, pending, ..
+                url,
+                body,
+                headers,
+                pending,
+                ..
             } => {
-                self.subresource_fetched(url, body);
+                self.subresource_fetched(url, body, &headers);
                 if pending == 0 {
                     self.subresources_complete();
                 }
@@ -396,6 +412,7 @@ impl Page {
                     .map(|l| (l.content_size.1 - self.viewport.height).max(0.0))
                     .unwrap_or(0.0);
                 self.scroll_y = y.clamp(0.0, max);
+                self.viewport_mirror.borrow_mut().0 = self.scroll_y;
                 self.repaint();
             }
             Message::UiEvent(node, event_type) => {
@@ -435,6 +452,7 @@ impl Page {
                 event,
                 detail,
             } => self.media_engine_event(node, &event, &detail),
+            Message::MediaDocument(url) => self.media_viewer_document(url),
         }
         false
     }
@@ -701,6 +719,11 @@ impl Page {
     fn click_at(&mut self, x: f32, y: f32) {
         let node = self.hit_node(x, y);
         let Some(node) = node else { return };
+        // Native media controls: elements with the controls attribute own
+        // the bottom strip (play / seek / mute).
+        if self.media_controls_click(node, x, y) {
+            return;
+        }
         if let Some(dom) = self.dom.as_ref() {
             let dom = dom.borrow();
             if let Some((href, _)) = ancestor_link(&dom, node) {
@@ -717,6 +740,99 @@ impl Page {
             });
             self.mark_if_dirty();
         }
+    }
+
+    /// Native media controls hit-testing for elements with the `controls`
+    /// attribute. The bottom strip is consumed (play / mute / seek); a body
+    /// click toggles playback and still propagates to page JS.
+    fn media_controls_click(&mut self, node: NodeId, x: f32, y: f32) -> bool {
+        let node_u = node as u64;
+        let has_controls = self
+            .dom
+            .as_ref()
+            .map(|dom| {
+                let dom = dom.borrow();
+                dom.element(node)
+                    .map(|el| matches!(&*el.name.local, "video" | "audio"))
+                    .unwrap_or(false)
+                    && dom.get_attr(node, "controls").is_some()
+            })
+            .unwrap_or(false);
+        if !has_controls || !self.media_slots.contains_key(&node_u) {
+            return false;
+        }
+        let Some(rect) = self
+            .layout
+            .as_ref()
+            .and_then(|layout| layout.rects.get(&node).copied())
+        else {
+            return false;
+        };
+        let bar_h = (rect.h * 0.16).clamp(26.0, 40.0);
+        let in_bar = y >= rect.y + rect.h - bar_h
+            && y <= rect.y + rect.h
+            && x >= rect.x
+            && x <= rect.x + rect.w;
+        // Actions are computed under a shared borrow, applied after.
+        enum Action {
+            None,
+            Toggle,
+            MuteToggle,
+            Seek(f64),
+        }
+        let action = {
+            let Some(slot) = self.media_slots.get(&node_u) else {
+                return false;
+            };
+            let info = slot.pipeline.info();
+            if in_bar {
+                let local = x - rect.x;
+                if local < 44.0 {
+                    Action::Toggle
+                } else if local > rect.w - 44.0 {
+                    Action::MuteToggle
+                } else if info.duration > 0.0 && info.duration.is_finite() {
+                    let track_w = (rect.w - 88.0).max(1.0);
+                    let frac = ((local - 44.0) / track_w).clamp(0.0, 1.0);
+                    Action::Seek(f64::from(frac) * info.duration)
+                } else {
+                    Action::None
+                }
+            } else {
+                Action::Toggle
+            }
+        };
+        match action {
+            Action::None => {}
+            Action::Toggle => {
+                let playing = self
+                    .media_slots
+                    .get(&node_u)
+                    .map(|slot| !slot.pipeline.is_paused())
+                    .unwrap_or(false);
+                self.media_play(node_u, !playing);
+            }
+            Action::MuteToggle => {
+                let muted = self
+                    .media_slots
+                    .get(&node_u)
+                    .map(|slot| slot.muted)
+                    .unwrap_or(false);
+                self.media_muted(node_u, !muted);
+            }
+            Action::Seek(time) => {
+                // Forward-only in v1: the pipeline clamps backward seeks
+                // (backward seek needs sample-table re-streaming).
+                if let Some(slot) = self.media_slots.get(&node_u) {
+                    slot.pipeline.seek(time);
+                }
+            }
+        }
+        if in_bar {
+            self.dirty = true;
+            return true; // consumed: no JS click for the control strip
+        }
+        false // body click: toggle applied, JS click still dispatches
     }
 
     /// Reports what is under a document-space point (hover/status bar).
@@ -841,12 +957,21 @@ impl Page {
             .or_else(|| Some(self.url.clone()))
     }
 
-    fn subresource_fetched(&mut self, url: String, body: Vec<u8>) {
+    fn subresource_fetched(&mut self, url: String, body: Vec<u8>, headers: &str) {
         let Some(kind) = self.pending.remove(&url) else {
             return;
         };
         match kind {
-            SubresourceKind::Document => self.document_fetched(url, body),
+            SubresourceKind::Document => {
+                // Content-type backstop: an extension-less media URL still
+                // lands in the viewer (the fetched bytes are dropped; the
+                // pipeline re-streams in ranged chunks).
+                if headers_look_like_media(headers) {
+                    self.media_viewer_document(url);
+                } else {
+                    self.document_fetched(url, body);
+                }
+            }
             SubresourceKind::Stylesheet => {
                 let text = String::from_utf8_lossy(&body).into_owned();
                 self.css_texts.push(text);
@@ -960,8 +1085,20 @@ impl Page {
                     }
                 }
                 "video" | "audio" => {
-                    if let Some(src) = dom_ref.get_attr(node, "src") {
-                        let src = self.resolve_url(src);
+                    let src = match dom_ref.get_attr(node, "src") {
+                        Some(src) => Some(src.to_owned()),
+                        None => dom_ref.flat_children(node).into_iter().find_map(|child| {
+                            // <video><source src=...></video> without a
+                            // direct src attribute.
+                            dom_ref
+                                .element(child)
+                                .filter(|el| &*el.name.local == "source")
+                                .and_then(|_| dom_ref.get_attr(child, "src"))
+                                .map(str::to_owned)
+                        }),
+                    };
+                    if let Some(src) = src {
+                        let src = self.resolve_url(&src);
                         let autoplay = dom_ref.get_attr(node, "autoplay").is_some();
                         let muted = dom_ref.get_attr(node, "muted").is_some();
                         let looped = dom_ref.get_attr(node, "loop").is_some();
@@ -1144,9 +1281,31 @@ impl Page {
                 self.css_texts.iter().map(|c| c.len()).sum::<usize>()
             );
         }
-        let (styles, layout) =
-            self.layout_engine
-                .layout_document(&dom.borrow(), &sheets, &media, self.viewport);
+        let (styles, layout) = {
+            // Intrinsic video sizes: 300x150 default, real aspect once the
+            // pipeline knows the dimensions (replaced-element layout).
+            let mut intrinsic: HashMap<NodeId, (f32, f32)> = HashMap::new();
+            for (node, slot) in &self.media_slots {
+                let info = slot.pipeline.info();
+                if info.width > 0 && info.height > 0 {
+                    intrinsic.insert(
+                        NodeId::try_from(*node).unwrap_or(0),
+                        (info.width as f32, info.height as f32),
+                    );
+                }
+            }
+            let (styles, layout) =
+                self.layout_engine.layout_document(&dom.borrow(), &sheets, &media, self.viewport, &intrinsic);
+            // JS layout mirror refresh (getBoundingClientRect).
+            {
+                let mut rects = self.rect_mirror.borrow_mut();
+                rects.clear();
+                for (node, rect) in &layout.rects {
+                    rects.insert(u64::from(*node), [rect.x, rect.y, rect.w, rect.h]);
+                }
+            }
+            (styles, layout)
+        };
         if trace {
             eprintln!(
                 "[page-{}] layout took {}ms ({} dom nodes)",
@@ -1183,12 +1342,30 @@ impl Page {
         };
         let Some(dom) = self.dom.clone() else { return };
         let dl_t0 = std::time::Instant::now();
+        let mut media_overlays = rowser_rendering::display_list::MediaOverlays::new();
+        for (node, slot) in &self.media_slots {
+            let info = slot.pipeline.info();
+            media_overlays.insert(
+                NodeId::try_from(*node).unwrap_or(0),
+                rowser_rendering::display_list::MediaOverlay {
+                    time: slot.pipeline.current_time(),
+                    duration: if info.duration.is_finite() {
+                        info.duration
+                    } else {
+                        0.0
+                    },
+                    paused: slot.pipeline.is_paused(),
+                    muted: slot.muted,
+                },
+            );
+        }
         let list = build_display_list(
             &dom.borrow(),
             &styles,
             &layout,
             &self.images,
             &self.video_frames,
+            &media_overlays,
         );
         if std::env::var("ROWSER_UI_TRACE").is_ok() {
             eprintln!(
@@ -1262,7 +1439,11 @@ impl Page {
                 spoof: self.state.spoof.clone(),
                 outgoing: Some(self.js_tx.clone()),
                 media_mirror: Rc::clone(&self.media_mirror),
+                rects: Rc::clone(&self.rect_mirror),
+                viewport: Rc::clone(&self.viewport_mirror),
             };
+            *self.viewport_mirror.borrow_mut() =
+                (self.scroll_y, self.viewport.width, self.viewport.height);
             match JsRuntime::new(self.state.js_config.clone(), bridge) {
                 Ok(runtime) => self.js = Some(runtime),
                 Err(err) => {
@@ -1349,6 +1530,8 @@ impl Page {
             spoof: self.state.spoof.clone(),
             outgoing: Some(self.js_tx.clone()),
             media_mirror: Rc::new(RefCell::new(HashMap::new())),
+            rects: Rc::new(RefCell::new(HashMap::new())),
+            viewport: Rc::new(RefCell::new((0.0, 0.0, 0.0))),
         };
         if let Ok(runtime) = JsRuntime::new(JsConfig::default(), bridge) {
             runtime
@@ -1400,6 +1583,7 @@ impl Page {
                 autoplay,
                 loop_playback: looped,
                 started: false,
+                muted: false,
             },
         );
         self.media_muted(node_u, muted);
@@ -1408,6 +1592,43 @@ impl Page {
             node: node_u,
             url: src.to_owned(),
         }));
+    }
+
+    /// Renders the built-in media viewer document for a top-level media
+    /// navigation: a black page hosting `<video|audio controls autoplay>`,
+    /// which engages the streaming pipeline exactly like site-embedded
+    /// media (ranged chunks or the playlist walker).
+    fn media_viewer_document(&mut self, url: String) {
+        self.pending.remove(&url);
+        let name = url
+            .rsplit('/')
+            .next()
+            .and_then(|n| n.split(['?', '#']).next())
+            .unwrap_or("media");
+        let lower = name.to_ascii_lowercase();
+        let audio = [".mp3", ".m4a", ".aac", ".ogg", ".opus", ".flac"]
+            .iter()
+            .any(|ext| lower.ends_with(ext));
+        let title = html_escape(name);
+        let src = html_escape(&url);
+        let html = if audio {
+            format!(
+                "<!doctype html><html><head><meta charset=\"utf-8\"><title>{title}</title>\
+                 <style>html,body{{margin:0;height:100%;background:#141418}}\
+                 body{{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:24px}}\
+                 h1{{color:#ddd;font-family:sans-serif;font-size:18px;font-weight:normal}}</style></head>\
+                 <body><h1>{title}</h1><audio src=\"{src}\" controls autoplay style=\"width:70%\"></audio></body></html>"
+            )
+        } else {
+            format!(
+                "<!doctype html><html><head><meta charset=\"utf-8\"><title>{title}</title>\
+                 <style>html,body{{margin:0;height:100%;background:#000}}\
+                 body{{display:flex;align-items:center;justify-content:center}}\
+                 video{{width:100%;height:100%;background:#000}}</style></head>\
+                 <body><video src=\"{src}\" controls autoplay></video></body></html>"
+            )
+        };
+        self.document_fetched(url, html.into_bytes());
     }
 
     /// Notification closure handed to a pipeline worker: routes frame-ready
@@ -1520,6 +1741,23 @@ impl Page {
         let Some(slot) = self.media_slots.get(&node) else {
             return;
         };
+        // loadedmetadata changes intrinsic size (layout resize);
+        // timeupdate drives the native controls' progress bar (audio has
+        // no frame pump to repaint it).
+        if event == "loadedmetadata"
+            || (event == "timeupdate"
+                && self
+                    .dom
+                    .as_ref()
+                    .map(|dom| {
+                        dom.borrow()
+                            .get_attr(node as NodeId, "controls")
+                            .is_some()
+                    })
+                    .unwrap_or(false))
+        {
+            self.dirty = true;
+        }
         let info = slot.pipeline.info();
         let playing = !slot.pipeline.is_paused();
         {
@@ -1610,6 +1848,7 @@ impl Page {
                     autoplay,
                     loop_playback: looped,
                     started: false,
+                    muted: false,
                 },
             );
             self.media_muted(node_u, muted);
@@ -1673,7 +1912,8 @@ impl Page {
     }
 
     fn media_muted(&mut self, node: u64, muted: bool) {
-        if let Some(slot) = self.media_slots.get(&node) {
+        if let Some(slot) = self.media_slots.get_mut(&node) {
+            slot.muted = muted;
             slot.pipeline.set_muted(muted);
         }
     }
@@ -1746,6 +1986,33 @@ impl Page {
             .engine_tx
             .send(Cmd::Internal(Internal::PageExited(self.state.tab)));
     }
+}
+
+/// Escapes a string for embedding in an HTML attribute / text node.
+fn html_escape(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+/// True when response headers describe a media payload (content-type
+/// backstop for extension-less media URLs).
+fn headers_look_like_media(headers: &str) -> bool {
+    let lower = headers.to_ascii_lowercase();
+    lower.contains("video/")
+        || lower.contains("audio/")
+        || lower.contains("mpegurl")
+        || lower.contains("mp2t")
+        || lower.contains("dash+xml")
 }
 
 /// Formats a pipeline event as (DOM event name, JSON detail).

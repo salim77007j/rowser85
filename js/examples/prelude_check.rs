@@ -9,6 +9,7 @@ use rowser_js::{JsConfig, PageBridge};
 fn main() {
     let dom = Rc::new(std::cell::RefCell::new(Dom::new()));
     let (tx, _rx) = mpsc::channel();
+    let (rects, viewport) = rowser_js::PageBridge::empty_mirrors();
     let bridge = PageBridge {
         dom: Rc::clone(&dom),
         document: 0,
@@ -20,6 +21,8 @@ fn main() {
         spoof: rowser_privacy::fingerprint::SpoofProfile::from_seed([1u8; 32]),
         outgoing: Some(tx),
         media_mirror: std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashMap::new())),
+        rects,
+        viewport,
     };
     let t0 = Instant::now();
     println!("creating runtime (evals prelude)…");

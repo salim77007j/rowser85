@@ -116,14 +116,23 @@ impl LayoutEngine {
         author: &[ParsedStylesheet],
         media: &MediaContext,
         viewport: Viewport,
+        intrinsic: &HashMap<NodeId, (f32, f32)>,
     ) -> (StyleMap, LayoutResult) {
         let styles = compute_styles(dom, author, media);
-        let layout = self.compute(dom, &styles, viewport);
+        let layout = self.compute(dom, &styles, viewport, intrinsic);
         (styles, layout)
     }
 
-    /// Lays out a styled document.
-    pub fn compute(&mut self, dom: &Dom, styles: &StyleMap, viewport: Viewport) -> LayoutResult {
+    /// Lays out a styled document. `intrinsic` carries replaced-element
+    /// natural sizes (video dimensions once decoded) for aspect-correct
+    /// sizing when CSS leaves width/height auto.
+    pub fn compute(
+        &mut self,
+        dom: &Dom,
+        styles: &StyleMap,
+        viewport: Viewport,
+        intrinsic: &HashMap<NodeId, (f32, f32)>,
+    ) -> LayoutResult {
         let root = find_layout_root(dom);
         let mut tree: TaffyTree<TextLeaf> = TaffyTree::new();
         let mut dom_to_taffy: HashMap<NodeId, TaffyNode> = HashMap::new();
@@ -140,6 +149,7 @@ impl LayoutEngine {
             root,
             &mut dom_to_taffy,
             &mut taffy_to_dom,
+            intrinsic,
         );
         let Some(taffy_root) = taffy_root else {
             return LayoutResult::default();
@@ -331,6 +341,7 @@ fn build_box(
     node: NodeId,
     dom_to_taffy: &mut HashMap<NodeId, TaffyNode>,
     taffy_to_dom: &mut HashMap<TaffyNode, NodeId>,
+    intrinsic: &HashMap<NodeId, (f32, f32)>,
 ) -> Option<TaffyNode> {
     let style = styles.get(node)?;
     if style.display == DisplayMode::None {
@@ -362,7 +373,9 @@ fn build_box(
                         // Promote it to a box; recursion handles nesting.
                         if has_block_descendant(dom, styles, child) {
                             if let Some(t) =
-                                build_box(dom, styles, tree, child, dom_to_taffy, taffy_to_dom)
+                                build_box(
+                                dom, styles, tree, child, dom_to_taffy, taffy_to_dom, intrinsic,
+                            )
                             {
                                 children.push(t);
                             }
@@ -377,7 +390,9 @@ fn build_box(
                     DisplayMode::None => {}
                     _ => {
                         if let Some(t) =
-                            build_box(dom, styles, tree, child, dom_to_taffy, taffy_to_dom)
+                            build_box(
+                                dom, styles, tree, child, dom_to_taffy, taffy_to_dom, intrinsic,
+                            )
                         {
                             children.push(t);
                         }
@@ -406,7 +421,30 @@ fn build_box(
         }
     }
 
-    let style = taffy_style(styles.get(node)?);
+    let mut style = taffy_style(styles.get(node)?);
+    // Replaced-element sizing: video defaults to 300x150 and adopts the
+    // decoded aspect ratio (intrinsic map) when CSS leaves sizes auto —
+    // the standard browser default that keeps site players usable.
+    if dom
+        .element(node)
+        .is_some_and(|el| &*el.name.local == "video")
+    {
+        if let Some(cs) = styles.get(node) {
+            use rowser_parsing::cascade::LengthOrAuto;
+            let auto_w = matches!(cs.width, LengthOrAuto::Auto);
+            let auto_h = matches!(cs.height, LengthOrAuto::Auto);
+            if let Some(&(w, h)) = intrinsic.get(&node) {
+                style.aspect_ratio = Some(w / h.max(1.0));
+                if auto_w && auto_h {
+                    style.size.width = Dimension::length(w);
+                    style.size.height = Dimension::length(h);
+                }
+            } else if auto_w && auto_h {
+                style.size.width = Dimension::length(300.0);
+                style.size.height = Dimension::length(150.0);
+            }
+        }
+    }
     let taffy_node = tree
         .new_with_children(style, &children)
         .expect("taffy node allocation");
@@ -652,6 +690,7 @@ mod tests {
                 width: 800.0,
                 height: 600.0,
             },
+            &Default::default(),
         );
         assert!(!layout.rects.is_empty());
         // body rect spans full width
@@ -700,6 +739,7 @@ mod tests {
                 width: 800.0,
                 height: 600.0,
             },
+            &Default::default(),
         );
         let rects: Vec<_> = doc
             .dom

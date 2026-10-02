@@ -37,10 +37,19 @@
   globalThis.name = '';
   globalThis.closed = false;
   globalThis.length = 0;
-  globalThis.scrollY = 0;
-  globalThis.scrollX = 0;
-  globalThis.pageYOffset = 0;
-  globalThis.pageXOffset = 0;
+  // Window metrics: live from the engine (layout mirror + scroll). A real
+  // innerWidth/innerHeight/scrollY unblocks every player framework's
+  // sizing logic (they measured 0x0 before).
+  try {
+    Object.defineProperty(globalThis, 'scrollY', { configurable: true, get: function () { return __native_dom_viewport().scrollY || 0; } });
+    Object.defineProperty(globalThis, 'scrollX', { configurable: true, get: function () { return 0; } });
+    Object.defineProperty(globalThis, 'pageYOffset', { configurable: true, get: function () { return window.scrollY || 0; } });
+    Object.defineProperty(globalThis, 'pageXOffset', { configurable: true, get: function () { return 0; } });
+    Object.defineProperty(globalThis, 'innerWidth', { configurable: true, get: function () { return __native_dom_viewport().width || 1360; } });
+    Object.defineProperty(globalThis, 'innerHeight', { configurable: true, get: function () { return __native_dom_viewport().height || 760; } });
+    Object.defineProperty(globalThis, 'outerWidth', { configurable: true, get: function () { return window.innerWidth; } });
+    Object.defineProperty(globalThis, 'outerHeight', { configurable: true, get: function () { return window.innerHeight; } });
+  } catch (e) {}
   globalThis.scrollTo = function () {};
   globalThis.scrollBy = function () {};
   globalThis.focus = function () {};
@@ -615,7 +624,19 @@
     }
     addTextTrack() { return { cues: [], addCue() {}, removeCue() {} }; }
     get textTracks() { return []; }
+    get buffered() {
+      const m = this._mirror();
+      const end = m && m.bufferedEnd ? m.bufferedEnd : 0;
+      const has = end > 0;
+      return { length: has ? 1 : 0, start: function (i) { return 0; }, end: function (i) { return i === 0 && has ? end : 0; } };
+    }
   }
+  // Uncaught errors surface in the devtools console (default handler;
+  // pages may override window.onerror as usual).
+  globalThis.onerror = function (msg) {
+    try { console.error('Uncaught: ' + (msg && msg.message ? msg.message : msg)); } catch (e) {}
+    return false;
+  };
   // Media events are dispatched per node by the engine.
   HTMLMediaElement.prototype.onended = null;
   const htmlClasses = {
@@ -797,14 +818,39 @@
   };
   globalThis.IntersectionObserver = class IntersectionObserver {
     constructor(cb) { this._cb = cb; }
-    observe() {}
+    // Fire the callback asynchronously with isIntersecting: true — the
+    // lazy-load contract (sites observe thumbnails, then swap in the real
+    // src only once "visible"). Without real occlusion data everything
+    // counts as intersecting, which lights up lazy thumbnails everywhere.
+    observe(el) {
+      const cb = this._cb, obs = this;
+      setTimeout(function () {
+        try {
+          cb([{
+            target: el, isIntersecting: true, intersectionRatio: 1,
+            boundingClientRect: el.getBoundingClientRect ? el.getBoundingClientRect() : { top: 0, left: 0, width: 0, height: 0 },
+            rootBounds: null, time: Date.now(),
+          }], obs);
+        } catch (e) {}
+      }, 0);
+    }
     unobserve() {}
     disconnect() {}
     takeRecords() { return []; }
   };
   globalThis.ResizeObserver = class ResizeObserver {
     constructor(cb) { this._cb = cb; }
-    observe() {}
+    // Fire once asynchronously with the element's current size — player
+    // UIs wait for this to build their control bars.
+    observe(el) {
+      const cb = this._cb;
+      setTimeout(function () {
+        try {
+          const r = el.getBoundingClientRect ? el.getBoundingClientRect() : { width: 0, height: 0 };
+          cb([{ target: el, contentRect: { x: 0, y: 0, width: r.width, height: r.height, top: 0, left: 0, right: r.width, bottom: r.height } }]);
+        } catch (e) {}
+      }, 0);
+    }
     unobserve() {}
     disconnect() {}
   };
@@ -826,7 +872,21 @@
   };
   Element.prototype.animate = function () { return animationStub; };
   Element.prototype.getBoundingClientRect = function () {
+    // Real geometry from the engine's layout mirror (document space,
+    // viewport-relative on return).
+    try {
+      const raw = __native_dom_get_rect(this._h);
+      if (raw !== null && raw !== undefined) {
+        const r = JSON.parse(raw);
+        const top = r[1] - (window.scrollY || 0);
+        return { x: r[0], y: top, left: r[0], top: top, right: r[0] + r[2], bottom: top + r[3], width: r[2], height: r[3] };
+      }
+    } catch (e) {}
     return { x: 0, y: 0, top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0 };
+  };
+  Element.prototype.getClientRects = function () {
+    const r = this.getBoundingClientRect();
+    return r.width > 0 || r.height > 0 ? [r] : [];
   };
   Element.prototype.scrollIntoView = function () {};
   Element.prototype.getBoundingClientRect.toString = function () { return 'function getBoundingClientRect() { [native code] }'; };
@@ -1309,7 +1369,7 @@
     if (docLs) {
       for (const cb of docLs.slice()) { try { ev.currentTarget = document; cb(ev); } catch (e) { console.error(type + ' doc handler: ' + errString(e)); } }
     }
-    (winListeners[type] || []).forEach(function (cb) { try { ev.currentTarget = windowAlias; cb(ev); } catch (e) {} });
+    (winListeners[type] || []).forEach(function (cb) { try { ev.currentTarget = windowAlias; cb(ev); } catch (e) { console.error(type + ' window handler: ' + errString(e)); } });
   };
 
   // Lifecycle events, fired by the engine once scripts have run.

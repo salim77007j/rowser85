@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use rowser_media::isobmff::{Codec, StreamDemuxer};
+use rowser_media::mpegts::TsDemuxer;
 use rowser_media::{open_pipeline, MediaEvent, MediaNotification};
 
 /// Serializes the real-time playback tests: two concurrent media workers
@@ -218,6 +219,110 @@ fn video_frames_advance() {
         "at least 3 distinct frames, got {}",
         seen.len()
     );
+}
+
+/// TS demuxing: PAT/PMT discovery, PES timestamps, Annex-B video, ADTS
+/// audio with a synthesized AudioSpecificConfig.
+#[test]
+fn demuxes_mpegts() {
+    let bytes = load("clock-ts.ts");
+    assert!(
+        rowser_media::mpegts::looks_like_ts(&bytes),
+        "fixture sniffs as TS"
+    );
+    let mut demuxer = TsDemuxer::new();
+    // 1309 bytes ≈ 7 packets: not packet-aligned, exercising resync.
+    for chunk in bytes.chunks(1309) {
+        demuxer.push(chunk).expect("ts chunk parses");
+    }
+    demuxer.finish();
+    let info = demuxer.info().expect("PMT + first ADTS parsed");
+    let video = info.video.as_ref().expect("video track");
+    assert_eq!(video.codec, Codec::Avc);
+    assert!(video.extra.is_empty(), "Annex-B: parameter sets in-band");
+    let audio = info.audio.as_ref().expect("audio track");
+    assert_eq!(audio.codec, Codec::AacLc);
+    assert!(audio.sample_rate > 0, "rate from ADTS header");
+    assert!(!audio.extra.is_empty(), "ASC synthesized from ADTS");
+
+    let mut v = Vec::new();
+    demuxer.take_video_samples(&mut v);
+    assert!(v.len() >= 40, "video access units, got {}", v.len());
+    assert!(v[0].keyframe, "first AU is a keyframe (IDR/SPS)");
+    assert!(v[0].pts >= 0.0, "non-negative start pts");
+    assert!(
+        v[0].data.starts_with(&[0, 0, 0, 1]) || v[0].data.starts_with(&[0, 0, 1]),
+        "Annex-B start code"
+    );
+    for w in v.windows(2) {
+        assert!(w[1].pts >= w[0].pts, "video pts monotonic");
+    }
+    let mut a = Vec::new();
+    demuxer.take_audio_samples(&mut a);
+    assert!(a.len() >= 100, "ADTS frames, got {}", a.len());
+    assert!(a[0].data[0] == 0xFF && (a[0].data[1] & 0xF0) == 0xF0, "ADTS sync");
+    assert!(
+        (info.duration - 6.0).abs() < 1.0,
+        "duration ~6, got {}",
+        info.duration
+    );
+}
+
+/// TS end-to-end through the pipeline: demux → Annex-B decode → frames + PCM.
+#[test]
+fn pipeline_plays_mpegts() {
+    let _realtime = realtime_guard();
+    let (pipeline, ingress) = open_pipeline(Arc::new(|_| {}));
+    let bytes = load("clock-ts.ts");
+    for chunk in bytes.chunks(188 * 64) {
+        ingress.push(0, chunk.to_vec());
+    }
+    ingress.close_lane(0);
+    pipeline.play();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        let done = pipeline.info().width > 0 && pipeline.audio_bytes() > 0;
+        if done || std::time::Instant::now() > deadline {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let info = pipeline.info();
+    assert_eq!(
+        (info.width, info.height),
+        (320, 180),
+        "dimensions from the first decoded frame"
+    );
+    assert!(info.has_video && info.has_audio);
+    assert!(pipeline.audio_bytes() > 0, "PCM decoded");
+    assert!(pipeline.latest_frame().is_some(), "frame presented");
+}
+
+#[test]
+fn debug_ts_video_decode() {
+    let bytes = load("clock-ts.ts");
+    let mut d = TsDemuxer::new();
+    d.push(&bytes).expect("ts parses");
+    d.finish();
+    let mut v = Vec::new();
+    d.take_video_samples(&mut v);
+    eprintln!("video samples: {}", v.len());
+    for (i, s) in v.iter().enumerate().take(4) {
+        eprintln!(
+            "sample {i}: pts={:.3} key={} len={} head={:02X?}",
+            s.pts,
+            s.keyframe,
+            s.data.len(),
+            &s.data[..12.min(s.data.len())]
+        );
+    }
+    let mut dec = rowser_media::decode::VideoDecoder::new_annexb().expect("decoder");
+    for (i, s) in v.iter().enumerate().take(10) {
+        match dec.decode(&s.data) {
+            Some((w, h, _)) => eprintln!("decoded {i}: {w}x{h}"),
+            None => eprintln!("decoded {i}: None"),
+        }
+    }
 }
 
 #[test]

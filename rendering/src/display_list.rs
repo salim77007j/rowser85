@@ -53,6 +53,22 @@ pub struct DisplayList {
 /// data URLs) before display list construction.
 pub type ImageMap = std::collections::HashMap<NodeId, Arc<DecodedImage>>;
 
+/// Native-controls state for a media element (progress bar, play state).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct MediaOverlay {
+    /// Current presentation time.
+    pub time: f64,
+    /// Duration (0 = unknown/live).
+    pub duration: f64,
+    /// Paused.
+    pub paused: bool,
+    /// Muted.
+    pub muted: bool,
+}
+
+/// Media overlay state keyed by node id.
+pub type MediaOverlays = std::collections::HashMap<NodeId, MediaOverlay>;
+
 /// Builds the display list for a laid-out document.
 ///
 /// Paint order per element (document order): background → border → the
@@ -63,6 +79,7 @@ pub fn build_display_list(
     layout: &LayoutResult,
     images: &ImageMap,
     video_frames: &ImageMap,
+    media: &MediaOverlays,
 ) -> DisplayList {
     let mut list = DisplayList::default();
     let Some(root) = layout_root(dom) else {
@@ -82,6 +99,7 @@ pub fn build_display_list(
         layout,
         images,
         video_frames,
+        media,
         root,
         &mut list,
         &runs,
@@ -107,6 +125,7 @@ fn walk(
     layout: &LayoutResult,
     images: &ImageMap,
     video_frames: &ImageMap,
+    media: &MediaOverlays,
     node: NodeId,
     list: &mut DisplayList,
     runs: &std::collections::HashMap<NodeId, Vec<Arc<rowser_layout::text::TextRun>>>,
@@ -143,14 +162,26 @@ fn walk(
         });
     }
 
-    // Media elements: blit the latest decoded video frame; before the first
-    // frame arrives, paint the standard letterbox black.
+    // Media elements: blit the latest decoded video frame aspect-preserving
+    // (letterboxed, like real browsers); before the first frame arrives,
+    // paint the standard letterbox black.
     if let Some(element) = dom.element(node) {
         let tag = &*element.name.local;
         if tag == "video" || tag == "audio" {
             if let Some(image) = video_frames.get(&node) {
-                list.commands.push(DrawCmd::Image {
+                let fitted = fit_rect_aspect(
                     rect,
+                    image.width.max(1) as f32,
+                    image.height.max(1) as f32,
+                );
+                if fitted.w < rect.w || fitted.h < rect.h {
+                    list.commands.push(DrawCmd::Rect {
+                        rect,
+                        color: rowser_parsing::cascade::Rgba::new_opaque(0, 0, 0),
+                    });
+                }
+                list.commands.push(DrawCmd::Image {
+                    rect: fitted,
                     image: Arc::clone(image),
                 });
             } else if tag == "video" && rect.w > 1.0 && rect.h > 1.0 {
@@ -158,6 +189,10 @@ fn walk(
                     rect,
                     color: rowser_parsing::cascade::Rgba::new_opaque(0, 0, 0),
                 });
+            }
+            // Native controls bar (controls attribute).
+            if dom.get_attr(node, "controls").is_some() && rect.w > 60.0 && rect.h > 40.0 {
+                draw_media_controls(list, rect, media.get(&node));
             }
         }
     }
@@ -186,7 +221,7 @@ fn walk(
     // Children (flat tree: shadow content composes in at its host).
     for child in dom.flat_children(node) {
         if dom.element(child).is_some() {
-            walk(dom, styles, layout, images, video_frames, child, list, runs);
+            walk(dom, styles, layout, images, video_frames, media, child, list, runs);
         }
     }
 }
@@ -194,4 +229,129 @@ fn walk(
 /// Number of commands (used by benchmarks).
 pub fn command_count(list: &DisplayList) -> usize {
     list.commands.len()
+}
+
+/// Largest sub-rect of `rect` with the given aspect ratio, centered
+/// (the `object-fit: contain` behaviour real browsers apply to video).
+fn fit_rect_aspect(rect: Rect, w: f32, h: f32) -> Rect {
+    let aspect = w / h.max(1.0);
+    let box_aspect = rect.w / rect.h.max(1.0);
+    if aspect <= 0.0 || box_aspect <= 0.0 || (aspect - box_aspect).abs() < 0.001 {
+        return rect;
+    }
+    if aspect > box_aspect {
+        let height = rect.w / aspect;
+        Rect {
+            x: rect.x,
+            y: rect.y + (rect.h - height) / 2.0,
+            w: rect.w,
+            h: height,
+        }
+    } else {
+        let width = rect.h * aspect;
+        Rect {
+            x: rect.x + (rect.w - width) / 2.0,
+            y: rect.y,
+            w: width,
+            h: rect.h,
+        }
+    }
+}
+
+/// Draws the native media control bar: translucent strip, progress fill,
+/// play/pause and mute glyphs (blocky painter geometry — deliberately part
+/// of the display list so page rendering stays single-pass).
+fn draw_media_controls(list: &mut DisplayList, rect: Rect, overlay: Option<&MediaOverlay>) {
+    let bar_h = (rect.h * 0.16).clamp(26.0, 40.0);
+    let bar = Rect {
+        x: rect.x,
+        y: rect.y + rect.h - bar_h,
+        w: rect.w,
+        h: bar_h,
+    };
+    list.commands.push(DrawCmd::Rect {
+        rect: bar,
+        color: rowser_parsing::cascade::Rgba::new(12, 12, 12, 178),
+    });
+    let (time, duration, paused, muted) = match overlay {
+        Some(overlay) => (overlay.time, overlay.duration, overlay.paused, overlay.muted),
+        None => (0.0, 0.0, true, false),
+    };
+    let cy = bar.y + bar_h / 2.0;
+    let white = rowser_parsing::cascade::Rgba::new(240, 240, 240, 230);
+    // Play / pause glyph at the left.
+    if paused {
+        // Blocky play triangle: three shrinking bars.
+        for (i, width) in [10.0_f32, 7.0, 4.0].iter().enumerate() {
+            let i = i as f32;
+            list.commands.push(DrawCmd::Rect {
+                rect: Rect {
+                    x: bar.x + 18.0 + i * 4.0,
+                    y: cy - 9.0 + i * 2.5,
+                    w: *width,
+                    h: 18.0 - i * 5.0,
+                },
+                color: white,
+            });
+        }
+    } else {
+        for i in 0..2u8 {
+            list.commands.push(DrawCmd::Rect {
+                rect: Rect {
+                    x: bar.x + 19.0 + f32::from(i) * 7.0,
+                    y: cy - 8.0,
+                    w: 5.0,
+                    h: 16.0,
+                },
+                color: white,
+            });
+        }
+    }
+    // Progress track + fill.
+    let track_x = bar.x + 44.0;
+    let track_w = (bar.w - 88.0).max(1.0);
+    list.commands.push(DrawCmd::Rect {
+        rect: Rect {
+            x: track_x,
+            y: cy - 2.0,
+            w: track_w,
+            h: 4.0,
+        },
+        color: rowser_parsing::cascade::Rgba::new(255, 255, 255, 96),
+    });
+    if duration > 0.0 && duration.is_finite() {
+        let frac = (time / duration).clamp(0.0, 1.0) as f32;
+        let fill_w = (track_w * frac).max(2.0);
+        list.commands.push(DrawCmd::Rect {
+            rect: Rect {
+                x: track_x,
+                y: cy - 3.0,
+                w: fill_w,
+                h: 6.0,
+            },
+            color: rowser_parsing::cascade::Rgba::new(235, 235, 235, 235),
+        });
+    }
+    // Mute glyph at the right: a speaker square; muted = hollow center.
+    let mx = bar.x + bar.w - 30.0;
+    list.commands.push(DrawCmd::Rect {
+        rect: Rect {
+            x: mx,
+            y: cy - 6.0,
+            w: 12.0,
+            h: 12.0,
+        },
+        color: white,
+    });
+    if muted {
+        list.commands.push(DrawCmd::Rect {
+            rect: Rect {
+                x: mx + 3.0,
+                y: cy - 3.0,
+                w: 6.0,
+                h: 6.0,
+            },
+            color: rowser_parsing::cascade::Rgba::new(12, 12, 12, 220),
+        });
+    }
 }

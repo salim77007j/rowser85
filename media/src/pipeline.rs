@@ -11,6 +11,7 @@ use crate::decode::VideoDecoder;
 use ringbuf::traits::Producer;
 
 use crate::isobmff::{Sample, StreamDemuxer};
+use crate::mpegts::TsDemuxer;
 use crate::{Control, MediaEvent, MediaIngressSender, MediaNotification};
 
 /// Decode-ahead lead in seconds (video + audio scheduling window).
@@ -198,8 +199,64 @@ pub(crate) fn spawn(
 pub use crate::MediaIngressSender as IngressSenderAlias;
 
 struct LaneState {
-    demuxer: StreamDemuxer,
+    demuxer: LaneDemuxer,
     eof: bool,
+}
+
+/// Per-lane demuxer: MP4 (direct / fMP4 / MSE) or MPEG-TS (HLS TS
+/// segments), chosen by sniffing the first bytes on the lane.
+enum LaneDemuxer {
+    Mp4(StreamDemuxer),
+    Ts(TsDemuxer),
+}
+
+impl LaneDemuxer {
+    fn push(&mut self, bytes: &[u8]) -> Result<(), crate::isobmff::DemuxError> {
+        match self {
+            LaneDemuxer::Mp4(demuxer) => demuxer.push(bytes),
+            LaneDemuxer::Ts(demuxer) => demuxer.push(bytes),
+        }
+    }
+
+    fn finish(&mut self) {
+        match self {
+            LaneDemuxer::Mp4(demuxer) => demuxer.finish(),
+            LaneDemuxer::Ts(demuxer) => demuxer.finish(),
+        }
+    }
+
+    fn info(&self) -> Option<crate::isobmff::StreamInfo> {
+        match self {
+            LaneDemuxer::Mp4(demuxer) => demuxer.info().cloned(),
+            LaneDemuxer::Ts(demuxer) => demuxer.info(),
+        }
+    }
+
+    fn end_pts(&self) -> f64 {
+        match self {
+            LaneDemuxer::Mp4(demuxer) => demuxer.end_pts(),
+            LaneDemuxer::Ts(demuxer) => demuxer.end_pts(),
+        }
+    }
+
+    fn take_video_samples(&mut self, out: &mut Vec<Sample>) {
+        match self {
+            LaneDemuxer::Mp4(demuxer) => demuxer.take_video_samples(out),
+            LaneDemuxer::Ts(demuxer) => demuxer.take_video_samples(out),
+        }
+    }
+
+    fn take_audio_samples(&mut self, out: &mut Vec<Sample>) {
+        match self {
+            LaneDemuxer::Mp4(demuxer) => demuxer.take_audio_samples(out),
+            LaneDemuxer::Ts(demuxer) => demuxer.take_audio_samples(out),
+        }
+    }
+
+    /// True when this lane produces Annex-B H.264 (MPEG-TS).
+    fn is_ts(&self) -> bool {
+        matches!(self, LaneDemuxer::Ts(_))
+    }
 }
 
 // SAFETY: the worker's decoders (openh264 / symphonia) hold raw pointers
@@ -363,7 +420,11 @@ impl Worker {
             eprintln!("[media] ingest lane={} bytes={}", lane, bytes.len());
         }
         let state = self.lanes.entry(lane).or_insert_with(|| LaneState {
-            demuxer: StreamDemuxer::new(),
+            demuxer: if crate::mpegts::looks_like_ts(bytes) {
+                LaneDemuxer::Ts(TsDemuxer::new())
+            } else {
+                LaneDemuxer::Mp4(StreamDemuxer::new())
+            },
             eof: false,
         });
         if let Err(err) = state.demuxer.push(bytes) {
@@ -416,21 +477,24 @@ impl Worker {
         }
     }
 
-    /// Publishes LoadedMetadata once any lane reports stream info.
+    /// Publishes LoadedMetadata once any lane reports stream info. TS
+    /// lanes discover the audio config only from the first ADTS header,
+    /// so a late audio config re-publishes (creating the audio decoder).
     fn publish_metadata(&mut self) {
-        if self.metadata_sent {
-            return;
-        }
         let mut duration = 0f64;
         let mut video_cfg = None;
         let mut audio_cfg = None;
+        let mut video_annexb = false;
         for state in self.lanes.values() {
             if let Some(info) = state.demuxer.info() {
                 if info.duration > duration {
                     duration = info.duration;
                 }
                 if video_cfg.is_none() {
-                    video_cfg = info.video.clone().filter(|c| c.decodable());
+                    if let Some(cfg) = info.video.clone().filter(|c| c.decodable()) {
+                        video_annexb = state.demuxer.is_ts();
+                        video_cfg = Some(cfg);
+                    }
                 }
                 if audio_cfg.is_none() {
                     audio_cfg = info.audio.clone().filter(|c| c.decodable());
@@ -440,10 +504,19 @@ impl Worker {
         if video_cfg.is_none() && audio_cfg.is_none() {
             return;
         }
+        let audio_new = audio_cfg.is_some() && self.audio.is_none();
+        if self.metadata_sent && !audio_new {
+            return;
+        }
         // Instantiate decoders on first sight of the configs.
         if self.video.is_none() {
             if let Some(cfg) = &video_cfg {
-                match VideoDecoder::new(cfg) {
+                let built = if video_annexb {
+                    VideoDecoder::new_annexb()
+                } else {
+                    VideoDecoder::new(cfg)
+                };
+                match built {
                     Ok(decoder) => self.video = Some(decoder),
                     Err(err) => {
                         self.set_error(err);
@@ -586,6 +659,30 @@ impl Worker {
             return false; // backpressure: presentation will drain
         }
         if let Some((w, h, rgba)) = decoder.decode(&sample.data) {
+            // TS streams learn their dimensions only from the first decoded
+            // frame; refresh the mirror so aspect-correct layout applies.
+            if w > 0 {
+                let dims_changed = {
+                    let mut info = self.shared.info.lock().unwrap();
+                    if info.width != w || info.height != h {
+                        info.width = w;
+                        info.height = h;
+                        true
+                    } else {
+                        false
+                    }
+                };
+                if dims_changed && self.metadata_sent {
+                    let info = self.shared.info.lock().unwrap().clone();
+                    self.notify(MediaNotification::Event(MediaEvent::LoadedMetadata {
+                        duration: info.duration,
+                        width: info.width,
+                        height: info.height,
+                        has_video: info.has_video,
+                        has_audio: info.has_audio,
+                    }));
+                }
+            }
             self.video_queue.push((
                 sample.pts,
                 Arc::new(rowser_image_type::DecodedImage {

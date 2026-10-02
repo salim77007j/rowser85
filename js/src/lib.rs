@@ -301,6 +301,26 @@ pub struct MediaMirror {
 pub type MediaMirrorMap =
     std::rc::Rc<std::cell::RefCell<std::collections::HashMap<u64, MediaMirror>>>;
 
+/// Layout rects (document space: `[x, y, w, h]`) keyed by node handle,
+/// refreshed by the page thread after every layout pass. Powers a real
+/// `getBoundingClientRect` — player frameworks size their controls from it.
+pub type RectMirrorMap =
+    std::rc::Rc<std::cell::RefCell<std::collections::HashMap<u64, [f32; 4]>>>;
+
+/// `(scroll_y, viewport_width, viewport_height)`, page-thread refreshed.
+pub type ViewportMirror = std::rc::Rc<std::cell::RefCell<(f32, f32, f32)>>;
+
+impl PageBridge {
+    /// Empty layout mirrors for runtimes that never see layout data
+    /// (workers, tests, examples).
+    pub fn empty_mirrors() -> (RectMirrorMap, ViewportMirror) {
+        (
+            std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashMap::new())),
+            std::rc::Rc::new(std::cell::RefCell::new((0.0, 0.0, 0.0))),
+        )
+    }
+}
+
 /// The shared state between the runtime and the page thread.
 pub struct PageBridge {
     /// The page DOM (single-threaded with the runtime).
@@ -323,6 +343,10 @@ pub struct PageBridge {
     pub outgoing: Option<Sender<JsCommand>>,
     /// Media element state mirror (page thread keeps it fresh).
     pub media_mirror: MediaMirrorMap,
+    /// Layout rects, document space (page thread refreshes after layout).
+    pub rects: RectMirrorMap,
+    /// `(scroll_y, viewport_width, viewport_height)`.
+    pub viewport: ViewportMirror,
 }
 
 /// Runtime configuration.
@@ -491,7 +515,16 @@ impl JsRuntime {
             ),
         };
         self.reset_watchdog();
-        let _ = self.context.with(|ctx| ctx.eval::<(), _>(call.as_bytes()));
+        let outcome = self.context.with(|ctx| ctx.eval::<(), _>(call.as_bytes()));
+        if let Err(err) = outcome {
+            // Swallowed dispatch errors are the classic "site silently broke"
+            // failure; surface them (devtools console via JS handler errors,
+            // stderr behind ROWSER_JS_TRACE for field debugging).
+            if std::env::var("ROWSER_JS_TRACE").is_ok() {
+                let head: String = call.chars().take(140).collect();
+                eprintln!("[js] dispatch error: {err} ← {head}");
+            }
+        }
         self.clear_watchdog();
         self.pump_jobs();
     }
@@ -586,9 +619,35 @@ impl JsRuntime {
             globals.set(
                 "__native_console",
                 Function::new(ctx.clone(), move |level: String, text: String| {
+                    if std::env::var("ROWSER_JS_TRACE").is_ok() {
+                        eprintln!("[js:{}] {}", level, text);
+                    }
                     if let Some(out) = &b.outgoing {
                         let _ = out.send(JsCommand::Console { level, text });
                     }
+                })?,
+            )?;
+
+            // --- DOM layout rects (getBoundingClientRect) ---
+            let rects = Rc::clone(&bridge.rects);
+            globals.set(
+                "__native_dom_get_rect",
+                Function::new(ctx.clone(), move |h: u64| -> String {
+                    rects
+                        .borrow()
+                        .get(&h)
+                        .map(|r| format!("[{},{},{},{}]", r[0], r[1], r[2], r[3]))
+                        .unwrap_or_else(|| "null".into())
+                })?,
+            )?;
+
+            // --- viewport + scroll (window metrics) ---
+            let viewport = Rc::clone(&bridge.viewport);
+            globals.set(
+                "__native_dom_viewport",
+                Function::new(ctx.clone(), move || -> String {
+                    let v = *viewport.borrow();
+                    format!("{{\"scrollY\":{},\"width\":{},\"height\":{}}}", v.0, v.1, v.2)
                 })?,
             )?;
 
@@ -1754,6 +1813,8 @@ mod tests {
                 spoof: SpoofProfile::from_seed([42u8; 32]),
                 outgoing: Some(tx),
                 media_mirror: Rc::new(RefCell::new(std::collections::HashMap::new())),
+                rects: Rc::new(RefCell::new(std::collections::HashMap::new())),
+                viewport: Rc::new(RefCell::new((0.0, 0.0, 0.0))),
             },
         )
         .unwrap();
@@ -1882,6 +1943,8 @@ mod tests {
                 spoof: SpoofProfile::from_seed([1u8; 32]),
                 outgoing: Some(tx),
                 media_mirror: Rc::new(RefCell::new(std::collections::HashMap::new())),
+                rects: Rc::new(RefCell::new(std::collections::HashMap::new())),
+                viewport: Rc::new(RefCell::new((0.0, 0.0, 0.0))),
             },
         )
         .unwrap();

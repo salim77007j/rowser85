@@ -840,6 +840,21 @@ fn handle_internal(state: &EngineLoop, internal: Internal) {
     match internal {
         Internal::FetchSubresources { tab, requests } => {
             tracing::debug!(target: "rowser::engine", "fetch subresources: tab {tab}, {} requests", requests.len());
+            // Top-level media URLs never download as documents: the page
+            // renders the built-in media viewer and the pipeline streams
+            // the resource itself (ranged chunks / playlist walker).
+            let mut requests = requests;
+            let mut media_docs: Vec<String> = Vec::new();
+            requests.retain(|request| {
+                if request.resource_type == rowser_networking::ResourceKind::Document
+                    && looks_like_media_url(&request.url).is_some()
+                {
+                    media_docs.push(request.url.clone());
+                    false
+                } else {
+                    true
+                }
+            });
             {
                 let mut tabs = state.tabs.lock().unwrap();
                 let Some(handle) = tabs.get_mut(&tab) else {
@@ -851,6 +866,10 @@ fn handle_internal(state: &EngineLoop, internal: Internal) {
             }
             for request in requests {
                 gate_fetch(state, tab, request);
+            }
+            for url in media_docs {
+                tracing::debug!(target: "rowser::engine", "tab {tab} media document → {url}");
+                send_page(&state.tabs, tab, |tx| tx.send(page::Message::MediaDocument(url)));
             }
         }
         Internal::PageCommand { tab, command } => handle_page_command(state, tab, command),
@@ -1204,6 +1223,27 @@ fn handle_page_command(state: &EngineLoop, tab: TabId, command: JsCommand) {
     }
 }
 
+/// Classifies a URL as a direct media resource by extension. Returns
+/// `Some(true)` for audio, `Some(false)` for video/playlists, `None` when
+/// the URL does not look like media.
+fn looks_like_media_url(url: &str) -> Option<bool> {
+    let path = url.split(['?', '#']).next().unwrap_or(url);
+    let lower = path.to_ascii_lowercase();
+    const VIDEO: &[&str] = &[".mp4", ".m4v", ".mov", ".ts", ".webm", ".flv"];
+    const PLAYLIST: &[&str] = &[".m3u8", ".m3u"];
+    const AUDIO: &[&str] = &[".mp3", ".m4a", ".aac", ".ogg", ".opus", ".flac"];
+    if VIDEO.iter().any(|ext| lower.ends_with(ext)) {
+        return Some(false);
+    }
+    if PLAYLIST.iter().any(|ext| lower.ends_with(ext)) {
+        return Some(false);
+    }
+    if AUDIO.iter().any(|ext| lower.ends_with(ext)) {
+        return Some(true);
+    }
+    None
+}
+
 /// Streams a media URL into the page's element: ranged 2 MB chunks for a
 /// direct resource, playlist-driven segment fetching for HLS. Bytes flow
 /// through the page channel as [`page::Message::MediaData`] so the privacy
@@ -1299,14 +1339,15 @@ async fn spawn_hls_stream(
     url: String,
     source_url: String,
 ) {
-    let base = url::Url::parse(&url).ok();
+    let mut playlist_url = url.clone();
     let mut fetched: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut init_sent = false;
     let mut round = 0u32;
-    while round < 900 {
+    let mut master_hops = 0u32;
+    'playlist: while round < 900 {
         round += 1;
         let request = rowser_networking::FetchRequest {
-            url: url.clone(),
+            url: playlist_url.clone(),
             resource_type: rowser_networking::ResourceKind::Media,
             source_url: source_url.clone(),
             top_site: None,
@@ -1319,9 +1360,52 @@ async fn spawn_hls_stream(
             break;
         }
         let text = String::from_utf8_lossy(&response.body).into_owned();
+        let base = url::Url::parse(&playlist_url).ok();
+        // Master playlist: descend into the lowest-bandwidth variant
+        // (software decode budget), max 4 hops (some CDNs chain masters).
+        if text.contains("#EXT-X-STREAM-INF") {
+            master_hops += 1;
+            if master_hops > 4 {
+                break;
+            }
+            let lines: Vec<&str> = text.lines().map(str::trim).collect();
+            let mut best: Option<(u64, String)> = None;
+            let mut i = 0usize;
+            while i < lines.len() {
+                if let Some(rest) = lines[i].strip_prefix("#EXT-X-STREAM-INF:") {
+                    let bandwidth = rest
+                        .split(',')
+                        .find_map(|attr| attr.trim().strip_prefix("BANDWIDTH="))
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(u64::MAX);
+                    let mut j = i + 1;
+                    while j < lines.len() && (lines[j].starts_with('#') || lines[j].is_empty()) {
+                        j += 1;
+                    }
+                    if j < lines.len() {
+                        let uri = lines[j].to_owned();
+                        if best.as_ref().map(|(b, _)| bandwidth < *b).unwrap_or(true) {
+                            best = Some((bandwidth, uri));
+                        }
+                    }
+                    i = j + 1;
+                    continue;
+                }
+                i += 1;
+            }
+            if let Some((_, variant)) = best {
+                let variant_url = resolve_playlist_uri(&base, &variant);
+                if variant_url != playlist_url {
+                    playlist_url = variant_url;
+                    continue 'playlist;
+                }
+            }
+            break;
+        }
         let mut init_uri: Option<String> = None;
         let mut segments: Vec<String> = Vec::new();
         let mut ended = false;
+        let mut target_duration = 4.0f64;
         for line in text.lines() {
             let line = line.trim();
             if let Some(rest) = line.strip_prefix("#EXT-X-MAP:") {
@@ -1330,6 +1414,8 @@ async fn spawn_hls_stream(
                         init_uri = Some(uri.trim_matches('"').to_owned());
                     }
                 }
+            } else if let Some(rest) = line.strip_prefix("#EXT-X-TARGETDURATION:") {
+                target_duration = rest.trim().parse().unwrap_or(4.0);
             } else if line.starts_with("#EXT-X-ENDLIST") {
                 ended = true;
             } else if !line.starts_with('#') && !line.is_empty() {
@@ -1402,12 +1488,27 @@ async fn spawn_hls_stream(
         if ended {
             break;
         }
-        tokio::time::sleep(Duration::from_millis(4000)).await;
+        // Live poll: half the target duration, clamped to 2-8 s.
+        let poll = (target_duration / 2.0).clamp(2.0, 8.0);
+        tokio::time::sleep(Duration::from_secs_f64(poll)).await;
     }
     let _ = cmd_tx.send(Cmd::Internal(Internal::PageMessage {
         tab,
         message: Box::new(page::Message::MediaEof { node }),
     }));
+}
+
+/// Resolves a variant/segment URI against the playlist URL.
+fn resolve_playlist_uri(base: &Option<url::Url>, href: &str) -> String {
+    if href.starts_with("http://") || href.starts_with("https://") {
+        href.to_owned()
+    } else if let Some(base) = base {
+        base.join(href)
+            .map(|u| u.to_string())
+            .unwrap_or_else(|_| href.to_owned())
+    } else {
+        href.to_owned()
+    }
 }
 
 fn send_page_direct(cmd_tx: std::sync::mpsc::Sender<Cmd>, tab: TabId, message: page::Message) {

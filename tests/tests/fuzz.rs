@@ -65,8 +65,8 @@ proptest! {
         let sheet = parse_stylesheet(&css, &media());
         let mut engine = LayoutEngine::new();
         let (styles, layout) =
-            engine.layout_document(&doc.dom, &[sheet], &media(), Viewport { width: 1280.0, height: 800.0 });
-        let list = build_display_list(&doc.dom, &styles, &layout, &Default::default(), &Default::default());
+            engine.layout_document(&doc.dom, &[sheet], &media(), Viewport { width: 1280.0, height: 800.0 }, &Default::default());
+        let list = build_display_list(&doc.dom, &styles, &layout, &Default::default(), &Default::default(), &Default::default());
         let mut painter = Painter::new();
         let frame = painter.render(&list, RenderOptions::default(), &mut engine.font_system);
         prop_assert!(frame.is_some());
@@ -93,7 +93,7 @@ proptest! {
         let doc = parse_html(html.as_bytes());
         let sheet = parse_stylesheet("body { color: red }", &media());
         let mut engine = LayoutEngine::new();
-        let _ = engine.layout_document(&doc.dom, &[sheet], &media(), Viewport::default());
+        let _ = engine.layout_document(&doc.dom, &[sheet], &media(), Viewport::default(), &Default::default());
     }
 }
 
