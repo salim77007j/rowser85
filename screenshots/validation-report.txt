@@ -232,3 +232,34 @@ PASS 22-window-768p  rss=331.9MB
 == summary ==
 failed stages: 0
 passed stages: 122
+== phase: sites ==
+PASS 01-newtab  rss=152.2MB
+PASS 02-example-com  rss=179.5MB
+PASS 03-wikipedia  rss=214.4MB
+PASS 04-github  rss=285.9MB
+PASS 05-hackernews  rss=297.3MB
+PASS 05b-rustlang  rss=314.4MB
+PASS 05c-example-2  rss=315.5MB
+PASS 05d-mozilla  rss=327.9MB
+PASS 05e-cern  rss=340.4MB
+PASS 06-search  rss=353.1MB
+== summary ==
+failed stages: 0
+passed stages: 132
+== phase: features ==
+PASS 07-suggestions  rss=353.1MB
+PASS 08-bookmarked  rss=353.1MB
+PASS 09-bookmarks-manager  rss=353.1MB
+PASS 10-history  rss=353.1MB
+PASS 11-privacy  rss=353.1MB
+PASS 12-settings-dark  rss=353.1MB
+PASS 13-find-in-page  rss=353.1MB
+PASS 14-zoom-in  rss=353.1MB
+PASS 15-devtools  rss=353.1MB
+PASS 16-downloads  rss=353.1MB
+PASS 17-print-dialog  rss=359.7MB
+PASS 18-tab-context-menu  rss=359.7MB
+PASS 19-multi-tabs  rss=359.7MB
+== summary ==
+failed stages: 0
+passed stages: 145

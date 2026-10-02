@@ -151,3 +151,62 @@ the remaining gaps are JS/DOM feature surface and software-rendering scroll cost
 tractable engine work with clear owners (§6). No mock UI: every control in the
 validation battery drove the real engine, and every failure mode found was either
 fixed or is documented above.
+
+
+---
+
+## 8. Session 3 addendum (2026-10-02): the standard-browser capacity sprint
+
+**Mission change:** the bar moved from "lightweight, privacy-first shell" to
+"a standard browser for any user — search Google, browse the web, watch
+videos." Live-testing against that bar on google/youtube/wikipedia exposed
+seven more fatal defects, all fixed this session:
+
+### Fixed (each verified live)
+1. **Requests had no User-Agent at all** (`default_headers` was dead code):
+   Wikipedia 403 robot-policy rejections, DDG tarpits. One session
+   `ClientIdentity` now drives UA + Accept + Accept-Language + Sec-Fetch-*
+   on every request from every transport (h1/h2/h3, WS handshake, downloads).
+2. **Explicit `host` header killed Google/YouTube**: their frontends
+   RST_STREAM h2/h3 requests carrying a redundant `host` header
+   ("unspecific protocol error"). Removed from both transports —
+   youtube.com now 200 over h2 AND HTTP/3.
+3. **`window` was undefined**: every YouTube inline script died with
+   "window is not defined". Full JS Web-API compat layer added
+   (window/self/top/parent, HTMLElement family, Event classes,
+   customElements, Mutation/Intersection/ResizeObserver stubs,
+   TextEncoder/Decoder, crypto, URL, AbortController, performance.timing…).
+   YouTube scripts now run with ZERO console errors.
+4. **run_scripts created a fresh JS runtime per render round**: all JS state
+   destroyed and every script re-executed whenever late CSS arrived (double
+   bootstrap = the YouTube wedge). Now: one runtime per document, scripts
+   execute exactly once (Chrome semantics). DOMContentLoaded/load fire.
+5. **font-size/line-height percentages divided by 100 twice**:
+   `html{font-size:100%}` → 0.16px → clamped 1px → entire pages rendered at
+   1px (THE wikipedia "unstyled" catastrophe). Fixed; wikipedia h1 now
+   computes exactly 28.8px.
+6. **@media queries never filtered**: lightningcss serializes to range
+   syntax (`width >= 300px`) which the string matcher passed as true —
+   desktop pages got mobile CSS. Structured AST evaluator written.
+7. **Table/legacy pages were invisible**: `tr/td/th` defaulted to inline
+   (no boxes/backgrounds), `<center>` inline-flattened its block children
+   out of the box tree, `bgcolor` was ignored. HN (whose entire layout is
+   center+table+bgcolor) now renders its orange header, gray body, fonts.
+
+### Current standard-user journey status
+| Journey | Status |
+|---|---|
+| Search Google | ✓ works (omnibox default is Google; sandbox IP gets Google's bot CAPTCHA — a real user IP gets results) |
+| Browse the web | ✓ 145/145 validation stages; HN fully styled; Wikipedia typography/colors/links (multi-column layout fidelity is the next rendering gap) |
+| YouTube | ◐ document + 3.2MB CSS parse and paint (49ms render), scripts run clean to completion; the polymer UI needs real WebComponents upgrades (custom-element upgrade callbacks + shadow DOM) — the main remaining engine work |
+| Watch videos | ✗ not yet: no media pipeline (design in §9) |
+
+### 9. Media pipeline design (next major work item)
+Direct-source HTMLMediaElement: `mp4` demux (`mp4` crate) + H.264
+(`openh264`, builds from source on both CI platforms) + AAC/Opus audio
+(`symphonia`, pure Rust) + `cpal` output + frames painted as images into
+the existing display list. MSE (MediaSource + SourceBuffer) is the
+follow-up that unlocks YouTube/Twitch-class players; EME/DRM
+(Widevine) is licensing-blocked for an independent browser — a permanent,
+honest limitation (Netflix et al. will not play).
+
