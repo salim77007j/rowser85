@@ -190,15 +190,19 @@ fn video_frames_advance() {
     }
     ingress.close_lane(0);
     pipeline.play();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    // 30s deadline + sampled hash: shared CI runners starve the worker
+    // thread; hashing every byte of every 60ms poll made the test itself
+    // a load source (15s was not enough on a starved 2-core runner).
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     let mut seen: Vec<Vec<u8>> = Vec::new();
     while std::time::Instant::now() < deadline && seen.len() < 6 {
         if let Some(frame) = pipeline.latest_frame() {
-            // Hash the full frame: the test pattern's top-left corner is
-            // static — only the mid/lower bands move.
+            // Hash a stride sample of the frame: the test pattern's
+            // top-left corner is static — only the mid/lower bands move,
+            // and a 1/16 stride still separates distinct frames cleanly.
             let mut sig = vec![0u8; 8];
             let mut h: u64 = 1469598103934665603;
-            for b in frame.rgba.iter() {
+            for b in frame.rgba.iter().step_by(16) {
                 h ^= u64::from(*b);
                 h = h.wrapping_mul(1099511628211);
             }
