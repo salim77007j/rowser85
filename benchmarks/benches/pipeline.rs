@@ -93,6 +93,7 @@ fn bench_cascade_and_layout(c: &mut Criterion) {
                 width: 1280.0,
                 height: 800.0,
             },
+            &Default::default(),
         );
         group.throughput(Throughput::Elements(items as u64));
         group.bench_function(label, |b| {
@@ -105,6 +106,7 @@ fn bench_cascade_and_layout(c: &mut Criterion) {
                         width: 1280.0,
                         height: 800.0,
                     },
+                    &Default::default(),
                 )
             })
         });
@@ -129,6 +131,7 @@ fn bench_display_list(c: &mut Criterion) {
             width: 1280.0,
             height: 800.0,
         },
+        &Default::default(),
     );
     c.bench_function("display-list/2k-nodes", |b| {
         b.iter(|| {
@@ -136,6 +139,7 @@ fn bench_display_list(c: &mut Criterion) {
                 &doc.dom,
                 &styles,
                 &layout,
+                &Default::default(),
                 &Default::default(),
                 &Default::default(),
             )
@@ -158,11 +162,13 @@ fn bench_paint(c: &mut Criterion) {
             width: 1280.0,
             height: 800.0,
         },
+        &Default::default(),
     );
     let list = build_display_list(
         &doc.dom,
         &styles,
         &layout,
+        &Default::default(),
         &Default::default(),
         &Default::default(),
     );
@@ -214,11 +220,13 @@ fn bench_full_pipeline(c: &mut Criterion) {
                         width: 1280.0,
                         height: 800.0,
                     },
+                    &Default::default(),
                 );
                 let list = build_display_list(
                     &doc.dom,
                     &styles,
                     &layout,
+                    &Default::default(),
                     &Default::default(),
                     &Default::default(),
                 );
