@@ -115,3 +115,45 @@ Key properties:
 * Replaced-element layout: `<video>` honors width/height attributes, but
   surrounding flow layout treats it as a plain block — text can overlap
   the box; the display-list blit itself is exact.
+
+## Session 6 (standard-browser sprint)
+
+Top-level media navigation + HLS breadth + platform fixes on top of the
+session-4 pipeline:
+
+* **Media viewer documents.** Navigating to a media URL (extension
+  shortcut in the engine fetch dispatcher + content-type backstop in the
+  page thread) renders a built-in black viewer page hosting
+  `<video|audio controls autoplay>`, which engages the same streaming
+  pipeline as site-embedded media. Validated live: direct MP4
+  (w3schools mov_bbb), Apple bipbop-advanced fMP4, mux TS HLS (m5-m7
+  battery stages; frame-hash change + VLM-verified content).
+* **HLS done properly**: master playlists (lowest-bandwidth VIDEO variant
+  — RESOLUTION attribute excludes audio-only renditions), `#EXT-X-MAP`
+  with BYTERANGE, `#EXT-X-BYTERANGE` segments (ranged fetches, implicit
+  continuation offsets), TARGETDURATION-driven live polling.
+* **Original MPEG-TS demuxer** (`media/src/mpegts.rs`): PAT/PMT/PES →
+  Annex-B H.264 + ADTS AAC samples, per-pid PTS normalization (broadcast
+  streams start ~1.4 s in), ID3 tag skipping (HLS timed metadata rides in
+  front of TS packets — the bipbop sniff failure), RAI/SPS keyframe
+  detection, AudioSpecificConfig synthesized from the first ADTS header.
+  10 media-crate tests incl. end-to-end TS playback.
+* **Native media controls**: the `controls` attribute renders a real
+  control bar (translucent strip, progress fill, play/pause + mute
+  glyphs) in the display list, with click hit-testing on the page thread
+  (play/pause toggle, seek, mute). Forward seek only in v1.
+* **Replaced-element sizing**: video/audio default 300x150; video adopts
+  the decoded aspect ratio when height is auto (intrinsic map). Known
+  taffy 0.14 limitation: percent-width + aspect collapses to content
+  size — the viewer page bakes viewport px instead; a real replaced
+  measure function is the v2 fix.
+* **Letterboxed video painting** (`object-fit: contain` semantics).
+* **Media suspension override**: a tab with playing media is never
+  auto-suspended (engine `Internal::MediaActive`, page-thread reported)
+  — previously ANY tab froze after 60 s, visible or not. First tab is
+  born focused.
+* **`<source>` children** honored when video/audio has no `src`.
+
+Known gaps: HLS audio-only renditions (EXT-X-MEDIA GROUP-URI lanes) not
+fetched — bipbop-advanced plays video-only; backward seek; YouTube
+player JS still does not start video (see VALIDATION.md).

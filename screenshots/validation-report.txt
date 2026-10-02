@@ -93,3 +93,28 @@ PASS m3-after-media  rss=227.0MB
 == summary ==
 failed stages: 0
 passed stages: 64
+== phase: media ==
+PASS m1-direct-video  rss=228.7MB
+PASS m2-mse-video  rss=232.0MB
+PASS m4-webcomponents  rss=232.1MB
+PASS m5-media-viewer-mp4  rss=232.6MB
+PASS m6-hls-fmp4-byterange  rss=251.2MB
+PASS m7-hls-ts  rss=267.7MB
+PASS m3-after-media  rss=267.5MB
+== summary ==
+failed stages: 0
+passed stages: 71
+== phase: sites ==
+PASS 01-newtab  rss=174.7MB
+PASS 02-example-com  rss=209.3MB
+PASS 03-wikipedia  rss=243.1MB
+PASS 04-github  rss=343.7MB
+PASS 05-hackernews  rss=355.5MB
+PASS 05b-rustlang  rss=369.3MB
+PASS 05c-example-2  rss=378.3MB
+PASS 05d-mozilla  rss=389.3MB
+PASS 05e-cern  rss=398.6MB
+PASS 06-search  rss=420.1MB
+== summary ==
+failed stages: 0
+passed stages: 81

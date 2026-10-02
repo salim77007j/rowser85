@@ -329,3 +329,28 @@ skeleton nodes to 529 and stalls on two remaining long-tail errors
 (Cast-extension loader: `indexOf` of undefined; uberproxy URL check
 receiving undefined). The remaining path to full mount is documented in
 `docs/UI-WORKLOG.md` session 5.
+
+## Session 6 addendum — standard-browser sprint
+
+**Battery**: 31 stages green (m1-m7 media, all sites/features unchanged).
+New: m5 media-viewer (direct MP4 nav), m6 fMP4 HLS (BYTERANGE), m7 TS HLS
+(ID3 + variant selection). RSS at m7: ~268 MB with three streams
+sequentially through one tab.
+
+**Live gap audit (fresh profile, xvfb-run rig)**:
+* Google search end-to-end: WORKS (stage 06; results render, layout
+  rough on google's DOM).
+* Direct MP4 URL: PLAYS (Big Buck Bunny visible + control bar; VLM
+  verified; frames change during playback).
+* HLS fMP4 (Apple bipbop adv, master + BYTERANGE): PLAYS video ("Bip!"
+  pattern visible). Audio-only rendition not fetched (documented).
+* HLS TS (mux x36xhzz): PLAYS video+audio (nature scene visible, frames
+  change; PMT/PES demux traced).
+* YouTube watch page: page + player skeleton load; ~147 scripts run;
+  hydration stalls on long-tail player errors (see UI-WORKLOG session 5
+  list). Video does not start — honest gap; MSE, sizing, rects,
+  observers and error surfacing are now in place for the next sprint.
+* Suspensions during playback: 0 (media override active).
+
+**Regressions**: none — full sites phase re-run green (81 cumulative
+PASS lines), workspace tests 10/10 media + all crates green.

@@ -278,6 +278,15 @@ if [ "$PHASE" = "all" ] || [ "$PHASE" = "media" ]; then
   # attestation proves the pipeline ran.
   nav "http://localhost:8123/wc.html"; sleep 4
   snap m4-webcomponents 10 nav "http://localhost:8123/wc.html"
+  # M5..M7 (session 6): top-level media-URL navigation — the built-in
+  # viewer document engages the streaming pipeline (extension shortcut +
+  # content-type backstop), BYTERANGE fMP4 HLS, ID3+TS HLS.
+  nav "http://localhost:8123/clock-mp4.mp4"; sleep 4
+  snap m5-media-viewer-mp4 10 nav "http://localhost:8123/clock-mp4.mp4"
+  nav "https://devstreaming-cdn.apple.com/videos/streaming/examples/img_bipbop_adv_example_fmp4/master.m3u8"; sleep 12
+  snap m6-hls-fmp4-byterange 16 nav "https://devstreaming-cdn.apple.com/videos/streaming/examples/img_bipbop_adv_example_fmp4/master.m3u8"
+  nav "https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8"; sleep 12
+  snap m7-hls-ts 16 nav "https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8"
   nav "rowser://newtab"; sleep 2
   snap m3-after-media 8 nav "rowser://newtab"
   [ -f /home/z/my-project/validate-http.pid ] && kill "$(cat /home/z/my-project/validate-http.pid)" 2>/dev/null
