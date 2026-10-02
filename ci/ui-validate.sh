@@ -272,6 +272,12 @@ if [ "$PHASE" = "all" ] || [ "$PHASE" = "media" ]; then
   snap m1-direct-video 10 nav "http://localhost:8123/index.html"
   nav "http://localhost:8123/mse.html"; sleep 3
   snap m2-mse-video 10 nav "http://localhost:8123/mse.html"
+  # WebComponents E2E: custom elements + shadow DOM + slots + templates.
+  # The page self-verifies 15 checks and paints the results; a hydrated
+  # render differs hugely from the raw skeleton, so frame-change
+  # attestation proves the pipeline ran.
+  nav "http://localhost:8123/wc.html"; sleep 4
+  snap m4-webcomponents 10 nav "http://localhost:8123/wc.html"
   nav "rowser://newtab"; sleep 2
   snap m3-after-media 8 nav "rowser://newtab"
   [ -f /home/z/my-project/validate-http.pid ] && kill "$(cat /home/z/my-project/validate-http.pid)" 2>/dev/null

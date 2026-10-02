@@ -297,3 +297,35 @@ pipeline + original ISOBMFF demuxer + openh264/symphonia/cpal behind it).
 | Live streams (fMP4-HLS) | ✓ playlist reader (ENDLIST + live re-poll) |
 | YouTube app | ◐ skeleton renders, scripts run clean; Polymer needs custom-element upgrades + shadow DOM (next epic) |
 | DRM (Netflix-class) | ✗ EME/Widevine permanently out (licensing) |
+
+---
+
+## Session 5 addendum (2026-10-02): WebComponents
+
+**Battery:** 30/30 stages green — sites 10, features 13, media 4 (direct
+video, MSE, **new m4-webcomponents**, after-media), session restore 1.
+Zero regressions from the DOM/prelude surgery.
+
+**New stage m4** (`validation/media/wc.html`): 15 self-verifying
+WebComponents checks — wrapper identity (`getElementById ===
+getElementById`), `instanceof`, constructor execution with
+`template.content.cloneNode(true)` stamping into `attachShadow`,
+connectedCallback, shadow children, element event listeners,
+attributeChangedCallback, createElement+connect, innerHTML upgrade,
+querySelectorAll, currentScript, cloneNode round-trips, whenDefined
+promises. All 15 pass; the stage's frame-change attestation proves the
+hydrated render.
+
+**Crash fix:** a bidi paragraph-separator (U+001C/001D/001E) inside a
+mixed-direction text node previously asserted inside cosmic-text's
+shaper and killed the page thread (whole browser). Now sanitized to
+spaces per CSS Text semantics + catch_unwind defense in depth;
+regression-tested in `layout/src/text.rs`.
+
+**YouTube measured state:** full document (1.19 MB) loads; ShadyDOM
+(YouTube unconditionally forces `{force:true,noPatch:true}`) loads
+cleanly; 147 scripts execute; hydration advances the DOM from ~300
+skeleton nodes to 529 and stalls on two remaining long-tail errors
+(Cast-extension loader: `indexOf` of undefined; uberproxy URL check
+receiving undefined). The remaining path to full mount is documented in
+`docs/UI-WORKLOG.md` session 5.

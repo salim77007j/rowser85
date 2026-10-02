@@ -127,3 +127,107 @@ toolchain and repo re-provisioned from GitHub first):
   (no sudo here); xkbcommon/xcb runtime libs likewise under
   /home/z/my-project/debs/extracted; `[profile.dev] debug=0` added after
   disk exhaustion (9.9 GB sandbox cannot hold debuginfo builds).
+
+---
+
+## Session 5 (2026-10-02): the WebComponents stack + the bidi crash
+
+**Directive (standing):** "a standard browser any user can use — search
+Google, browse, watch videos or live streams; massive compatibility +
+high performance; don't copy others; don't stop to ask."
+
+Sandbox was wiped again — re-provisioned (rustup, deb libs for
+alsa/xkbcommon/xcb, repo clone) before any work.
+
+### The crash that killed the browser first
+
+Baseline probing found a page-thread panic in cosmic-text 0.17.2
+(`assert_eq!(line_rtl, rtl)` in the shaper): Unicode bidi class-B
+characters U+001C/001D/001E are *not* `char::is_whitespace()`, so they
+survive CSS whitespace collapsing, reach unicode-bidi, split the layout
+line into multiple bidi *paragraphs*, and mixed directions assert.
+Google/YouTube pages contain them (international metadata). Fix:
+`sanitize_bidi_separators` maps the survivors 1:1 to spaces (spec-
+correct per CSS Text) + `catch_unwind` at the shaping boundary so no
+text content can ever abort a tab again. Regression tests in
+`layout/src/text.rs` (7/7 green).
+
+### WebComponents (see docs/WEBCOMPONENTS.md for the full design)
+
+* **Identity map** (NodeId→wrapper): `getElementById` returns the same
+  object, element listeners actually fire — the prerequisite for
+  everything else.
+* **customElements v1**: define/get/whenDefined/upgrade +
+  polyfillWrapFlushCallback; ctor/connected/disconnected/attributeChanged
+  driven from the mutation natives; Rust-side `findCustomTags` scan so
+  connect callbacks stay cheap on large insertions.
+* **Shadow DOM as flat tree**: host↔root maps on the Dom,
+  `flat_children` with slot assignment (named/default/fallback), cascade
+  + layout + display list all walk the flat tree, shadow children
+  inherit from the host, shadow `<style>` collected per render.
+* **Templates**: contents persist past parse; `template.content`;
+  cloneNode; serializer/import keep content through innerHTML
+  round-trips.
+* **innerHTML** get/set (parse + import + replace + connect callbacks).
+* **DOM surface**: 40+ HTML element classes, Node family, TreeWalker,
+  DOMImplementation.createHTMLDocument (settable), matches/closest,
+  classList, Range/Selection, Intl (+supportedLocalesOf — a YouTube
+  player hard dependency), MessageChannel/MessagePort/postMessage,
+  document.currentScript (scripts carry node ids), writable
+  document.readyState.
+* **JS limits raised**: 96→384 MB heap, 2 MB stack (kevlar hydration
+  OOM'd at 96).
+* **xdriver uppercase fix**: capital letters typed bare lowercase keys
+  (shared keycode with the lowercase twin) — every YouTube video ID the
+  rig typed was silently lowercased. Rig bug, not engine.
+
+### Validation
+
+* Battery: **30/30 stages green** (sites 10, features 13, media 4
+  incl. the new `m4-webcomponents` frame-attested stage, restore 1) —
+  zero regressions from the DOM/prelude surgery.
+* `validation/media/wc.html`: 15 self-verifying WebComponents checks —
+  15/15 through the real browser (report channel via fixture-server
+  fetch, immune to console truncation).
+* Unit: dom (7), layout (8 incl. bidi regression), parsing (3), js (8).
+* clippy + fmt clean.
+
+### YouTube: from "skeleton" to "hydration running"
+
+Progress ladder this session (each step verified by full-stack console
+traces — the 240→900 char trace bump made stacks readable):
+1. Full page loads (1.19 MB document; bot-challenge roulette explained
+   below), RSS ~465 MB, zero panics.
+2. ShadyDOM: YouTube *always* forces ShadyDOM `{force:true,noPatch:true}`
+   (unconditional inline script) — the polyfill path IS the target
+   path. It now loads cleanly (createHTMLDocument had to be fully
+   settable; Document/Node-family globals had to exist; readyState had
+   to be writable).
+3. 147 scripts execute; Intl/statics fixed the player bootstrap;
+   hydration builds ~529 DOM nodes (from 300 skeleton nodes) and then
+   stalls on two remaining errors: the Cast-extension loader
+   (`indexOf` of an undefined ytcfg string, kevlar 29440) and an
+   uberproxy URL check receiving undefined (pmY). Documented for the
+   next session.
+
+### Google bot-detection findings (measured, not guessed)
+
+* A bare Chrome-claiming UA over our rustls TLS gets 3 KB challenge
+  stubs; the Rrowser-branded UA receives the real page. UA reverted to
+  the honest brand token (curl + the engine's own hyper/h2/h3 client
+  get the full page either way — the fingerprint roulette is Google's
+  risk engine, not our transport).
+* The engine's networking (hyper + h2 + h3 + rustls, cookies, privacy
+  pipeline) fetches the full page 10/10 in isolation — verified with
+  `networking/examples/yt_probe.rs`.
+
+### Environment notes for future sessions
+
+* `--profile` on the binary is **not wired** — the data dir is always
+  `~/.local/share/rowser85`; reset with `rm -rf` like the battery does.
+* The report-channel test pattern (`scripts/report-server.py` + page
+  fetch to `/report?r=...`) is the reliable way to read page state —
+  console output only prints at WARN+ under trace and truncates.
+* `scripts/yt-patient.sh`: single-navigation patient probe (the retry
+  loop in earlier probes re-navigated and RESET hydration mid-flight —
+  never trust a probe that resets what it measures).
