@@ -417,7 +417,13 @@ impl Worker {
     fn ingest(&mut self, lane: u64, bytes: &[u8]) {
         let trace = std::env::var("ROWSER_MEDIA_TRACE").is_ok();
         if trace {
-            eprintln!("[media] ingest lane={} bytes={}", lane, bytes.len());
+            let head: Vec<String> = bytes.iter().take(8).map(|b| format!("{b:02X}")).collect();
+            eprintln!(
+                "[media] ingest lane={} bytes={} head={}",
+                lane,
+                bytes.len(),
+                head.join("")
+            );
         }
         let state = self.lanes.entry(lane).or_insert_with(|| LaneState {
             demuxer: if crate::mpegts::looks_like_ts(bytes) {

@@ -422,22 +422,32 @@ fn build_box(
     }
 
     let mut style = taffy_style(styles.get(node)?);
-    // Replaced-element sizing: video defaults to 300x150 and adopts the
-    // decoded aspect ratio (intrinsic map) when CSS leaves sizes auto —
-    // the standard browser default that keeps site players usable.
+    // Replaced-element sizing: video/audio default to 300x150; video
+    // adopts the decoded aspect ratio when the height is auto and the
+    // width is not a percentage (taffy 0.14 collapses percent-width +
+    // aspect-ratio to the content size — a real replaced-element measure
+    // function is the follow-up).
     if dom
         .element(node)
-        .is_some_and(|el| &*el.name.local == "video")
+        .is_some_and(|el| matches!(&*el.name.local, "video" | "audio"))
     {
         if let Some(cs) = styles.get(node) {
-            use rowser_parsing::cascade::LengthOrAuto;
+            use rowser_parsing::cascade::{Length, LengthOrAuto};
             let auto_w = matches!(cs.width, LengthOrAuto::Auto);
             let auto_h = matches!(cs.height, LengthOrAuto::Auto);
+            let width_is_percent =
+                matches!(cs.width, LengthOrAuto::Length(Length::Percent(_)));
             if let Some(&(w, h)) = intrinsic.get(&node) {
-                style.aspect_ratio = Some(w / h.max(1.0));
-                if auto_w && auto_h {
-                    style.size.width = Dimension::length(w);
-                    style.size.height = Dimension::length(h);
+                if dom
+                    .element(node)
+                    .is_some_and(|el| &*el.name.local == "video")
+                    && !width_is_percent
+                {
+                    style.aspect_ratio = Some(w / h.max(1.0));
+                    if auto_w && auto_h {
+                        style.size.width = Dimension::length(w);
+                        style.size.height = Dimension::length(h);
+                    }
                 }
             } else if auto_w && auto_h {
                 style.size.width = Dimension::length(300.0);
@@ -675,6 +685,94 @@ mod tests {
     use super::*;
     use rowser_parsing::css::{parse_stylesheet, MediaContext};
     use rowser_parsing::html::parse_html;
+
+    /// The built-in media viewer page: video must fill the width and get a
+    /// real aspect-derived height. Diagnostic over CSS variants — the
+    /// shipping viewer CSS must be the one that passes.
+    #[test]
+    fn media_viewer_layout_sizing() {
+        let variants: &[(&str, &str)] = &[
+            (
+                "shipping: viewport px width (as the viewer page bakes it)",
+                "body{margin:0;background:#000}video{width:1360px;height:auto;background:#000}",
+            ),
+            (
+                "percent width (documented taffy 0.14 limitation)",
+                "body{margin:0}video{width:100%;height:auto}",
+            ),
+            (
+                "no css at all (intrinsic default)",
+                "",
+            ),
+        ];
+        let template = br#"<!doctype html><html><head><style>__CSS__</style></head>
+<body><video src="x.mp4" controls autoplay></video></body></html>"#;
+        for (name, css) in variants {
+            let html = String::from_utf8_lossy(template).replace("__CSS__", css);
+            let doc = parse_html(html.as_bytes());
+            let sheet = parse_stylesheet(css, &MediaContext::default());
+            let video = {
+                let dom = &doc.dom;
+                dom.subtree_elements(dom.document())
+                    .find(|n| {
+                        dom.element(*n)
+                            .map(|e| &*e.name.local == "video")
+                            .unwrap_or(false)
+                    })
+                    .expect("video element")
+            };
+            let mut engine = LayoutEngine::new();
+            let mut intrinsic = HashMap::new();
+            intrinsic.insert(video, (320.0, 240.0));
+            let (_, layout) = engine.layout_document(
+                &doc.dom,
+                &[sheet],
+                &MediaContext::default(),
+                Viewport {
+                    width: 1360.0,
+                    height: 724.0,
+                },
+                &intrinsic,
+            );
+            let rect = layout.rects.get(&video).copied();
+            eprintln!("[viewer-variant {name}] video rect = {rect:?}");
+        }
+        // The shipping variant (index 0) must be full-width with an
+        // aspect-derived height.
+        let (name, css) = variants[0];
+        let html = String::from_utf8_lossy(template).replace("__CSS__", css);
+        let doc = parse_html(html.as_bytes());
+        let sheet = parse_stylesheet(css, &MediaContext::default());
+        let video = {
+            let dom = &doc.dom;
+            dom.subtree_elements(dom.document())
+                .find(|n| {
+                    dom.element(*n)
+                        .map(|e| &*e.name.local == "video")
+                        .unwrap_or(false)
+                })
+                .expect("video element")
+        };
+        let mut engine = LayoutEngine::new();
+        let mut intrinsic = HashMap::new();
+        intrinsic.insert(video, (320.0, 240.0));
+        let (_, layout) = engine.layout_document(
+            &doc.dom,
+            &[sheet],
+            &MediaContext::default(),
+            Viewport {
+                width: 1360.0,
+                height: 724.0,
+            },
+            &intrinsic,
+        );
+        let rect = layout.rects.get(&video).copied().expect("video rect");
+        assert!(rect.w > 1200.0, "{name}: video fills width, got {rect:?}");
+        assert!(
+            rect.h > 700.0,
+            "{name}: aspect-derived height (1360/(320/240)=1020), got {rect:?}"
+        );
+    }
 
     #[test]
     fn basic_document_layout() {

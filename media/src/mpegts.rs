@@ -28,8 +28,10 @@ const AAC_RATES: [u32; 13] = [
 
 /// Heuristic: do these bytes look like MPEG-TS (not ISOBMFF)?
 /// `0x47` is also ASCII `G`, so a long buffer must show the 188-byte
-/// alignment to count.
+/// alignment to count. HLS TS segments commonly start with an ID3
+/// timed-metadata tag, which is skipped first.
 pub fn looks_like_ts(bytes: &[u8]) -> bool {
+    let bytes = skip_id3(bytes);
     if bytes.first() != Some(&SYNC) {
         return false;
     }
@@ -37,6 +39,19 @@ pub fn looks_like_ts(bytes: &[u8]) -> bool {
         return bytes[PACKET] == SYNC && bytes[PACKET * 2] == SYNC;
     }
     bytes.len() >= PACKET && bytes.len() % PACKET == 0
+}
+
+/// Strips a leading ID3v2 tag (10-byte header + syncsafe size).
+fn skip_id3(bytes: &[u8]) -> &[u8] {
+    if bytes.len() >= 10 && &bytes[0..3] == b"ID3" {
+        let size = ((usize::from(bytes[6] & 0x7F)) << 21)
+            | ((usize::from(bytes[7] & 0x7F)) << 14)
+            | ((usize::from(bytes[8] & 0x7F)) << 7)
+            | usize::from(bytes[9] & 0x7F);
+        let end = (10 + size).min(bytes.len());
+        return &bytes[end..];
+    }
+    bytes
 }
 
 /// Streaming MPEG-TS demuxer.
@@ -78,8 +93,10 @@ impl TsDemuxer {
     }
 
     /// Pushes raw segment bytes (whole 188-byte packets, plus any
-    /// alignment residue).
+    /// alignment residue). A leading ID3 tag is skipped (HLS timed
+    /// metadata rides in front of the TS packets).
     pub fn push(&mut self, bytes: &[u8]) -> Result<(), DemuxError> {
+        let bytes = skip_id3(bytes);
         self.carry.extend_from_slice(bytes);
         // Process every complete packet; resync on byte loss.
         loop {

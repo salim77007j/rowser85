@@ -85,3 +85,11 @@ PASS m3-after-media  rss=224.4MB
 == summary ==
 failed stages: 0
 passed stages: 60
+== phase: media ==
+PASS m1-direct-video  rss=216.3MB
+PASS m2-mse-video  rss=220.2MB
+PASS m4-webcomponents  rss=220.2MB
+PASS m3-after-media  rss=227.0MB
+== summary ==
+failed stages: 0
+passed stages: 64

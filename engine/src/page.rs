@@ -312,6 +312,8 @@ struct Page {
     rect_mirror: rowser_js::RectMirrorMap,
     /// (scroll_y, viewport_width, viewport_height) shared with JS natives.
     viewport_mirror: rowser_js::ViewportMirror,
+    /// Last-reported media activity (drives the suspension override).
+    media_active: bool,
 }
 
 impl Page {
@@ -356,6 +358,7 @@ impl Page {
             media_mirror: Rc::new(RefCell::new(HashMap::new())),
             rect_mirror: Rc::new(RefCell::new(HashMap::new())),
             viewport_mirror: Rc::new(RefCell::new((0.0, 0.0, 0.0))),
+            media_active: false,
         }
     }
 
@@ -1611,21 +1614,25 @@ impl Page {
             .any(|ext| lower.ends_with(ext));
         let title = html_escape(name);
         let src = html_escape(&url);
+        // Viewport-baked pixel width + aspect-ratio height: the reliable
+        // path in our taffy 0.14 (percent-width + aspect collapses — see
+        // layout test notes). The page is ours, so baking the viewport
+        // width is legitimate.
+        let video_width = self.viewport.width.max(1.0) as i32;
         let html = if audio {
             format!(
                 "<!doctype html><html><head><meta charset=\"utf-8\"><title>{title}</title>\
-                 <style>html,body{{margin:0;height:100%;background:#141418}}\
-                 body{{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:24px}}\
+                 <style>html,body{{margin:0;background:#141418}}\
                  h1{{color:#ddd;font-family:sans-serif;font-size:18px;font-weight:normal}}</style></head>\
-                 <body><h1>{title}</h1><audio src=\"{src}\" controls autoplay style=\"width:70%\"></audio></body></html>"
+                 <body style=\"display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:640px\">\
+                 <h1>{title}</h1><audio src=\"{src}\" controls autoplay style=\"width:800px;height:48px\"></audio></body></html>"
             )
         } else {
             format!(
                 "<!doctype html><html><head><meta charset=\"utf-8\"><title>{title}</title>\
-                 <style>html,body{{margin:0;height:100%;background:#000}}\
-                 body{{display:flex;align-items:center;justify-content:center}}\
-                 video{{width:100%;height:100%;background:#000}}</style></head>\
-                 <body><video src=\"{src}\" controls autoplay></video></body></html>"
+                 <style>html,body{{margin:0;background:#000}}\
+                 video{{background:#000}}</style></head>\
+                 <body><video src=\"{src}\" controls autoplay style=\"width:{video_width}px;height:auto\"></video></body></html>"
             )
         };
         self.document_fetched(url, html.into_bytes());
@@ -1690,6 +1697,7 @@ impl Page {
         if let Some(mirror) = self.media_mirror.borrow_mut().get_mut(&node) {
             mirror.paused = !play;
         }
+        self.sync_media_active();
     }
 
     /// Direct-source bytes arriving from the engine's streaming fetch.
@@ -1828,6 +1836,9 @@ impl Page {
                 }
             }
         }
+        if event == "ended" || event == "error" {
+            self.sync_media_active();
+        }
         self.mark_if_dirty();
     }
 
@@ -1915,6 +1926,22 @@ impl Page {
         if let Some(slot) = self.media_slots.get_mut(&node) {
             slot.muted = muted;
             slot.pipeline.set_muted(muted);
+        }
+    }
+
+    /// Reports playing-media state to the engine (suspension override:
+    /// a tab playing audio/video is never auto-frozen).
+    fn sync_media_active(&mut self) {
+        let active = self
+            .media_slots
+            .values()
+            .any(|slot| !slot.pipeline.is_paused());
+        if active != self.media_active {
+            self.media_active = active;
+            let _ = self.engine_tx.send(Cmd::Internal(Internal::MediaActive {
+                tab: self.state.tab,
+                active,
+            }));
         }
     }
 

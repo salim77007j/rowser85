@@ -318,6 +318,14 @@ pub enum Internal {
         /// Source URL.
         url: String,
     },
+    /// A tab's media playback state changed (playing tabs are never
+    /// auto-suspended — the media override every browser applies).
+    MediaActive {
+        /// Tab id.
+        tab: TabId,
+        /// True while any media element in the tab is playing.
+        active: bool,
+    },
     /// CNAME-cloaking verdict from the privacy gate thread.
     CnameVerdict {
         /// Tab id.
@@ -366,6 +374,9 @@ struct PageHandle {
     thread: Option<JoinHandle<()>>,
     focused: bool,
     backgrounded_since: Option<std::time::Instant>,
+    /// True while any media element in the tab is playing (suspension
+    /// override — the audio-playing rule every browser applies).
+    media_playing: bool,
     memory: u64,
     suspended: bool,
     pending_subresources: std::collections::HashSet<String>,
@@ -796,15 +807,24 @@ fn create_tab(state: &EngineLoop, requested: TabId, url: Option<String>) {
         })
         .expect("page thread");
 
+    let is_first = state.tabs.lock().unwrap().is_empty();
+
     state.tabs.lock().unwrap().insert(
         tab,
         PageHandle {
             tx: page_tx,
             thread: Some(thread),
-            focused: false,
+            // The first tab is born focused (the UI's active tab); later
+            // tabs wait for an explicit Focus command from the UI.
+            focused: is_first,
             // Unfocused tabs count as backgrounded from creation: the
             // suspension sweep may freeze them after the idle timeout.
-            backgrounded_since: Some(std::time::Instant::now()),
+            backgrounded_since: if is_first {
+                None
+            } else {
+                Some(std::time::Instant::now())
+            },
+            media_playing: false,
             memory: 0,
             suspended: false,
             pending_subresources: std::collections::HashSet::new(),
@@ -1026,6 +1046,11 @@ fn handle_internal(state: &EngineLoop, internal: Internal) {
                 return;
             }
             spawn_media_stream(state, tab, node, url);
+        }
+        Internal::MediaActive { tab, active } => {
+            if let Some(handle) = state.tabs.lock().unwrap().get_mut(&tab) {
+                handle.media_playing = active;
+            }
         }
         Internal::CnameVerdict {
             tab,
@@ -1341,6 +1366,9 @@ async fn spawn_hls_stream(
 ) {
     let mut playlist_url = url.clone();
     let mut fetched: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // BYTERANGE continuation state: resource URL → next byte offset.
+    let mut range_next: std::collections::HashMap<String, u64> =
+        std::collections::HashMap::new();
     let mut init_sent = false;
     let mut round = 0u32;
     let mut master_hops = 0u32;
@@ -1361,8 +1389,9 @@ async fn spawn_hls_stream(
         }
         let text = String::from_utf8_lossy(&response.body).into_owned();
         let base = url::Url::parse(&playlist_url).ok();
-        // Master playlist: descend into the lowest-bandwidth variant
-        // (software decode budget), max 4 hops (some CDNs chain masters).
+        // Master playlist: descend into the lowest-bandwidth VIDEO variant
+        // (RESOLUTION attribute present — audio-only renditions excluded),
+        // max 4 hops (some CDNs chain masters).
         if text.contains("#EXT-X-STREAM-INF") {
             master_hops += 1;
             if master_hops > 4 {
@@ -1370,6 +1399,7 @@ async fn spawn_hls_stream(
             }
             let lines: Vec<&str> = text.lines().map(str::trim).collect();
             let mut best: Option<(u64, String)> = None;
+            let mut best_video: Option<(u64, String)> = None;
             let mut i = 0usize;
             while i < lines.len() {
                 if let Some(rest) = lines[i].strip_prefix("#EXT-X-STREAM-INF:") {
@@ -1378,14 +1408,24 @@ async fn spawn_hls_stream(
                         .find_map(|attr| attr.trim().strip_prefix("BANDWIDTH="))
                         .and_then(|v| v.parse().ok())
                         .unwrap_or(u64::MAX);
+                    let has_resolution = rest.contains("RESOLUTION=");
                     let mut j = i + 1;
                     while j < lines.len() && (lines[j].starts_with('#') || lines[j].is_empty()) {
                         j += 1;
                     }
                     if j < lines.len() {
                         let uri = lines[j].to_owned();
-                        if best.as_ref().map(|(b, _)| bandwidth < *b).unwrap_or(true) {
-                            best = Some((bandwidth, uri));
+                        let entry = (bandwidth, uri);
+                        if has_resolution {
+                            if best_video
+                                .as_ref()
+                                .map(|(b, _)| bandwidth < *b)
+                                .unwrap_or(true)
+                            {
+                                best_video = Some(entry);
+                            }
+                        } else if best.as_ref().map(|(b, _)| bandwidth < *b).unwrap_or(true) {
+                            best = Some(entry);
                         }
                     }
                     i = j + 1;
@@ -1393,7 +1433,9 @@ async fn spawn_hls_stream(
                 }
                 i += 1;
             }
-            if let Some((_, variant)) = best {
+            // Video variants win; audio-only is the fallback.
+            let chosen = best_video.or(best);
+            if let Some((_, variant)) = chosen {
                 let variant_url = resolve_playlist_uri(&base, &variant);
                 if variant_url != playlist_url {
                     playlist_url = variant_url;
@@ -1403,23 +1445,29 @@ async fn spawn_hls_stream(
             break;
         }
         let mut init_uri: Option<String> = None;
-        let mut segments: Vec<String> = Vec::new();
+        let mut init_range: Option<(u64, u64)> = None;
+        let mut segments: Vec<(String, Option<(u64, u64)>)> = Vec::new();
         let mut ended = false;
         let mut target_duration = 4.0f64;
+        let mut pending_range: Option<(u64, u64)> = None;
         for line in text.lines() {
             let line = line.trim();
             if let Some(rest) = line.strip_prefix("#EXT-X-MAP:") {
                 for attr in rest.split(',') {
                     if let Some(uri) = attr.trim().strip_prefix("URI=") {
                         init_uri = Some(uri.trim_matches('"').to_owned());
+                    } else if let Some(br) = attr.trim().strip_prefix("BYTERANGE=") {
+                        init_range = parse_byterange(br.trim_matches('"'));
                     }
                 }
+            } else if let Some(rest) = line.strip_prefix("#EXT-X-BYTERANGE:") {
+                pending_range = parse_byterange(rest);
             } else if let Some(rest) = line.strip_prefix("#EXT-X-TARGETDURATION:") {
                 target_duration = rest.trim().parse().unwrap_or(4.0);
             } else if line.starts_with("#EXT-X-ENDLIST") {
                 ended = true;
             } else if !line.starts_with('#') && !line.is_empty() {
-                segments.push(line.to_owned());
+                segments.push((line.to_owned(), pending_range.take()));
             }
         }
         let resolve = |href: &str| -> String {
@@ -1435,13 +1483,22 @@ async fn spawn_hls_stream(
         };
         if !init_sent {
             if let Some(init) = &init_uri {
-                let request = rowser_networking::FetchRequest {
-                    url: resolve(init),
+                let init_url = resolve(&init);
+                let mut request = rowser_networking::FetchRequest {
+                    url: init_url.clone(),
                     resource_type: rowser_networking::ResourceKind::Media,
                     source_url: source_url.clone(),
                     top_site: None,
                     ..rowser_networking::FetchRequest::default()
                 };
+                if let Some((length, offset)) = init_range {
+                    let start = offset.max(range_next.get(&init_url).copied().unwrap_or(0));
+                    request.headers.push((
+                        "Range".to_owned(),
+                        format!("bytes={start}-{}", start + length.saturating_sub(1)),
+                    ));
+                    range_next.insert(init_url.clone(), start + length);
+                }
                 if let Ok(response) = rowser_networking::fetch(network, request).await {
                     if response.is_success() {
                         let _ = cmd_tx.send(Cmd::Internal(Internal::PageMessage {
@@ -1456,19 +1513,37 @@ async fn spawn_hls_stream(
                 init_sent = true;
             }
         }
-        for segment in &segments {
+        for (segment, range) in &segments {
             let seg_url = resolve(segment);
-            if fetched.contains(&seg_url) {
+            let seg_key = match range {
+                Some((length, offset)) => format!("{seg_url}#{length}@{offset}"),
+                None => seg_url.clone(),
+            };
+            if fetched.contains(&seg_key) {
                 continue;
             }
-            fetched.insert(seg_url.clone());
-            let request = rowser_networking::FetchRequest {
-                url: seg_url,
+            fetched.insert(seg_key);
+            let mut request = rowser_networking::FetchRequest {
+                url: seg_url.clone(),
                 resource_type: rowser_networking::ResourceKind::Media,
                 source_url: source_url.clone(),
                 top_site: None,
                 ..rowser_networking::FetchRequest::default()
             };
+            if let Some((length, offset)) = range {
+                // Explicit offset, or continue after the previous range of
+                // this resource (BYTERANGE continuation semantics).
+                let start = if *offset > 0 {
+                    *offset
+                } else {
+                    range_next.get(&seg_url).copied().unwrap_or(0)
+                };
+                request.headers.push((
+                    "Range".to_owned(),
+                    format!("bytes={start}-{}", start + length.saturating_sub(1)),
+                ));
+                range_next.insert(seg_url.clone(), start + *length);
+            }
             if let Ok(response) = rowser_networking::fetch(network, request).await {
                 if response.is_success()
                     && cmd_tx
@@ -1496,6 +1571,18 @@ async fn spawn_hls_stream(
         tab,
         message: Box::new(page::Message::MediaEof { node }),
     }));
+}
+
+/// Parses a BYTERANGE value `"length[@offset]"` (offset 0 = continue
+/// after the previous range of the same resource).
+fn parse_byterange(value: &str) -> Option<(u64, u64)> {
+    let mut parts = value.splitn(2, '@');
+    let length = parts.next()?.trim().parse().ok()?;
+    let offset = parts
+        .next()
+        .map(|o| o.trim().parse().unwrap_or(0))
+        .unwrap_or(0);
+    Some((length, offset))
 }
 
 /// Resolves a variant/segment URI against the playlist URL.
@@ -1825,8 +1912,11 @@ fn check_suspension(state: &EngineLoop) {
     {
         let tabs = state.tabs.lock().unwrap();
         for (tab, handle) in tabs.iter() {
+            // Playing media keeps a tab alive (audio/video override),
+            // exactly like every mainstream browser.
             if !handle.focused
                 && !handle.suspended
+                && !handle.media_playing
                 && handle
                     .backgrounded_since
                     .map(|t| t.elapsed() > suspend_after)
