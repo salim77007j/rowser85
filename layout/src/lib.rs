@@ -24,11 +24,11 @@ use taffy::style::{
     AlignContent as TaffyAlignContent, AlignItems as TaffyAlignItems, AlignSelf, AvailableSpace,
     Dimension, Display as TaffyDisplay, FlexDirection as TaffyFlexDirection,
     FlexWrap as TaffyFlexWrap, JustifyContent as TaffyJustify, LengthPercentage,
-    LengthPercentageAuto, Position as TaffyPosition, Style,
+    LengthPercentageAuto, Overflow as TaffyOverflow, Position as TaffyPosition, Style,
 };
 use taffy::style::{
-    GridPlacement, GridTemplateArea, GridTemplateAreas, GridTemplateComponent,
-    MaxTrackSizingFunction, MinTrackSizingFunction,
+    Clear as TaffyClear, Float as TaffyFloat, GridPlacement, GridTemplateArea,
+    GridTemplateAreas, GridTemplateComponent, MaxTrackSizingFunction, MinTrackSizingFunction,
 };
 use taffy::style_helpers::TaffyAuto;
 use taffy::style_helpers::{
@@ -253,6 +253,20 @@ fn taffy_style(cs: &ComputedStyle) -> Style {
             rowser_parsing::cascade::PositionMode::Absolute => TaffyPosition::Absolute,
             _ => TaffyPosition::Relative,
         },
+        // Floats (CSS 2.1 §9.5): taffy's `float_layout` block algorithm
+        // places floated boxes against the containing block edges and
+        // shortens the space available to BFC-establishing content.
+        float: match cs.float {
+            rowser_parsing::cascade::FloatMode::Left => TaffyFloat::Left,
+            rowser_parsing::cascade::FloatMode::Right => TaffyFloat::Right,
+            rowser_parsing::cascade::FloatMode::None => TaffyFloat::None,
+        },
+        clear: match cs.clear {
+            rowser_parsing::cascade::ClearMode::Left => TaffyClear::Left,
+            rowser_parsing::cascade::ClearMode::Right => TaffyClear::Right,
+            rowser_parsing::cascade::ClearMode::Both => TaffyClear::Both,
+            rowser_parsing::cascade::ClearMode::None => TaffyClear::None,
+        },
         size: TaffySize {
             width: dim(cs.width),
             height: dim(cs.height),
@@ -321,17 +335,31 @@ fn taffy_style(cs: &ComputedStyle) -> Style {
             rowser_parsing::cascade::AlignItemsMode::End => TaffyAlignItems::FLEX_END,
             _ => TaffyAlignItems::STRETCH,
         }),
-        align_content: Some(match cs.align_content {
-            rowser_parsing::cascade::AlignItemsMode::Start => TaffyAlignContent::FLEX_START,
-            rowser_parsing::cascade::AlignItemsMode::Center => TaffyAlignContent::CENTER,
-            rowser_parsing::cascade::AlignItemsMode::End => TaffyAlignContent::FLEX_END,
-            rowser_parsing::cascade::AlignItemsMode::Stretch => TaffyAlignContent::STRETCH,
-            rowser_parsing::cascade::AlignItemsMode::SpaceBetween => {
-                TaffyAlignContent::SPACE_BETWEEN
-            }
-            rowser_parsing::cascade::AlignItemsMode::SpaceAround => TaffyAlignContent::SPACE_AROUND,
-            rowser_parsing::cascade::AlignItemsMode::SpaceEvenly => TaffyAlignContent::SPACE_EVENLY,
-        }),
+        // align-content — ONLY on flex/grid containers. css-align-3 §5.1.1:
+        // a non-`normal` align-content makes a BLOCK container establish an
+        // independent formatting context. Emitting Some(..) on every block
+        // made every block its own BFC: float contexts stopped propagating
+        // into nested blocks (no line narrowing beside floats) and margin
+        // collapsing broke (divergent spacing vs Chrome). Flex/grid are
+        // formatting-context roots anyway, so mapping there is safe.
+        align_content: match cs.display {
+            DisplayMode::Flex | DisplayMode::Grid => Some(match cs.align_content {
+                rowser_parsing::cascade::AlignItemsMode::Start => TaffyAlignContent::FLEX_START,
+                rowser_parsing::cascade::AlignItemsMode::Center => TaffyAlignContent::CENTER,
+                rowser_parsing::cascade::AlignItemsMode::End => TaffyAlignContent::FLEX_END,
+                rowser_parsing::cascade::AlignItemsMode::Stretch => TaffyAlignContent::STRETCH,
+                rowser_parsing::cascade::AlignItemsMode::SpaceBetween => {
+                    TaffyAlignContent::SPACE_BETWEEN
+                }
+                rowser_parsing::cascade::AlignItemsMode::SpaceAround => {
+                    TaffyAlignContent::SPACE_AROUND
+                }
+                rowser_parsing::cascade::AlignItemsMode::SpaceEvenly => {
+                    TaffyAlignContent::SPACE_EVENLY
+                }
+            }),
+            _ => None,
+        },
         gap: TaffySize {
             width: LengthPercentage::length(cs.gap_column),
             height: LengthPercentage::length(cs.gap_row),
@@ -455,10 +483,28 @@ fn build_box(
             defaults,
             cache: None,
         };
-        // Text leaves measure themselves; align-self start keeps baseline
-        // behavior out of the way.
-        let mut leaf_style = taffy_style(style);
-        leaf_style.align_self = Some(AlignSelf::START);
+        // The leaf is an ANONYMOUS block-level box for the element's inline
+        // content — NOT a second copy of the owning element's box. Carrying
+        // the owner's margins/paddings/insets/sizes on the leaf DOUBLE-applied
+        // them (paragraph margins doubled; percent widths squared). The owner
+        // box above already contributes all of those; the leaf starts from a
+        // clean style instead.
+        //
+        // `overflow: hidden` (a taffy-internal layout hint, never painted)
+        // makes the leaf an independent formatting context: taffy's block
+        // algorithm then places it through the float-aware BFC slot
+        // machinery, so inline content measurably narrows against floats
+        // (line-box shortening at leaf granularity) — CSS 2.1 §9.5's
+        // wrapping behaviour.
+        let leaf_style = Style {
+            display: TaffyDisplay::Block,
+            overflow: taffy::geometry::Point {
+                x: TaffyOverflow::Hidden,
+                y: TaffyOverflow::Hidden,
+            },
+            align_self: Some(AlignSelf::START),
+            ..Style::default()
+        };
         if let Ok(leaf_node) = tree.new_leaf_with_context(leaf_style, leaf) {
             children.push(leaf_node);
         }
@@ -895,6 +941,171 @@ mod tests {
     use super::*;
     use rowser_parsing::css::{parse_stylesheet, MediaContext};
     use rowser_parsing::html::parse_html;
+
+
+    /// Finds the first element with `tag` under the layout root.
+    fn find_tag(dom: &Dom, tag: &str) -> Option<NodeId> {
+        dom.subtree_elements(dom.document()).find(|n| {
+            dom.element(*n)
+                .map(|e| &*e.name.local == tag)
+                .unwrap_or(false)
+        })
+    }
+
+    /// CSS 2.1 §9.5: a left float sticks to the containing block's left
+    /// content edge; subsequent line content flows beside it, not under it.
+    #[test]
+    fn float_left_places_box_and_narrows_content() {
+        let html = br#"<html><body>
+        <div><div style="float:left; width:200px; height:100px; background:#fa0"></div>
+        <p>Content beside the float</p></div>
+        </body></html>"#;
+        let doc = parse_html(html);
+        let sheet = parse_stylesheet("", &MediaContext::default());
+        let mut engine = LayoutEngine::new();
+        let (_, layout) = engine.layout_document(
+            &doc.dom,
+            &[sheet],
+            &MediaContext::default(),
+            Viewport { width: 800.0, height: 600.0 },
+            &Default::default(),
+        );
+        let divs: Vec<Rect> = doc
+            .dom
+            .subtree_elements(doc.dom.document())
+            .filter(|n| doc.dom.element(*n).is_some_and(|e| &*e.name.local == "div"))
+            .filter_map(|n| layout.rects.get(&n).copied())
+            .collect();
+        let float = divs[1]; // first inner div = the float
+        assert!((float.x - 0.0).abs() < 1.0, "float at left edge: {float:?}");
+        assert!((float.w - 200.0).abs() < 1.0, "float width: {float:?}");
+        // The block box may span the full width (CSS: blocks overlap floats),
+        // but the LINE CONTENT — the shaped glyphs — must clear the float
+        // band horizontally (line boxes are shortened).
+        let mut glyph_count = 0;
+        for run in &layout.text {
+            for g in &run.glyphs {
+                glyph_count += 1;
+                assert!(
+                    g.x as f32 >= float.w - 1.0,
+                    "glyph x={} inside float band (float w={})",
+                    g.x,
+                    float.w
+                );
+            }
+        }
+        assert!(glyph_count > 5, "no glyphs shaped");
+    }
+
+    /// A right float hugs the right content edge; line content stays left.
+    #[test]
+    fn float_right_hugs_right_edge() {
+        let html = br#"<html><body style="margin:0">
+        <div><div style="float:right; width:300px; height:80px; background:#fa0"></div>
+        <p>The quick brown fox jumps over the lazy dog again and again to wrap beside the float zone</p></div>
+        </body></html>"#;
+        let doc = parse_html(html);
+        let sheet = parse_stylesheet("", &MediaContext::default());
+        let mut engine = LayoutEngine::new();
+        let (_, layout) = engine.layout_document(
+            &doc.dom,
+            &[sheet],
+            &MediaContext::default(),
+            Viewport { width: 800.0, height: 600.0 },
+            &Default::default(),
+        );
+        let float = *layout
+            .rects
+            .iter()
+            .find(|(_, r)| (r.w - 300.0).abs() < 1.0)
+            .map(|(_, r)| r)
+            .unwrap();
+        assert!(
+            (float.x + float.w - 800.0).abs() < 2.0,
+            "float hugs right edge: {float:?}"
+        );
+        // Line content must stay LEFT of the right float's band.
+        let mut glyph_count = 0;
+        for run in &layout.text {
+            for g in &run.glyphs {
+                glyph_count += 1;
+                assert!(
+                    (g.x as f32) < float.x - 2.0,
+                    "glyph x={} overlaps right float band (float x={})",
+                    g.x,
+                    float.x
+                );
+            }
+        }
+        assert!(glyph_count > 5, "no glyphs shaped");
+    }
+
+    /// `clear: both` pushes the following block below both floats.
+    #[test]
+    fn clear_both_pushes_below_floats() {
+        let html = br#"<html><body style="margin:0">
+        <div><div style="float:left; width:150px; height:120px"></div>
+        <div style="float:right; width:150px; height:90px"></div>
+        <div style="clear:both; height:20px; background:#333">Cleared</div></div>
+        </body></html>"#;
+        let doc = parse_html(html);
+        let sheet = parse_stylesheet("", &MediaContext::default());
+        let mut engine = LayoutEngine::new();
+        let (_, layout) = engine.layout_document(
+            &doc.dom,
+            &[sheet],
+            &MediaContext::default(),
+            Viewport { width: 800.0, height: 600.0 },
+            &Default::default(),
+        );
+        let cleared = layout
+            .rects
+            .values()
+            .find(|r| (r.h - 20.0).abs() < 2.0 && r.y > 100.0)
+            .copied()
+            .unwrap_or_else(|| panic!("cleared box below floats, rects: {:?}", layout.rects));
+        assert!(cleared.y >= 118.0, "cleared box at y={cleared:?}");
+    }
+
+    /// Regression: the anonymous text leaf must NOT carry the owner's
+    /// margins — paragraphs with margin:40px previously measured 100px tall
+    /// (40+20+40 margins + 20 text) and gaps between them doubled.
+    #[test]
+    fn text_leaf_does_not_double_owner_margins() {
+        let html = br#"<html><body>
+        <p style="margin:40px 0; line-height:20px">AAA</p>
+        <p style="margin:40px 0; line-height:20px">BBB</p>
+        </body></html>"#;
+        let doc = parse_html(html);
+        let sheet = parse_stylesheet("", &MediaContext::default());
+        let mut engine = LayoutEngine::new();
+        let (_, layout) = engine.layout_document(
+            &doc.dom,
+            &[sheet],
+            &MediaContext::default(),
+            Viewport { width: 800.0, height: 600.0 },
+            &Default::default(),
+        );
+        let ps: Vec<Rect> = doc
+            .dom
+            .subtree_elements(doc.dom.document())
+            .filter(|n| doc.dom.element(*n).is_some_and(|e| &*e.name.local == "p"))
+            .filter_map(|n| layout.rects.get(&n).copied())
+            .collect();
+        assert_eq!(ps.len(), 2);
+        assert!(
+            (ps[0].h - 20.0).abs() < 2.0,
+            "p height = one text line, got {:?}",
+            ps[0]
+        );
+        // CSS margin collapsing: 40px gap between the two paragraphs.
+        assert!(
+            (ps[1].y - (ps[0].y + ps[0].h + 40.0)).abs() < 2.0,
+            "collapsed 40px gap: p1={:?} p2={:?}",
+            ps[0],
+            ps[1]
+        );
+    }
 
     /// The built-in media viewer page: video must fill the width and get a
     /// real aspect-derived height. Diagnostic over CSS variants — the

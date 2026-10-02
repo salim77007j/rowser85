@@ -31,8 +31,8 @@ use lightningcss::values::length::{
 use rowser_dom::{parse_selector_list, SelectorList};
 
 use crate::cascade::{
-    AlignItemsMode, BorderEdgeRaw, DisplayMode, FlexDirectionMode, FlexWrapMode, FontSizeRaw,
-    FontStyleMode, FontWeightRaw, JustifyContentMode, Length, LengthOrAuto, LineHeightRaw,
+    AlignItemsMode, BorderEdgeRaw, ClearMode, DisplayMode, FloatMode, FlexDirectionMode, FlexWrapMode,
+    FontSizeRaw, FontStyleMode, FontWeightRaw, JustifyContentMode, Length, LengthOrAuto, LineHeightRaw,
     LineStyleMode, NamedAreaRaw, PositionMode, Rgba, StyleProps, TextAlignMode, TrackBoundRaw,
     TrackRaw,
 };
@@ -277,7 +277,46 @@ fn split_raw_declarations(block: &str, normal: &mut StyleProps, important: &mut 
             target.custom.push((name.to_string(), value));
         } else if value.contains("var(") {
             target.var_props.push((name.to_string(), value));
+        } else {
+            // `float`/`clear` are not modeled by lightningcss's typed Property
+            // enum; the parser preserves them as "unknown custom properties",
+            // so they only reach us through this raw-text path.
+            match name.to_ascii_lowercase().as_str() {
+                "float" => {
+                    if let Some(mode) = parse_float_keyword(&value) {
+                        target.float = Some(mode);
+                    }
+                }
+                "clear" => {
+                    if let Some(mode) = parse_clear_keyword(&value) {
+                        target.clear = Some(mode);
+                    }
+                }
+                _ => {}
+            }
         }
+    }
+}
+
+/// `float: left | right | none` (inline-start/end degrade to the physical
+/// side; this engine lays out LTR).
+fn parse_float_keyword(value: &str) -> Option<FloatMode> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "left" | "inline-start" => Some(FloatMode::Left),
+        "right" | "inline-end" => Some(FloatMode::Right),
+        "none" => Some(FloatMode::None),
+        _ => None,
+    }
+}
+
+/// `clear: left | right | both | none`.
+fn parse_clear_keyword(value: &str) -> Option<ClearMode> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "left" | "inline-start" => Some(ClearMode::Left),
+        "right" | "inline-end" => Some(ClearMode::Right),
+        "both" => Some(ClearMode::Both),
+        "none" => Some(ClearMode::None),
+        _ => None,
     }
 }
 

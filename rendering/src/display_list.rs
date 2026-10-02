@@ -149,9 +149,17 @@ fn layout_root(dom: &Dom) -> Option<NodeId> {
 }
 
 /// True when the element participates in the positioned (upper) paint
-/// layer: positioned elements, or anything carrying an explicit z-index.
+/// layer: positioned elements, floated elements, or anything carrying an
+/// explicit z-index.
+///
+/// Floats paint above the backgrounds of in-flow block boxes they overlap
+/// (CSS 2.1 Appendix E) — routing them through the z=0 positioned layer
+/// (DOM-order tiebreak) achieves exactly that interleaving while real
+/// positioned overlays (z > 0) still paint above them.
 fn is_positioned(style: &ComputedStyle) -> bool {
-    style.position != PositionMode::Static || style.z_index.is_some()
+    style.position != PositionMode::Static
+        || style.z_index.is_some()
+        || style.float != rowser_parsing::cascade::FloatMode::None
 }
 
 fn walk(dom: &Dom, ctx: &mut WalkCtx<'_>, node: NodeId, list: &mut DisplayList) {

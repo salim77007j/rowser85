@@ -129,6 +129,32 @@ pub enum PositionMode {
     Absolute,
 }
 
+/// The `float` property, resolved (CSS 2.1 §9.5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FloatMode {
+    /// Not floated.
+    #[default]
+    None,
+    /// Floated to the containing block's left content edge.
+    Left,
+    /// Floated to the containing block's right content edge.
+    Right,
+}
+
+/// The `clear` property, resolved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ClearMode {
+    /// No clearance.
+    #[default]
+    None,
+    /// Clear left-floated boxes.
+    Left,
+    /// Clear right-floated boxes.
+    Right,
+    /// Clear floats on both sides.
+    Both,
+}
+
 /// Flex direction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FlexDirectionMode {
@@ -454,6 +480,10 @@ pub struct StyleProps {
     /// raw value text. Substituted against the element's custom map at
     /// compute time, then re-parsed through the typed pipeline.
     pub var_props: Vec<(String, String)>,
+    /// `float` (mined from raw declarations; see css.rs).
+    pub float: Option<FloatMode>,
+    /// `clear` (mined from raw declarations; see css.rs).
+    pub clear: Option<ClearMode>,
 }
 
 /// Fully resolved style for one element.
@@ -542,6 +572,10 @@ pub struct ComputedStyle {
     /// own declarations layered over the inherited set. `var()` references
     /// in substituted declarations resolve against this map.
     pub custom: HashMap<String, String>,
+    /// `float` — not inherited.
+    pub float: FloatMode,
+    /// `clear` — not inherited.
+    pub clear: ClearMode,
 }
 
 impl Default for ComputedStyle {
@@ -618,6 +652,8 @@ impl Default for ComputedStyle {
             grid_template_areas: Vec::new(),
             grid_area: None,
             custom: HashMap::new(),
+            float: FloatMode::None,
+            clear: ClearMode::None,
         }
     }
 }
@@ -773,6 +809,12 @@ fn apply_props(style: &mut ComputedStyle, props: &StyleProps, parent: &ComputedS
     }
     if let Some(position) = props.position {
         style.position = position;
+    }
+    if let Some(float) = props.float {
+        style.float = float;
+    }
+    if let Some(clear) = props.clear {
+        style.clear = clear;
     }
     if let Some(w) = props.width {
         style.width = w;
