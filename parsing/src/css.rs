@@ -32,9 +32,9 @@ use rowser_dom::{parse_selector_list, SelectorList};
 
 use crate::cascade::{
     AlignItemsMode, BorderEdgeRaw, ClearMode, DisplayMode, FloatMode, FlexDirectionMode, FlexWrapMode,
-    FontSizeRaw, FontStyleMode, FontWeightRaw, JustifyContentMode, Length, LengthOrAuto, LineHeightRaw,
-    LineStyleMode, NamedAreaRaw, PositionMode, Rgba, StyleProps, TextAlignMode, TrackBoundRaw,
-    TrackRaw,
+    FontSizeRaw, FontStyleMode, FontWeightRaw, GridLineRaw, GridPlacementRaw, JustifyContentMode,
+    Length, LengthOrAuto, LineHeightRaw, LineStyleMode, NamedAreaRaw, PositionMode, Rgba, StyleProps,
+    TextAlignMode, TrackBoundRaw, TrackRaw,
 };
 
 /// One style rule ready for cascade.
@@ -657,7 +657,57 @@ fn apply_property(props: &mut StyleProps, property: &Property<'_>) {
         P::GridTemplateAreas(value) => props.grid_template_areas = Some(convert_grid_areas(value)),
         P::GridArea(value) => {
             props.grid_area = area_name_from(value);
+            // 4-line form of grid-area: row-start / column-start / row-end /
+            // column-end. The named form is handled above; line/span forms
+            // map onto the row/column placements.
+            if props.grid_area.is_none() {
+                let rs = grid_line_raw(&value.row_start);
+                let cs = grid_line_raw(&value.column_start);
+                let re = grid_line_raw(&value.row_end);
+                let ce = grid_line_raw(&value.column_end);
+                if rs.is_some() || cs.is_some() || re.is_some() || ce.is_some() {
+                    props.grid_row = Some(GridPlacementRaw {
+                        start: rs.unwrap_or(GridLineRaw::Auto),
+                        end: re.unwrap_or(GridLineRaw::Auto),
+                    });
+                    props.grid_column = Some(GridPlacementRaw {
+                        start: cs.unwrap_or(GridLineRaw::Auto),
+                        end: ce.unwrap_or(GridLineRaw::Auto),
+                    });
+                }
+            }
         }
+        // Line-based grid item placement (the modern layout workhorse:
+        // `grid-column: 1 / 3`, `grid-row: span 2`).
+        P::GridColumn(value) => {
+            props.grid_column = Some(grid_placement_from(&value.start, &value.end));
+        }
+        P::GridRow(value) => {
+            props.grid_row = Some(grid_placement_from(&value.start, &value.end));
+        }
+        P::GridColumnStart(value) => {
+            let mut p = props.grid_column.unwrap_or_default();
+            p.start = grid_line_raw(value).unwrap_or(GridLineRaw::Auto);
+            props.grid_column = Some(p);
+        }
+        P::GridColumnEnd(value) => {
+            let mut p = props.grid_column.unwrap_or_default();
+            p.end = grid_line_raw(value).unwrap_or(GridLineRaw::Auto);
+            props.grid_column = Some(p);
+        }
+        P::GridRowStart(value) => {
+            let mut p = props.grid_row.unwrap_or_default();
+            p.start = grid_line_raw(value).unwrap_or(GridLineRaw::Auto);
+            props.grid_row = Some(p);
+        }
+        P::GridRowEnd(value) => {
+            let mut p = props.grid_row.unwrap_or_default();
+            p.end = grid_line_raw(value).unwrap_or(GridLineRaw::Auto);
+            props.grid_row = Some(p);
+        }
+        // Implicit track sizing.
+        P::GridAutoRows(value) => props.grid_auto_rows = Some(track_size_list(value)),
+        P::GridAutoColumns(value) => props.grid_auto_columns = Some(track_size_list(value)),
         P::Position(value) => props.position = Some(convert_position(value)),
         // Inset properties: anchor absolute elements and offset relative
         // ones. Previously unparsed — position:absolute navigation without
@@ -800,6 +850,35 @@ fn area_name_from(value: &lightningcss::properties::grid::GridArea<'_>) -> Optio
     } else {
         None
     }
+}
+
+/// Converts one lightningcss GridLine (start or end side) into our raw form.
+/// Named lines/areas are not resolved here (template-areas handles the name
+/// form); numeric lines and spans are the placement backbone.
+fn grid_line_raw(line: &lightningcss::properties::grid::GridLine<'_>) -> Option<GridLineRaw> {
+    use lightningcss::properties::grid::GridLine;
+    match line {
+        GridLine::Auto => None,
+        GridLine::Line { index, .. } => Some(GridLineRaw::Line(*index as i16)),
+        GridLine::Span { index, .. } => Some(GridLineRaw::Span((*index).clamp(1, 1000) as u16)),
+        GridLine::Area { .. } => None,
+    }
+}
+
+/// Converts a `grid-row`/`grid-column` shorthand pair into a placement.
+fn grid_placement_from(
+    start: &lightningcss::properties::grid::GridLine<'_>,
+    end: &lightningcss::properties::grid::GridLine<'_>,
+) -> GridPlacementRaw {
+    GridPlacementRaw {
+        start: grid_line_raw(start).unwrap_or(GridLineRaw::Auto),
+        end: grid_line_raw(end).unwrap_or(GridLineRaw::Auto),
+    }
+}
+
+/// Converts a TrackSizeList (grid-auto-rows/columns value) into raw tracks.
+fn track_size_list(value: &lightningcss::properties::grid::TrackSizeList) -> Vec<TrackRaw> {
+    value.0.iter().map(track_from_size).collect()
 }
 
 /// Converts flattened lightningcss areas (row-major, `columns` wide) into

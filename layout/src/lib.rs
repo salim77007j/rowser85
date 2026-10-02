@@ -386,6 +386,12 @@ fn taffy_style(cs: &ComputedStyle) -> Style {
             tracks
         },
         grid_template_rows: cs.grid_template_rows.iter().map(track_sizing_fn).collect(),
+        // Line/span item placement (`grid-column: 1 / 3`, `grid-row: span 2`)
+        // and implicit track sizing.
+        grid_row: grid_line_pair(cs.grid_row),
+        grid_column: grid_line_pair(cs.grid_column),
+        grid_auto_rows: cs.grid_auto_rows.iter().map(track_auto_sizing_fn).collect(),
+        grid_auto_columns: cs.grid_auto_columns.iter().map(track_auto_sizing_fn).collect(),
         ..Style::default()
     }
 }
@@ -416,6 +422,56 @@ fn track_sizing_fn(track: &rowser_parsing::cascade::TrackRaw) -> GridTemplateCom
         }
     };
     GridTemplateComponent::Single(minmax(min_bound(&track.min), max_bound(&track.max)))
+}
+
+/// Maps one raw grid placement side onto a taffy GridPlacement.
+fn grid_line_placement(side: rowser_parsing::cascade::GridLineRaw) -> GridPlacement {
+    use rowser_parsing::cascade::GridLineRaw;
+    match side {
+        GridLineRaw::Auto => GridPlacement::Auto,
+        GridLineRaw::Line(n) => GridPlacement::from_line_index(n),
+        GridLineRaw::Span(n) => GridPlacement::Span(n.max(1)),
+    }
+}
+
+/// Maps a (start, end) placement pair onto a taffy Line<GridPlacement>.
+fn grid_line_pair(
+    placement: rowser_parsing::cascade::GridPlacementRaw,
+) -> Line<GridPlacement> {
+    Line {
+        start: grid_line_placement(placement.start),
+        end: grid_line_placement(placement.end),
+    }
+}
+
+/// Maps one cascade track onto a taffy implicit-track sizing function
+/// (grid-auto-rows/columns use TrackSizingFunction, not the template
+/// component type).
+fn track_auto_sizing_fn(
+    track: &rowser_parsing::cascade::TrackRaw,
+) -> taffy::style::TrackSizingFunction {
+    use rowser_parsing::cascade::TrackBoundRaw as B;
+    let min_bound = |b: &B| -> MinTrackSizingFunction {
+        match b {
+            B::Auto => track_auto(),
+            B::MinContent => min_content(),
+            B::MaxContent => max_content(),
+            B::Px(v) => track_length(*v),
+            B::Percent(p) => track_percent(*p),
+            B::Fr(_) => track_auto(),
+        }
+    };
+    let max_bound = |b: &B| -> MaxTrackSizingFunction {
+        match b {
+            B::Auto => track_auto(),
+            B::MinContent => min_content(),
+            B::MaxContent => max_content(),
+            B::Px(v) => track_length(*v),
+            B::Percent(p) => track_percent(*p),
+            B::Fr(f) => fr(*f),
+        }
+    };
+    minmax(min_bound(&track.min), max_bound(&track.max))
 }
 
 fn length_pct(l: rowser_parsing::cascade::LengthOrAuto, font_size: f32) -> LengthPercentage {
@@ -1105,6 +1161,99 @@ mod tests {
             ps[0],
             ps[1]
         );
+    }
+
+    /// CSS grid line-based placement: `grid-column: 1 / 3` must span two
+    /// tracks; item rects must land on the requested lines.
+    #[test]
+    fn grid_line_placement() {
+        let html = br#"<html><body style="margin:0"><div style="display:grid; grid-template-columns: 100px 100px 100px; grid-template-rows: 60px 60px; width: 300px">
+        <div style="grid-column: 1 / 3; grid-row: 1; background:#f00" id="a">A</div>
+        <div style="grid-column: 3; grid-row: 1;" id="b">B</div>
+        <div style="grid-column: span 2; grid-row: 2;" id="c">CC</div>
+        </div></body></html>"#;
+        let doc = parse_html(html);
+        let sheet = parse_stylesheet("", &MediaContext::default());
+        let mut engine = LayoutEngine::new();
+        let (_, layout) = engine.layout_document(
+            &doc.dom,
+            &[sheet],
+            &MediaContext::default(),
+            Viewport { width: 800.0, height: 600.0 },
+            &Default::default(),
+        );
+        let mut by_id = HashMap::new();
+        for node in doc.dom.subtree_elements(doc.dom.document()) {
+            if let Some(id) = doc.dom.get_attr(node, "id") {
+                if let Some(r) = layout.rects.get(&node) {
+                    by_id.insert(id.to_string(), *r);
+                }
+            }
+        }
+        let a = by_id["a"];
+        assert!((a.x - 0.0).abs() < 1.0 && (a.w - 200.0).abs() < 2.0, "A spans cols 1-3: {a:?}");
+        let b = by_id["b"];
+        assert!((b.x - 200.0).abs() < 1.0 && (b.w - 100.0).abs() < 2.0, "B in col 3: {b:?}");
+        let c = by_id["c"];
+        assert!((c.y - 60.0).abs() < 1.0 && (c.w - 200.0).abs() < 2.0, "C spans 2 cols in row 2: {c:?}");
+    }
+
+    /// `grid-area: r1 / c1 / r2 / c2` (4-line form) places the item.
+    #[test]
+    fn grid_area_line_form() {
+        let html = br#"<html><body style="margin:0"><div style="display:grid; grid-template-columns: 80px 80px 80px; grid-template-rows: 50px 50px 50px; width: 240px">
+        <div style="grid-area: 2 / 1 / 4 / 3; background:#f00" id="x">XX</div>
+        </div></body></html>"#;
+        let doc = parse_html(html);
+        let sheet = parse_stylesheet("", &MediaContext::default());
+        let mut engine = LayoutEngine::new();
+        let (_, layout) = engine.layout_document(
+            &doc.dom,
+            &[sheet],
+            &MediaContext::default(),
+            Viewport { width: 800.0, height: 600.0 },
+            &Default::default(),
+        );
+        let mut rect = None;
+        for node in doc.dom.subtree_elements(doc.dom.document()) {
+            if doc.dom.get_attr(node, "id").is_some_and(|id| id == "x") {
+                rect = layout.rects.get(&node).copied();
+            }
+        }
+        let r = rect.expect("x rect");
+        assert!((r.x - 0.0).abs() < 1.0, "x at col 1: {r:?}");
+        assert!((r.y - 50.0).abs() < 1.0, "x at row 2: {r:?}");
+        assert!((r.w - 160.0).abs() < 2.0, "x spans 2 cols (160px): {r:?}");
+        assert!((r.h - 100.0).abs() < 2.0, "x spans 2 rows (100px): {r:?}");
+    }
+
+    /// `grid-auto-rows` sizes implicit rows.
+    #[test]
+    fn grid_auto_rows_sizing() {
+        let html = br#"<html><body style="margin:0"><div style="display:grid; grid-template-columns: 100px 100px; grid-auto-rows: 40px; width: 200px">
+        <div id="r1">1</div><div id="r2">2</div><div id="r3">3</div><div id="r4">4</div>
+        </div></body></html>"#;
+        let doc = parse_html(html);
+        let sheet = parse_stylesheet("", &MediaContext::default());
+        let mut engine = LayoutEngine::new();
+        let (_, layout) = engine.layout_document(
+            &doc.dom,
+            &[sheet],
+            &MediaContext::default(),
+            Viewport { width: 800.0, height: 600.0 },
+            &Default::default(),
+        );
+        let mut by_id = HashMap::new();
+        for node in doc.dom.subtree_elements(doc.dom.document()) {
+            if let Some(id) = doc.dom.get_attr(node, "id") {
+                if let Some(r) = layout.rects.get(&node) {
+                    by_id.insert(id.to_string(), *r);
+                }
+            }
+        }
+        assert!((by_id["r1"].h - 40.0).abs() < 1.0, "auto row height 40: {:?}", by_id["r1"]);
+        assert!((by_id["r3"].y - 40.0).abs() < 1.0, "row 2 at y=40: {:?}", by_id["r3"]);
+        assert!((by_id["r2"].x - 100.0).abs() < 1.0, "r2 in col 2: {:?}", by_id["r2"]);
     }
 
     /// The built-in media viewer page: video must fill the width and get a

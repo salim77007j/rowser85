@@ -357,6 +357,36 @@ pub struct TrackRaw {
     pub max: TrackBoundRaw,
 }
 
+/// One side of a `grid-row`/`grid-column` placement: a line index, a span,
+/// or auto.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum GridLineRaw {
+    /// Automatic placement.
+    #[default]
+    Auto,
+    /// 1-based grid line index (negative counts from the end).
+    Line(i16),
+    /// Span N tracks (1 = single track).
+    Span(u16),
+}
+
+/// A resolved row or column placement (start + end sides).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct GridPlacementRaw {
+    /// Start side.
+    pub start: GridLineRaw,
+    /// End side.
+    pub end: GridLineRaw,
+}
+
+impl GridPlacementRaw {
+    /// `auto / auto`.
+    pub const AUTO: GridPlacementRaw = GridPlacementRaw {
+        start: GridLineRaw::Auto,
+        end: GridLineRaw::Auto,
+    };
+}
+
 /// One named grid area: name → rectangle in grid cells
 /// (0-based, half-open [start, end)).
 #[derive(Debug, Clone, PartialEq)]
@@ -473,6 +503,14 @@ pub struct StyleProps {
     pub grid_template_areas: Option<Vec<NamedAreaRaw>>,
     /// `grid-area` (name form).
     pub grid_area: Option<String>,
+    /// `grid-column` / `grid-column-start`/`-end`.
+    pub grid_column: Option<GridPlacementRaw>,
+    /// `grid-row` / `grid-row-start`/`-end`.
+    pub grid_row: Option<GridPlacementRaw>,
+    /// `grid-auto-rows` track list.
+    pub grid_auto_rows: Option<Vec<TrackRaw>>,
+    /// `grid-auto-columns` track list.
+    pub grid_auto_columns: Option<Vec<TrackRaw>>,
     /// Raw custom properties (`--name: value`) declared by this rule.
     /// Values are raw token text; resolution happens at compute time.
     pub custom: Vec<(String, String)>,
@@ -568,6 +606,14 @@ pub struct ComputedStyle {
     pub grid_template_areas: Vec<NamedAreaRaw>,
     /// `grid-area` name (placed against the parent's areas).
     pub grid_area: Option<String>,
+    /// `grid-column` placement (start/end lines or spans).
+    pub grid_column: GridPlacementRaw,
+    /// `grid-row` placement (start/end lines or spans).
+    pub grid_row: GridPlacementRaw,
+    /// `grid-auto-rows` track list (implicit row sizing).
+    pub grid_auto_rows: Vec<TrackRaw>,
+    /// `grid-auto-columns` track list (implicit column sizing).
+    pub grid_auto_columns: Vec<TrackRaw>,
     /// Raw CSS custom properties (`--name: value`) visible to this element:
     /// own declarations layered over the inherited set. `var()` references
     /// in substituted declarations resolve against this map.
@@ -651,6 +697,10 @@ impl Default for ComputedStyle {
             grid_template_rows: Vec::new(),
             grid_template_areas: Vec::new(),
             grid_area: None,
+            grid_column: GridPlacementRaw::AUTO,
+            grid_row: GridPlacementRaw::AUTO,
+            grid_auto_rows: Vec::new(),
+            grid_auto_columns: Vec::new(),
             custom: HashMap::new(),
             float: FloatMode::None,
             clear: ClearMode::None,
@@ -809,6 +859,18 @@ fn apply_props(style: &mut ComputedStyle, props: &StyleProps, parent: &ComputedS
     }
     if let Some(position) = props.position {
         style.position = position;
+    }
+    if let Some(p) = props.grid_column.as_ref() {
+        style.grid_column = *p;
+    }
+    if let Some(p) = props.grid_row.as_ref() {
+        style.grid_row = *p;
+    }
+    if let Some(t) = props.grid_auto_rows.as_ref() {
+        style.grid_auto_rows = t.clone();
+    }
+    if let Some(t) = props.grid_auto_columns.as_ref() {
+        style.grid_auto_columns = t.clone();
     }
     if let Some(float) = props.float {
         style.float = float;
