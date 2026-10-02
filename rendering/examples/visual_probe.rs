@@ -105,9 +105,11 @@ fn main() {
     std::fs::create_dir_all(&outdir).expect("create outdir");
     for (name, html, css) in PAGES {
         let doc = parse_html(html.as_bytes());
-        let mut media = MediaContext::default();
-        media.width = 1000.0;
-        media.height = 700.0;
+        let media = MediaContext {
+            width: 1000.0,
+            height: 700.0,
+            ..MediaContext::default()
+        };
         let sheets = vec![parse_stylesheet(css, &media)];
         let mut engine = LayoutEngine::new();
         let (styles, layout) = engine.layout_document(

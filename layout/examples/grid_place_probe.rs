@@ -43,7 +43,7 @@ fn main() {
             if let Some(r) = layout.rects.get(&node) {
                 println!(
                     "{tag}.{} rect=({:.0},{:.0} {:.0}x{:.0})",
-                    el.classes.iter().cloned().collect::<Vec<_>>().join("."),
+                    el.classes.to_vec().join("."),
                     r.x,
                     r.y,
                     r.w,

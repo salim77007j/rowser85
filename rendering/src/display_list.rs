@@ -109,8 +109,7 @@ pub fn build_display_list(
     };
     walk(dom, &mut ctx, root, &mut list);
     // Positioned layer: sorted by (z, DOM order); painted above in-flow.
-    ctx.positioned
-        .sort_by(|a, b| (a.z, a.order).cmp(&(b.z, b.order)));
+    ctx.positioned.sort_by_key(|a| (a.z, a.order));
     for entry in ctx.positioned {
         list.commands.extend(entry.commands);
     }

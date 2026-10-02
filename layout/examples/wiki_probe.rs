@@ -46,7 +46,7 @@ fn main() {
     for node in doc.dom.subtree_elements(doc.dom.document()) {
         if let Some(el) = doc.dom.element(node) {
             let tag = el.name.local.to_string();
-            let class = el.classes.iter().cloned().collect::<Vec<_>>().join(".");
+            let class = el.classes.to_vec().join(".");
             let has_area = styles
                 .get(node)
                 .and_then(|cs| cs.grid_area.as_ref())

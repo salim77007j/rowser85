@@ -996,19 +996,39 @@ impl Page {
             }
             SubresourceKind::Image => {
                 if let Some(image) = DecodedImage::decode(&body) {
-                    // Attach to the img node that referenced it.
-                    if let Some(dom) = &self.dom {
-                        let dom = dom.borrow();
+                    // Attach to the img node that referenced it. The fetch
+                    // used the RESOLVED url (protocol-relative "//host/..."
+                    // became "https://host/..."), so match resolution-side
+                    // too: comparing against the raw attribute left every
+                    // protocol-relative image undelivered.
+                    let owner = self.dom.as_ref().and_then(|dom_rc| {
+                        let dom = dom_rc.borrow();
+                        let base = self.url.clone();
+                        let mut found = None;
                         for node in dom.subtree_elements(dom.document()) {
-                            if let Some(el) = dom.element(node) {
-                                if &*el.name.local == "img"
-                                    && dom.get_attr(node, "src") == Some(url.as_str())
-                                {
-                                    self.images.insert(node, Arc::new(image));
+                            let is_img =
+                                dom.element(node).is_some_and(|el| &*el.name.local == "img");
+                            if !is_img {
+                                continue;
+                            }
+                            if let Some(src) = dom.get_attr(node, "src") {
+                                let resolved = match url::Url::parse(src) {
+                                    Ok(_) => src.to_owned(),
+                                    Err(_) => url::Url::parse(&base)
+                                        .and_then(|b| b.join(src))
+                                        .map(|joined| joined.to_string())
+                                        .unwrap_or_else(|_| src.to_owned()),
+                                };
+                                if resolved == url {
+                                    found = Some(node);
                                     break;
                                 }
                             }
                         }
+                        found
+                    });
+                    if let Some(node) = owner {
+                        self.images.insert(node, Arc::new(image));
                     }
                     self.dirty = true;
                 }
@@ -2167,9 +2187,9 @@ fn page_background(
         }
     }
     let _ = layout;
-    html_bg.or(body_bg).unwrap_or_else(|| {
-        rowser_parsing::cascade::Rgba::new_opaque(255, 255, 255)
-    })
+    html_bg
+        .or(body_bg)
+        .unwrap_or_else(|| rowser_parsing::cascade::Rgba::new_opaque(255, 255, 255))
 }
 
 fn extract_data_payload(data_url: &str) -> String {

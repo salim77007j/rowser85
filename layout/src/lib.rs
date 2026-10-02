@@ -474,6 +474,7 @@ fn build_box(
 
     // Text leaf: a taffy leaf carrying the flattened text.
     if !text.is_empty() || children.is_empty() {
+        close_inline_text(&mut text, &mut spans);
         let leaf = TextLeaf {
             node,
             text,
@@ -627,6 +628,12 @@ fn collect_inline(
 
 /// Appends text with CSS whitespace collapsing; pushes a span when the
 /// style differs from the run defaults.
+///
+/// Whitespace across inline boundaries: "is " + <a>application</a> + " for"
+/// must render "is application for". The previous fold trimmed trailing
+/// whitespace at every text node, gluing words across element boundaries
+/// ("anapplicationfor") — the trailing space of one node is the separator
+/// for the next. Trailing space is trimmed once, at leaf close, instead.
 fn append_collapsed_text(
     text: &mut String,
     spans: &mut Vec<(std::ops::Range<usize>, SpanStyle)>,
@@ -636,52 +643,64 @@ fn append_collapsed_text(
     if raw.is_empty() {
         return;
     }
-    let needs_space = text
+    let prev_ws = text
         .chars()
         .last()
         .map(|c| c.is_whitespace())
         .unwrap_or(false);
-    let collapsed: String = if needs_space {
-        raw.trim_start().chars().fold(String::new(), |mut acc, c| {
-            if c.is_whitespace() {
-                if acc
-                    .chars()
-                    .last()
-                    .map(|l| !l.is_whitespace())
-                    .unwrap_or(false)
-                {
-                    acc.push(' ');
-                }
-            } else {
-                acc.push(c);
+    let prev_empty = text.is_empty();
+
+    let mut collapsed = String::with_capacity(raw.len());
+    for c in raw.chars() {
+        if c.is_whitespace() {
+            let acc_ok = collapsed
+                .chars()
+                .last()
+                .map(|l| !l.is_whitespace())
+                .unwrap_or(!prev_ws && !prev_empty);
+            if acc_ok {
+                collapsed.push(' ');
             }
-            acc
-        })
-    } else {
-        raw.chars().fold(String::new(), |mut acc, c| {
-            if c.is_whitespace() {
-                if acc
-                    .chars()
-                    .last()
-                    .map(|l| !l.is_whitespace())
-                    .unwrap_or(false)
-                {
-                    acc.push(' ');
-                }
-            } else {
-                acc.push(c);
-            }
-            acc
-        })
-    };
-    let collapsed = collapsed.trim_end().to_string();
-    if collapsed.is_empty() {
-        text.push(' ');
+        } else {
+            collapsed.push(c);
+        }
+    }
+    let body = collapsed.trim_end();
+    if body.is_empty() {
+        // Pure-whitespace node: a separator between inline elements (or
+        // ignorable leading whitespace at the start of the leaf).
+        if !prev_ws && !prev_empty {
+            text.push(' ');
+        }
         return;
     }
     let start = text.len();
-    text.push_str(&collapsed);
+    text.push_str(body);
+    // One trailing space survives here (separator for the next node);
+    // `close_inline_text` trims it at the end of the leaf.
+    let ends_ws = body.len() < collapsed.len();
+    if ends_ws {
+        text.push(' ');
+    }
     spans.push((start..text.len(), ctx.clone()));
+}
+
+/// Finalizes a leaf's flattened text: removes the single trailing separator
+/// space and shortens the last span to match (CSS: trailing whitespace at
+/// the end of an inline formatting context does not render).
+fn close_inline_text(text: &mut String, spans: &mut Vec<(std::ops::Range<usize>, SpanStyle)>) {
+    if text.ends_with(' ') {
+        let new_len = text.len() - 1;
+        text.truncate(new_len);
+        if let Some((range, _)) = spans.last_mut() {
+            if range.end > new_len {
+                range.end = new_len;
+                if range.start >= range.end {
+                    spans.pop();
+                }
+            }
+        }
+    }
 }
 
 /// Taffy measure callback: shapes the leaf's text at the available width.

@@ -1035,7 +1035,90 @@ fn cascade_element(
         style.background_color = style.color;
     }
 
+    // Presentational hints: `width`/`height` HTML attributes map to CSS
+    // when the author sheet did not set them. Without this, every <img>
+    // width="220" collapsed to a zero-size box — images (and legacy
+    // table-based layouts) need the attribute layer, exactly like the
+    // HTML spec's presentational-hint cascade step.
+    if matches!(
+        &*tag,
+        "img" | "canvas" | "svg" | "video" | "table" | "td" | "th" | "hr" | "iframe"
+    ) {
+        if style.width == LengthOrAuto::Auto {
+            if let Some(w) = dom.get_attr(node, "width").and_then(parse_dimension_attr) {
+                style.width = w;
+            }
+        }
+        if style.height == LengthOrAuto::Auto {
+            if let Some(h) = dom.get_attr(node, "height").and_then(parse_dimension_attr) {
+                style.height = h;
+            }
+        }
+    }
+    // `bgcolor` presentation attribute (legacy table layouts; HN's orange
+    // banner is a bgcolor on a wrapping cell).
+    if style.background_color == Rgba::TRANSPARENT {
+        if let Some(bg) = dom.get_attr(node, "bgcolor").and_then(parse_color_attr) {
+            style.background_color = bg;
+        }
+    }
+
     style
+}
+
+/// Parses a legacy `bgcolor`-style color attribute (#rgb hex or color name).
+fn parse_color_attr(value: &str) -> Option<Rgba> {
+    let value = value.trim();
+    if let Some(hex) = value.strip_prefix('#') {
+        let (r, g, b) = match hex.len() {
+            6 => (
+                u8::from_str_radix(&hex[0..2], 16).ok()?,
+                u8::from_str_radix(&hex[2..4], 16).ok()?,
+                u8::from_str_radix(&hex[4..6], 16).ok()?,
+            ),
+            3 => (
+                u8::from_str_radix(&hex[0..1].repeat(2), 16).ok()?,
+                u8::from_str_radix(&hex[1..2].repeat(2), 16).ok()?,
+                u8::from_str_radix(&hex[2..3].repeat(2), 16).ok()?,
+            ),
+            _ => return None,
+        };
+        return Some(Rgba::new_opaque(r, g, b));
+    }
+    // Named colors covering the legacy bgcolor vocabulary.
+    let rgb = match value.to_ascii_lowercase().as_str() {
+        "black" => (0, 0, 0),
+        "white" => (255, 255, 255),
+        "red" => (255, 0, 0),
+        "green" => (0, 128, 0),
+        "blue" => (0, 0, 255),
+        "yellow" => (255, 255, 0),
+        "orange" => (255, 165, 0),
+        "gray" | "grey" => (128, 128, 128),
+        "silver" => (192, 192, 192),
+        "cyan" | "aqua" => (0, 255, 255),
+        "magenta" | "fuchsia" => (255, 0, 255),
+        "lime" => (0, 255, 0),
+        "navy" => (0, 0, 128),
+        "teal" => (0, 128, 128),
+        _ => return None,
+    };
+    Some(Rgba::new_opaque(rgb.0, rgb.1, rgb.2))
+}
+
+/// Parses a presentational `width`/`height` attribute ("220", "100%").
+fn parse_dimension_attr(value: &str) -> Option<LengthOrAuto> {
+    let value = value.trim();
+    if let Some(percent) = value.strip_suffix('%') {
+        let n: f32 = percent.trim().parse().ok()?;
+        return Some(LengthOrAuto::Length(Length::Percent(n)));
+    }
+    let n: f32 = value.parse().ok()?;
+    if (0.0..100_000.0).contains(&n) {
+        Some(LengthOrAuto::Length(Length::Px(n)))
+    } else {
+        None
+    }
 }
 
 enum Side {

@@ -3,6 +3,7 @@ Cargo.lock.orig
 *.png
 !docs/assets/*.png
 !screenshots/*.png
+!screenshots/**/*.png
 !design/*.png
 !validation/*.png
 **/*.rs.bk

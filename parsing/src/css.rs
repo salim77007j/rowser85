@@ -422,9 +422,9 @@ fn apply_property(props: &mut StyleProps, property: &Property<'_>) {
         // `border` shorthand: width/style/color on all four edges.
         P::Border(value) => {
             let edge = border_shorthand_edge(&value.width, &value.style, &value.color);
-            props.border_top = Some(edge.clone());
-            props.border_right = Some(edge.clone());
-            props.border_bottom = Some(edge.clone());
+            props.border_top = Some(edge);
+            props.border_right = Some(edge);
+            props.border_bottom = Some(edge);
             props.border_left = Some(edge);
         }
         // Per-side `border-top:` style shorthands.
@@ -520,11 +520,11 @@ fn apply_property(props: &mut StyleProps, property: &Property<'_>) {
         P::Bottom(value) => props.bottom = Some(convert_lpa(value)),
         P::Left(value) => props.left = Some(convert_lpa(value)),
         P::Right(value) => props.right = Some(convert_lpa(value)),
-        P::ZIndex(value) => {
-            if let lightningcss::properties::position::ZIndex::Integer(n) = value {
-                props.z_index = Some(*n);
-            }
-        }
+        P::ZIndex(value) => match value {
+            lightningcss::properties::position::ZIndex::Integer(n) => props.z_index = Some(*n),
+            // `z-index: auto` — leave unset.
+            lightningcss::properties::position::ZIndex::Auto => {}
+        },
         _ => {}
     }
 }

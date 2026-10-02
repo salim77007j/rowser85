@@ -10,7 +10,7 @@ use rowser_parsing::html::parse_html;
 fn main() {
     let css = ".mw-body #bodyContent { color: #123456; }";
     let sheet = StyleSheet::parse(css, ParserOptions::default()).unwrap();
-    let mut serialized = String::new();
+    let _serialized = String::new();
     for rule in sheet.rules.0.iter() {
         if let CssRule::Style(style) = rule {
             let text = style
