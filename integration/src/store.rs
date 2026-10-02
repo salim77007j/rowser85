@@ -165,12 +165,12 @@ impl SearchEngine {
     pub fn builtins() -> Vec<SearchEngine> {
         vec![
             SearchEngine {
-                name: "DuckDuckGo".into(),
-                url: "https://duckduckgo.com/?q={q}".into(),
-            },
-            SearchEngine {
                 name: "Google".into(),
                 url: "https://www.google.com/search?q={q}".into(),
+            },
+            SearchEngine {
+                name: "DuckDuckGo".into(),
+                url: "https://duckduckgo.com/?q={q}".into(),
             },
             SearchEngine {
                 name: "Brave Search".into(),
@@ -208,9 +208,11 @@ impl SearchEngine {
 
 impl Default for SearchEngine {
     fn default() -> Self {
+        // Google default: a "standard browser for any user" searches where
+        // users expect; privacy-minded users switch to DDG/Brave in settings.
         SearchEngine {
-            name: "DuckDuckGo".into(),
-            url: "https://duckduckgo.com/?q={q}".into(),
+            name: "Google".into(),
+            url: "https://www.google.com/search?q={q}".into(),
         }
     }
 }

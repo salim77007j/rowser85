@@ -578,6 +578,15 @@
     if (docLs) { try { docLs({ type: type, target: el }); } catch (e) {} }
   };
 
+  // Lifecycle events, fired by the engine once scripts have run.
+  globalThis.__fireDocumentEvent = function (type) {
+    const ev = new Event(type);
+    ev.target = document;
+    (winListeners[type] || []).forEach(function (cb) { try { cb(ev); } catch (e) { __native_console('error', 'DOMContentLoaded handler: ' + (e && e.message)); } });
+    const docLs = document._ls && document._ls[type];
+    if (docLs) { try { docLs(ev); } catch (e) { __native_console('error', 'DOMContentLoaded doc handler: ' + (e && e.message)); } }
+  };
+
   // ------------------------------------------------------------------ WebSocket
   const sockets = new Map();
   class WebSocket {

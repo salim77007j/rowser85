@@ -874,6 +874,19 @@ impl Page {
             eprintln!("[page-{}] run_scripts start", self.state.tab);
         }
         self.run_scripts();
+        // Lifecycle: fire DOMContentLoaded (scripts ready) then load — the
+        // events every framework bootstraps on. Fired exactly once per
+        // document (subresources_complete re-runs on late CSS, but the
+        // runtime and listeners persist).
+        if let Some(js) = &self.js {
+            let _ = js.eval(
+                "if (globalThis.__fireDocumentEvent && !globalThis.__domContentLoadedFired) {\
+                 \x20globalThis.__domContentLoadedFired = true;\
+                 \x20__fireDocumentEvent('DOMContentLoaded');\
+                 \x20__fireDocumentEvent('load'); }",
+                "lifecycle-events.js",
+            );
+        }
         tracing::debug!(target: "rowser::engine", "tab {} scripts done → PageLoaded", self.state.tab);
         self.navigating = false;
         let title = self
