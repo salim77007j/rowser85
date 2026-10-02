@@ -40,6 +40,20 @@ a { color: #0000ee; text-decoration: underline; }
 sup { font-size: 0.83em; vertical-align: super; }
 sub { font-size: 0.83em; vertical-align: sub; }
 table { display: block; }
+/* Legacy layout wrappers: HN and countless classic pages nest their entire
+ * layout inside <center> (or <font>). Inline-flattening such wrappers drops
+ * their block descendants from the box tree entirely. */
+center { display: block; text-align: center; }
+font { display: inline; }
+tbody, thead, tfoot { display: block; }
+/* Real table layout is not implemented; flex rows give table-based sites
+ * (HN, countless legacy pages) visible cell boxes: backgrounds, borders,
+ * padding and side-by-side cells. Cells are content-sized (no stretch) to
+ * avoid full-viewport fill artifacts. Author sheets can override. */
+tr { display: flex; flex-direction: row; align-items: flex-start; }
+td, th { display: block; flex: 0 0 auto; }
+col, colgroup { display: none; }
+caption { display: block; }
 img, video, canvas, svg, iframe, embed, object { display: block; }
 input, textarea, select, button { display: block; }
 br { display: block; }

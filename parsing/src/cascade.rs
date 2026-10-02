@@ -575,7 +575,52 @@ pub fn compute_styles(dom: &Dom, author: &[ParsedStylesheet], media: &MediaConte
             .and_then(|p| map.styles.get(&p))
             .cloned()
             .unwrap_or_default();
-        let inline = dom.get_attr(*node, "style").map(parse_style_attribute);
+        // Inline `style=` PLUS legacy presentational attributes (`bgcolor`,
+        // `width`, `height`) — the backbone of the table-era web (HN and
+        // millions of older pages). Spec order: style= beats attributes, so
+        // the attribute-derived declarations come last.
+        let mut inline_css = dom.get_attr(*node, "style").unwrap_or_default().to_owned();
+        {
+            let tag = dom
+                .element(*node)
+                .map(|e| e.name.local.to_string())
+                .unwrap_or_default();
+            let mut extra: Vec<String> = Vec::new();
+            if let Some(bg) = dom.get_attr(*node, "bgcolor") {
+                extra.push(format!("background-color:{bg}"));
+            }
+            if matches!(
+                tag.as_str(),
+                "table" | "td" | "th" | "img" | "hr" | "iframe" | "input" | "canvas" | "video"
+            ) {
+                for (attr, prop) in [("width", "width"), ("height", "height")] {
+                    if let Some(value) = dom.get_attr(*node, attr) {
+                        let value = value.trim();
+                        if value.is_empty() {
+                            continue;
+                        }
+                        // Unitless numbers are pixels; "%" passes through.
+                        let css_value = if value.parse::<f32>().is_ok() {
+                            format!("{value}px")
+                        } else {
+                            value.to_owned()
+                        };
+                        extra.push(format!("{prop}:{css_value}"));
+                    }
+                }
+            }
+            if !extra.is_empty() {
+                if !inline_css.is_empty() {
+                    inline_css.push(';');
+                }
+                inline_css.push_str(&extra.join(";"));
+            }
+        }
+        let inline = if inline_css.is_empty() {
+            None
+        } else {
+            Some(parse_style_attribute(&inline_css))
+        };
         let style = cascade_element(
             dom,
             *node,
@@ -875,7 +920,7 @@ fn resolve_font_size(raw: FontSizeRaw, parent: &ComputedStyle) -> f32 {
         FontSizeRaw::Px(n) => n,
         FontSizeRaw::Em(n) => n * parent.font_size,
         FontSizeRaw::Rem(n) => n * ROOT_FONT_SIZE,
-        FontSizeRaw::Percent(n) => n / 100.0 * parent.font_size,
+        FontSizeRaw::Percent(n) => n * parent.font_size,
         FontSizeRaw::Factor(n) => n * parent.font_size,
     }
     .max(1.0)
@@ -896,7 +941,7 @@ fn resolve_line_height_raw(raw: LineHeightRaw, font_size: f32) -> f32 {
         LineHeightRaw::Px(n) => n,
         LineHeightRaw::Em(n) => n * font_size,
         LineHeightRaw::Rem(n) => n * ROOT_FONT_SIZE,
-        LineHeightRaw::Percent(n) => n / 100.0 * font_size,
+        LineHeightRaw::Percent(n) => n * font_size,
     }
     .max(1.0)
 }

@@ -355,11 +355,24 @@ fn build_box(
                     .unwrap_or(DisplayMode::Inline);
                 match display {
                     DisplayMode::Inline => {
-                        let mut inner = ctx.clone();
-                        if let Some(cs) = child_style {
-                            inner.merge_from(cs);
+                        // Block-in-inline: an inline element whose subtree
+                        // contains block content (e.g. <center><table>,
+                        // <a><div>card</div></a>) must not be flattened into
+                        // text — that would drop the block boxes entirely.
+                        // Promote it to a box; recursion handles nesting.
+                        if has_block_descendant(dom, styles, child) {
+                            if let Some(t) =
+                                build_box(dom, styles, tree, child, dom_to_taffy, taffy_to_dom)
+                            {
+                                children.push(t);
+                            }
+                        } else {
+                            let mut inner = ctx.clone();
+                            if let Some(cs) = child_style {
+                                inner.merge_from(cs);
+                            }
+                            collect_inline(dom, styles, child, inner, &mut text, &mut spans);
                         }
-                        collect_inline(dom, styles, child, inner, &mut text, &mut spans);
                     }
                     DisplayMode::None => {}
                     _ => {
@@ -400,6 +413,33 @@ fn build_box(
     dom_to_taffy.insert(node, taffy_node);
     taffy_to_dom.insert(taffy_node, node);
     Some(taffy_node)
+}
+
+/// True when the element subtree (excluding the element itself) contains
+/// block-level content — used to promote block-in-inline wrappers to boxes.
+fn has_block_descendant(
+    dom: &Dom,
+    styles: &StyleMap,
+    node: NodeId,
+) -> bool {
+    for child in dom.children(node) {
+        if dom.element(child).is_some() {
+            let display = styles
+                .get(child)
+                .map(|s| s.display)
+                .unwrap_or(DisplayMode::Inline);
+            match display {
+                DisplayMode::Block | DisplayMode::Flex | DisplayMode::Grid => return true,
+                DisplayMode::None => continue,
+                DisplayMode::Inline => {
+                    if has_block_descendant(dom, styles, child) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
 }
 
 /// Recursively flattens inline content into the parent's text buffer.

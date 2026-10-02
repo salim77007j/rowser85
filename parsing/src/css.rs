@@ -645,61 +645,171 @@ fn convert_position(value: &Position) -> PositionMode {
     }
 }
 
+/// Structured `@media` evaluation against the viewport.
+///
+/// lightningcss normalizes BOTH syntaxes to one AST: `min-width: 300px`
+/// becomes `Range { Width, >=, 300px }` and `(width >= 300px)` parses to the
+/// same. The previous string-based matcher silently passed the range syntax
+/// (serialized as `width >= 300px` — no `min-width`/`max-width` keyword, no
+/// colon), so EVERY media query evaluated true and desktop pages received
+/// mobile stylesheet blocks (`td { height: inherit }`, `#hnmain { width: 100% }`
+/// — the full-viewport HN explosion).
 fn media_matches(query: &lightningcss::media_query::MediaList<'_>, ctx: &MediaContext) -> bool {
-    let Ok(text) = query.to_css_string(PrinterOptions::default()) else {
-        return false;
+    use lightningcss::media_query::{
+        MediaCondition, MediaFeature, MediaFeatureComparison, MediaFeatureName,
+        MediaFeatureValue, MediaQuery, MediaType, Operator, Qualifier,
     };
-    if text.is_empty() {
+    if query.media_queries.is_empty() {
         return true;
     }
-    let lower = text.to_lowercase();
-    if (lower.contains("print") || lower.contains("speech")) && !lower.contains("screen") {
-        return false;
-    }
-    for part in lower.split(',') {
-        let part = part.trim();
-        if part.is_empty() || part == "all" || part == "screen" || part == "only screen" {
-            continue;
-        }
-        if !eval_media_part(part, ctx) {
-            return false;
-        }
-    }
-    true
+    query
+        .media_queries
+        .iter()
+        .any(|q| media_query_matches(q, ctx))
 }
 
-fn eval_media_part(part: &str, ctx: &MediaContext) -> bool {
-    for feature in part.split(" and ") {
-        let feature = feature.trim().trim_matches(|c| c == '(' || c == ')').trim();
-        let (name, value) = match feature.split_once(':') {
-            Some((n, v)) => (n.trim(), v.trim()),
-            None => (feature, ""),
-        };
-        let limit = value.trim_end_matches("px").trim().parse::<f32>();
-        match (name, limit) {
-            ("min-width", Ok(v)) if v > ctx.width => return false,
-            ("max-width", Ok(v)) if v < ctx.width => return false,
-            ("min-height", Ok(v)) if v > ctx.height => return false,
-            ("max-height", Ok(v)) if v < ctx.height => return false,
-            ("prefers-color-scheme", _) => {
-                let wants_dark = value.contains("dark");
-                if wants_dark != ctx.dark_mode {
-                    return false;
-                }
-            }
-            ("orientation", _) => {
-                let landscape = ctx.width >= ctx.height;
-                if value.contains("landscape") != landscape {
-                    return false;
-                }
-            }
-            _ => {
-                // Unknown features make the whole query false per spec.
-                if name.contains('-') {
-                    return false;
-                }
+fn media_query_matches(q: &lightningcss::media_query::MediaQuery<'_>, ctx: &MediaContext) -> bool {
+    use lightningcss::media_query::{MediaType, Qualifier};
+    let type_ok = match &q.media_type {
+        MediaType::All | MediaType::Screen => true,
+        // Print, speech, custom types: this is a screen browser.
+        _ => false,
+    };
+    let qualifier_not = matches!(q.qualifier, Some(Qualifier::Not));
+    let base = match &q.condition {
+        None => type_ok,
+        Some(condition) => type_ok && condition_matches(condition, ctx),
+    };
+    base != qualifier_not
+}
+
+fn condition_matches(
+    condition: &lightningcss::media_query::MediaCondition<'_>,
+    ctx: &MediaContext,
+) -> bool {
+    use lightningcss::media_query::{MediaCondition, Operator};
+    match condition {
+        MediaCondition::Feature(feature) => feature_matches(feature, ctx),
+        MediaCondition::Not(inner) => !condition_matches(inner, ctx),
+        MediaCondition::Operation { operator, conditions } => match operator {
+            Operator::And => conditions.iter().all(|c| condition_matches(c, ctx)),
+            Operator::Or => conditions.iter().any(|c| condition_matches(c, ctx)),
+        },
+        MediaCondition::Unknown(_) => false,
+    }
+}
+
+/// The viewport value a length-valued feature compares against, if known.
+fn feature_viewport_value(
+    name: &lightningcss::media_query::MediaFeatureName<'_, lightningcss::media_query::MediaFeatureId>,
+    ctx: &MediaContext,
+) -> Option<f32> {
+    use lightningcss::media_query::{MediaFeatureId, MediaFeatureName};
+    match name {
+        MediaFeatureName::Standard(MediaFeatureId::Width)
+        | MediaFeatureName::Standard(MediaFeatureId::DeviceWidth) => Some(ctx.width),
+        MediaFeatureName::Standard(MediaFeatureId::Height)
+        | MediaFeatureName::Standard(MediaFeatureId::DeviceHeight) => Some(ctx.height),
+        _ => None,
+    }
+}
+
+fn media_length(value: &lightningcss::media_query::MediaFeatureValue<'_>) -> Option<f32> {
+    use lightningcss::media_query::MediaFeatureValue;
+    match value {
+        MediaFeatureValue::Length(lightningcss::values::length::Length::Value(v)) => {
+            match convert_length_value(v) {
+                crate::css::Length::Px(px) => Some(px),
+                _ => None,
             }
         }
+        _ => None,
     }
-    true
+}
+
+fn feature_matches(
+    feature: &lightningcss::media_query::MediaFeature<'_>,
+    ctx: &MediaContext,
+) -> bool {
+    use lightningcss::media_query::{
+        MediaFeature, MediaFeatureComparison, MediaFeatureId, MediaFeatureName,
+        MediaFeatureValue,
+    };
+    match feature {
+        MediaFeature::Plain { name, value } => match name {
+            MediaFeatureName::Standard(MediaFeatureId::Orientation) => {
+                let landscape = ctx.width >= ctx.height;
+                match value {
+                    MediaFeatureValue::Ident(id) => {
+                        (id.eq_ignore_ascii_case("landscape") && landscape)
+                            || (id.eq_ignore_ascii_case("portrait") && !landscape)
+                    }
+                    _ => false,
+                }
+            }
+            MediaFeatureName::Standard(MediaFeatureId::PrefersColorScheme) => match value {
+                MediaFeatureValue::Ident(id) => {
+                    id.eq_ignore_ascii_case("dark") == ctx.dark_mode
+                }
+                _ => false,
+            },
+            _ => false,
+        },
+        MediaFeature::Boolean { name } => match name {
+            // Desktop-class environment: hover available.
+            MediaFeatureName::Standard(MediaFeatureId::Hover) => true,
+            _ => false,
+        },
+        MediaFeature::Range {
+            name,
+            operator,
+            value,
+        } => {
+            let Some(actual) = feature_viewport_value(name, ctx) else {
+                return false;
+            };
+            let Some(v) = media_length(value) else {
+                return false;
+            };
+            match operator {
+                MediaFeatureComparison::Equal => actual == v,
+                MediaFeatureComparison::GreaterThan => actual > v,
+                MediaFeatureComparison::GreaterThanEqual => actual >= v,
+                MediaFeatureComparison::LessThan => actual < v,
+                MediaFeatureComparison::LessThanEqual => actual <= v,
+            }
+        }
+        MediaFeature::Interval {
+            name,
+            start,
+            start_operator,
+            end,
+            end_operator,
+        } => {
+            let Some(actual) = feature_viewport_value(name, ctx) else {
+                return false;
+            };
+            let Some(s) = media_length(start) else {
+                return false;
+            };
+            let Some(e) = media_length(end) else {
+                return false;
+            };
+            let start_ok = match start_operator {
+                MediaFeatureComparison::Equal => actual == s,
+                MediaFeatureComparison::GreaterThan => actual > s,
+                MediaFeatureComparison::GreaterThanEqual => actual >= s,
+                MediaFeatureComparison::LessThan => actual < s,
+                MediaFeatureComparison::LessThanEqual => actual <= s,
+            };
+            let end_ok = match end_operator {
+                MediaFeatureComparison::Equal => actual == e,
+                MediaFeatureComparison::GreaterThan => actual > e,
+                MediaFeatureComparison::GreaterThanEqual => actual >= e,
+                MediaFeatureComparison::LessThan => actual < e,
+                MediaFeatureComparison::LessThanEqual => actual <= e,
+            };
+            start_ok && end_ok
+        }
+    }
 }
