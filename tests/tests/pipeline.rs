@@ -225,6 +225,11 @@ async fn tab_lifecycle_and_suspension() {
     };
     let browser = BrowserApi::start(config).expect("engine start");
     let tab = browser.new_tab(Some(url.clone()));
+    // Session-6 semantics: the FIRST tab is born focused (a visible tab
+    // must never auto-freeze). Background it the way the UI does — focus
+    // a sibling tab — so the suspension sweep has something to freeze.
+    let background = browser.new_tab(None);
+    browser.focus(background);
     let mut events = browser.events();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(wait_seconds());
     let mut loaded = false;
