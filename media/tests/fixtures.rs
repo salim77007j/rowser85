@@ -186,7 +186,7 @@ fn video_frames_advance() {
             // static — only the mid/lower bands move.
             let mut sig = vec![0u8; 8];
             let mut h: u64 = 1469598103934665603;
-            for (i, b) in frame.rgba.iter().enumerate() {
+            for b in frame.rgba.iter() {
                 h ^= u64::from(*b);
                 h = h.wrapping_mul(1099511628211);
             }
