@@ -35,7 +35,6 @@ fn demuxes_progressive_mp4() {
         "duration ~4.0, got {}",
         info.duration
     );
-    drop(info);
 
     let mut samples = Vec::new();
     demuxer.take_video_samples(&mut samples);
