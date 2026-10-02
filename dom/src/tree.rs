@@ -1012,12 +1012,6 @@ impl Iterator for Descendants<'_> {
 mod wc_tests {
     use super::*;
 
-    fn find_by_tag(dom: &Dom, tag: &str) -> NodeId {
-        dom.subtree_elements(dom.document())
-            .find(|n| dom.element(*n).is_some_and(|e| &*e.name.local == tag))
-            .unwrap()
-    }
-
     /// Template contents are recorded and stay invisible to document walks.
     #[test]
     fn template_contents_recorded() {
