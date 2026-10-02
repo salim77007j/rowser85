@@ -1297,8 +1297,13 @@ impl Page {
                     );
                 }
             }
-            let (styles, layout) =
-                self.layout_engine.layout_document(&dom.borrow(), &sheets, &media, self.viewport, &intrinsic);
+            let (styles, layout) = self.layout_engine.layout_document(
+                &dom.borrow(),
+                &sheets,
+                &media,
+                self.viewport,
+                &intrinsic,
+            );
             // JS layout mirror refresh (getBoundingClientRect).
             {
                 let mut rects = self.rect_mirror.borrow_mut();
@@ -1757,11 +1762,7 @@ impl Page {
                 && self
                     .dom
                     .as_ref()
-                    .map(|dom| {
-                        dom.borrow()
-                            .get_attr(node as NodeId, "controls")
-                            .is_some()
-                    })
+                    .map(|dom| dom.borrow().get_attr(node as NodeId, "controls").is_some())
                     .unwrap_or(false))
         {
             self.dirty = true;

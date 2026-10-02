@@ -45,7 +45,13 @@ fn main() {
     let mut engine = rowser_layout::LayoutEngine::new();
     let viewport = rowser_layout::Viewport::default();
     let t1 = Instant::now();
-    let layout = engine.layout_document(&dom.borrow(), &sheets, &media, viewport, &Default::default());
+    let layout = engine.layout_document(
+        &dom.borrow(),
+        &sheets,
+        &media,
+        viewport,
+        &Default::default(),
+    );
     println!(
         "layout_document (styles+layout): {}ms",
         t1.elapsed().as_millis()

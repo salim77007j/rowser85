@@ -304,8 +304,7 @@ pub type MediaMirrorMap =
 /// Layout rects (document space: `[x, y, w, h]`) keyed by node handle,
 /// refreshed by the page thread after every layout pass. Powers a real
 /// `getBoundingClientRect` — player frameworks size their controls from it.
-pub type RectMirrorMap =
-    std::rc::Rc<std::cell::RefCell<std::collections::HashMap<u64, [f32; 4]>>>;
+pub type RectMirrorMap = std::rc::Rc<std::cell::RefCell<std::collections::HashMap<u64, [f32; 4]>>>;
 
 /// `(scroll_y, viewport_width, viewport_height)`, page-thread refreshed.
 pub type ViewportMirror = std::rc::Rc<std::cell::RefCell<(f32, f32, f32)>>;
@@ -647,7 +646,10 @@ impl JsRuntime {
                 "__native_dom_viewport",
                 Function::new(ctx.clone(), move || -> String {
                     let v = *viewport.borrow();
-                    format!("{{\"scrollY\":{},\"width\":{},\"height\":{}}}", v.0, v.1, v.2)
+                    format!(
+                        "{{\"scrollY\":{},\"width\":{},\"height\":{}}}",
+                        v.0, v.1, v.2
+                    )
                 })?,
             )?;
 

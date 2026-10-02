@@ -169,11 +169,8 @@ fn walk(
         let tag = &*element.name.local;
         if tag == "video" || tag == "audio" {
             if let Some(image) = video_frames.get(&node) {
-                let fitted = fit_rect_aspect(
-                    rect,
-                    image.width.max(1) as f32,
-                    image.height.max(1) as f32,
-                );
+                let fitted =
+                    fit_rect_aspect(rect, image.width.max(1) as f32, image.height.max(1) as f32);
                 if fitted.w < rect.w || fitted.h < rect.h {
                     list.commands.push(DrawCmd::Rect {
                         rect,
@@ -221,7 +218,17 @@ fn walk(
     // Children (flat tree: shadow content composes in at its host).
     for child in dom.flat_children(node) {
         if dom.element(child).is_some() {
-            walk(dom, styles, layout, images, video_frames, media, child, list, runs);
+            walk(
+                dom,
+                styles,
+                layout,
+                images,
+                video_frames,
+                media,
+                child,
+                list,
+                runs,
+            );
         }
     }
 }
@@ -274,7 +281,12 @@ fn draw_media_controls(list: &mut DisplayList, rect: Rect, overlay: Option<&Medi
         color: rowser_parsing::cascade::Rgba::new(12, 12, 12, 178),
     });
     let (time, duration, paused, muted) = match overlay {
-        Some(overlay) => (overlay.time, overlay.duration, overlay.paused, overlay.muted),
+        Some(overlay) => (
+            overlay.time,
+            overlay.duration,
+            overlay.paused,
+            overlay.muted,
+        ),
         None => (0.0, 0.0, true, false),
     };
     let cy = bar.y + bar_h / 2.0;

@@ -260,7 +260,10 @@ fn demuxes_mpegts() {
     let mut a = Vec::new();
     demuxer.take_audio_samples(&mut a);
     assert!(a.len() >= 100, "ADTS frames, got {}", a.len());
-    assert!(a[0].data[0] == 0xFF && (a[0].data[1] & 0xF0) == 0xF0, "ADTS sync");
+    assert!(
+        a[0].data[0] == 0xFF && (a[0].data[1] & 0xF0) == 0xF0,
+        "ADTS sync"
+    );
     assert!(
         (info.duration - 6.0).abs() < 1.0,
         "duration ~6, got {}",

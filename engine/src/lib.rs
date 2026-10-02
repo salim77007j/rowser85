@@ -889,7 +889,9 @@ fn handle_internal(state: &EngineLoop, internal: Internal) {
             }
             for url in media_docs {
                 tracing::debug!(target: "rowser::engine", "tab {tab} media document → {url}");
-                send_page(&state.tabs, tab, |tx| tx.send(page::Message::MediaDocument(url)));
+                send_page(&state.tabs, tab, |tx| {
+                    tx.send(page::Message::MediaDocument(url))
+                });
             }
         }
         Internal::PageCommand { tab, command } => handle_page_command(state, tab, command),
@@ -1367,8 +1369,7 @@ async fn spawn_hls_stream(
     let mut playlist_url = url.clone();
     let mut fetched: std::collections::HashSet<String> = std::collections::HashSet::new();
     // BYTERANGE continuation state: resource URL → next byte offset.
-    let mut range_next: std::collections::HashMap<String, u64> =
-        std::collections::HashMap::new();
+    let mut range_next: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
     let mut init_sent = false;
     let mut round = 0u32;
     let mut master_hops = 0u32;

@@ -372,11 +372,15 @@ fn build_box(
                         // text — that would drop the block boxes entirely.
                         // Promote it to a box; recursion handles nesting.
                         if has_block_descendant(dom, styles, child) {
-                            if let Some(t) =
-                                build_box(
-                                dom, styles, tree, child, dom_to_taffy, taffy_to_dom, intrinsic,
-                            )
-                            {
+                            if let Some(t) = build_box(
+                                dom,
+                                styles,
+                                tree,
+                                child,
+                                dom_to_taffy,
+                                taffy_to_dom,
+                                intrinsic,
+                            ) {
                                 children.push(t);
                             }
                         } else {
@@ -389,11 +393,15 @@ fn build_box(
                     }
                     DisplayMode::None => {}
                     _ => {
-                        if let Some(t) =
-                            build_box(
-                                dom, styles, tree, child, dom_to_taffy, taffy_to_dom, intrinsic,
-                            )
-                        {
+                        if let Some(t) = build_box(
+                            dom,
+                            styles,
+                            tree,
+                            child,
+                            dom_to_taffy,
+                            taffy_to_dom,
+                            intrinsic,
+                        ) {
                             children.push(t);
                         }
                     }
@@ -435,8 +443,7 @@ fn build_box(
             use rowser_parsing::cascade::{Length, LengthOrAuto};
             let auto_w = matches!(cs.width, LengthOrAuto::Auto);
             let auto_h = matches!(cs.height, LengthOrAuto::Auto);
-            let width_is_percent =
-                matches!(cs.width, LengthOrAuto::Length(Length::Percent(_)));
+            let width_is_percent = matches!(cs.width, LengthOrAuto::Length(Length::Percent(_)));
             if let Some(&(w, h)) = intrinsic.get(&node) {
                 if dom
                     .element(node)
@@ -700,10 +707,7 @@ mod tests {
                 "percent width (documented taffy 0.14 limitation)",
                 "body{margin:0}video{width:100%;height:auto}",
             ),
-            (
-                "no css at all (intrinsic default)",
-                "",
-            ),
+            ("no css at all (intrinsic default)", ""),
         ];
         let template = br#"<!doctype html><html><head><style>__CSS__</style></head>
 <body><video src="x.mp4" controls autoplay></video></body></html>"#;

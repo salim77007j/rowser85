@@ -68,7 +68,7 @@ pub struct TsDemuxer {
     pes: HashMap<u16, PesBuf>,
     /// Per-pid first presentation time: every pid is normalized so
     /// playback starts at t=0 regardless of the muxer's start offset
-       /// (broadcast streams and ffmpeg TS start ~1.4 s in).
+    /// (broadcast streams and ffmpeg TS start ~1.4 s in).
     starts: HashMap<u16, f64>,
     video_samples: Vec<Sample>,
     audio_samples: Vec<Sample>,
@@ -228,7 +228,11 @@ impl TsDemuxer {
         let table = skip_pointer(payload);
         let Some(table) = table else { return };
         if std::env::var("ROWSER_TS_TRACE").is_ok() {
-            eprintln!("[ts] PAT table len={} head={:02X?}", table.len(), &table[..8.min(table.len())]);
+            eprintln!(
+                "[ts] PAT table len={} head={:02X?}",
+                table.len(),
+                &table[..8.min(table.len())]
+            );
         }
         if table.len() < 12 || table[0] != 0x00 {
             return;
@@ -254,7 +258,11 @@ impl TsDemuxer {
         let table = skip_pointer(payload);
         let Some(table) = table else { return };
         if std::env::var("ROWSER_TS_TRACE").is_ok() {
-            eprintln!("[ts] PMT table len={} head={:02X?}", table.len(), &table[..16.min(table.len())]);
+            eprintln!(
+                "[ts] PMT table len={} head={:02X?}",
+                table.len(),
+                &table[..16.min(table.len())]
+            );
         }
         if table.len() < 12 || table[0] != 0x02 {
             return;
@@ -267,9 +275,9 @@ impl TsDemuxer {
         let mut pos = 12 + program_info_len;
         while pos + 5 <= body_end {
             let stream_type = table[pos];
-            let elementary_pid =
-                u16::from_be_bytes([table[pos + 1], table[pos + 2]]) & 0x1FFF;
-            let es_info_len = u16::from_be_bytes([table[pos + 3], table[pos + 4]]) as usize & 0x0FFF;
+            let elementary_pid = u16::from_be_bytes([table[pos + 1], table[pos + 2]]) & 0x1FFF;
+            let es_info_len =
+                u16::from_be_bytes([table[pos + 3], table[pos + 4]]) as usize & 0x0FFF;
             pos += 5 + es_info_len;
             if std::env::var("ROWSER_TS_TRACE").is_ok() {
                 eprintln!("[ts] PMT entry type={stream_type:#04X} pid={elementary_pid:#06X}");
