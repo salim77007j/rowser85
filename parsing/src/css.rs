@@ -14,6 +14,7 @@ use lightningcss::properties::font::{
     AbsoluteFontWeight, FontFamily as LcFontFamily, FontSize as LcFontSize,
     FontStyle as LcFontStyle, FontWeight as LcFontWeight, GenericFontFamily,
 };
+use lightningcss::properties::grid::{RepeatCount, TrackBreadth, TrackListItem, TrackSize};
 use lightningcss::properties::position::Position;
 use lightningcss::properties::size::{MaxSize, Size};
 use lightningcss::properties::text::TextAlign as LcTextAlign;
@@ -31,7 +32,8 @@ use rowser_dom::{parse_selector_list, SelectorList};
 use crate::cascade::{
     AlignItemsMode, BorderEdgeRaw, DisplayMode, FlexDirectionMode, FlexWrapMode, FontSizeRaw,
     FontStyleMode, FontWeightRaw, JustifyContentMode, Length, LengthOrAuto, LineHeightRaw,
-    LineStyleMode, PositionMode, Rgba, StyleProps, TextAlignMode,
+    LineStyleMode, NamedAreaRaw, PositionMode, Rgba, StyleProps, TextAlignMode, TrackBoundRaw,
+    TrackRaw,
 };
 
 /// One style rule ready for cascade.
@@ -334,28 +336,38 @@ fn convert_font_weight(value: &LcFontWeight) -> FontWeightRaw {
     }
 }
 
-fn convert_font_family(list: &[LcFontFamily<'_>]) -> String {
-    match list.first() {
-        Some(LcFontFamily::Generic(generic)) => match generic {
-            GenericFontFamily::Serif | GenericFontFamily::UISerif => "serif".to_owned(),
-            GenericFontFamily::Monospace | GenericFontFamily::UIMonospace => "monospace".to_owned(),
-            GenericFontFamily::Cursive => "cursive".to_owned(),
-            GenericFontFamily::Fantasy => "fantasy".to_owned(),
-            _ => "sans-serif".to_owned(),
-        },
-        Some(LcFontFamily::FamilyName(name)) => {
-            let quoted = name
-                .to_css_string(PrinterOptions::default())
-                .unwrap_or_else(|_| "sans-serif".to_owned());
-            let trimmed = quoted.trim_matches('"');
-            if trimmed.is_empty() {
-                "sans-serif".to_owned()
-            } else {
-                trimmed.to_owned()
+/// Converts a full CSS font stack into a resolution-ready family list.
+/// Every entry is preserved (generic families mapped to their keyword)
+/// so the layout stage can walk the stack until an installed font is
+/// found — mirroring CSS font matching instead of betting on entry #1.
+fn convert_font_family(list: &[LcFontFamily<'_>]) -> Vec<String> {
+    let mut stack: Vec<String> = Vec::new();
+    for family in list {
+        match family {
+            LcFontFamily::Generic(generic) => stack.push(match generic {
+                GenericFontFamily::Serif | GenericFontFamily::UISerif => "serif".to_owned(),
+                GenericFontFamily::Monospace | GenericFontFamily::UIMonospace => {
+                    "monospace".to_owned()
+                }
+                GenericFontFamily::Cursive => "cursive".to_owned(),
+                GenericFontFamily::Fantasy => "fantasy".to_owned(),
+                _ => "sans-serif".to_owned(),
+            }),
+            LcFontFamily::FamilyName(name) => {
+                let quoted = name
+                    .to_css_string(PrinterOptions::default())
+                    .unwrap_or_default();
+                let trimmed = quoted.trim_matches('"').trim();
+                if !trimmed.is_empty() {
+                    stack.push(trimmed.to_owned());
+                }
             }
         }
-        None => "sans-serif".to_owned(),
     }
+    if stack.is_empty() {
+        stack.push("sans-serif".to_owned());
+    }
+    stack
 }
 
 // ---------------------------------------------------------------------------
@@ -366,6 +378,15 @@ fn apply_property(props: &mut StyleProps, property: &Property<'_>) {
     use lightningcss::properties::Property as P;
     match property {
         P::BackgroundColor(value) => props.background_color = Some(convert_color(value)),
+        // `background` shorthand — THE workhorse of real-world CSS. Sites
+        // write `background: #f6f6ef` a hundred times more often than the
+        // longhand; dropping it painted pages on blank canvases. We take the
+        // color (first layer); gradients/images are a documented gap.
+        P::Background(value) => {
+            if let Some(bg) = value.first() {
+                props.background_color = Some(convert_color(&bg.color));
+            }
+        }
         P::Color(value) => props.color = Some(convert_color(value)),
         P::Display(value) => props.display = Some(convert_display(value)),
         P::Width(value) => props.width = Some(convert_size(value)),
@@ -398,6 +419,43 @@ fn apply_property(props: &mut StyleProps, property: &Property<'_>) {
         P::BorderRightWidth(value) => props.border_right = Some(border_from_width(value)),
         P::BorderBottomWidth(value) => props.border_bottom = Some(border_from_width(value)),
         P::BorderLeftWidth(value) => props.border_left = Some(border_from_width(value)),
+        // `border` shorthand: width/style/color on all four edges.
+        P::Border(value) => {
+            let edge = border_shorthand_edge(&value.width, &value.style, &value.color);
+            props.border_top = Some(edge.clone());
+            props.border_right = Some(edge.clone());
+            props.border_bottom = Some(edge.clone());
+            props.border_left = Some(edge);
+        }
+        // Per-side `border-top:` style shorthands.
+        P::BorderTop(value) => {
+            props.border_top = Some(border_shorthand_edge(
+                &value.width,
+                &value.style,
+                &value.color,
+            ))
+        }
+        P::BorderRight(value) => {
+            props.border_right = Some(border_shorthand_edge(
+                &value.width,
+                &value.style,
+                &value.color,
+            ))
+        }
+        P::BorderBottom(value) => {
+            props.border_bottom = Some(border_shorthand_edge(
+                &value.width,
+                &value.style,
+                &value.color,
+            ))
+        }
+        P::BorderLeft(value) => {
+            props.border_left = Some(border_shorthand_edge(
+                &value.width,
+                &value.style,
+                &value.color,
+            ))
+        }
         P::BorderTopColor(value) => set_border_color(props, Side::Top, convert_color(value)),
         P::BorderRightColor(value) => set_border_color(props, Side::Right, convert_color(value)),
         P::BorderBottomColor(value) => set_border_color(props, Side::Bottom, convert_color(value)),
@@ -435,7 +493,38 @@ fn apply_property(props: &mut StyleProps, property: &Property<'_>) {
         }
         P::RowGap(value) => props.row_gap = Some(convert_gap(value)),
         P::ColumnGap(value) => props.column_gap = Some(convert_gap(value)),
+        // Grid templates: the backbone of modern page layout
+        // (Wikipedia's Vector 2022 skin is a CSS grid). Without track
+        // definitions every grid collapsed into a single column.
+        P::GridTemplateColumns(value) => {
+            props.grid_template_columns = Some(convert_grid_tracks(value))
+        }
+        P::GridTemplateRows(value) => props.grid_template_rows = Some(convert_grid_tracks(value)),
+        // `grid-template` shorthand ("rows / columns") — Wikipedia's Vector
+        // 2022 skin and most modern sites define their page grids this way.
+        P::GridTemplate(value) => {
+            props.grid_template_rows = Some(convert_grid_tracks(&value.rows));
+            props.grid_template_columns = Some(convert_grid_tracks(&value.columns));
+            props.grid_template_areas = Some(convert_grid_areas(&value.areas));
+        }
+        // Named grid areas ("'a b' 'c d'") + per-item `grid-area: name`.
+        P::GridTemplateAreas(value) => props.grid_template_areas = Some(convert_grid_areas(value)),
+        P::GridArea(value) => {
+            props.grid_area = area_name_from(value);
+        }
         P::Position(value) => props.position = Some(convert_position(value)),
+        // Inset properties: anchor absolute elements and offset relative
+        // ones. Previously unparsed — position:absolute navigation without
+        // top/left stacked everything at the containing block origin.
+        P::Top(value) => props.top = Some(convert_lpa(value)),
+        P::Bottom(value) => props.bottom = Some(convert_lpa(value)),
+        P::Left(value) => props.left = Some(convert_lpa(value)),
+        P::Right(value) => props.right = Some(convert_lpa(value)),
+        P::ZIndex(value) => {
+            if let lightningcss::properties::position::ZIndex::Integer(n) = value {
+                props.z_index = Some(*n);
+            }
+        }
         _ => {}
     }
 }
@@ -508,11 +597,178 @@ fn convert_line_style(value: &LineStyle) -> LineStyleMode {
     }
 }
 
+/// Full `border:` shorthand (width, style, color) for one edge.
+fn border_shorthand_edge(
+    width: &BorderSideWidth,
+    style: &LineStyle,
+    color: &CssColor,
+) -> BorderEdgeRaw {
+    let mut edge = border_from_width(width);
+    edge.style = convert_line_style(style);
+    edge.color = Some(convert_color(color));
+    edge
+}
+
+/// Converts a lightningcss track list into flattened track pairs, expanding
+/// `repeat(n, ...)` by count (auto-fill/auto-fit degrade to a single copy).
+fn convert_grid_tracks(value: &lightningcss::properties::grid::TrackSizing<'_>) -> Vec<TrackRaw> {
+    let lightningcss::properties::grid::TrackSizing::TrackList(list) = value else {
+        return Vec::new();
+    };
+    let mut tracks = Vec::new();
+    for item in &list.items {
+        match item {
+            TrackListItem::TrackSize(size) => tracks.push(track_from_size(size)),
+            TrackListItem::TrackRepeat(repeat) => {
+                let count = match repeat.count {
+                    RepeatCount::Number(n) => n.clamp(0, 64) as usize,
+                    // auto-fill/auto-fit depend on container measurement we
+                    // do not model; one copy keeps children in real tracks.
+                    RepeatCount::AutoFill | RepeatCount::AutoFit => 1,
+                };
+                for _ in 0..count {
+                    for size in &repeat.track_sizes {
+                        tracks.push(track_from_size(size));
+                    }
+                }
+            }
+        }
+    }
+    tracks
+}
+
+/// Extracts the name from `grid-area: <name>` (the single-ident form where
+/// all four placement lines carry the same area name).
+fn area_name_from(value: &lightningcss::properties::grid::GridArea<'_>) -> Option<String> {
+    use lightningcss::properties::grid::GridLine;
+    let line_name = |line: &GridLine<'_>| match line {
+        GridLine::Area { name } => Some(name.to_string()),
+        _ => None,
+    };
+    let row_start = line_name(&value.row_start)?;
+    let column_start = line_name(&value.column_start)?;
+    let row_end = line_name(&value.row_end)?;
+    let column_end = line_name(&value.column_end)?;
+    if row_start == column_start && column_start == row_end && row_end == column_end {
+        Some(row_start)
+    } else {
+        None
+    }
+}
+
+/// Converts flattened lightningcss areas (row-major, `columns` wide) into
+/// named area rectangles: union of cells carrying each name.
+fn convert_grid_areas(
+    value: &lightningcss::properties::grid::GridTemplateAreas,
+) -> Vec<NamedAreaRaw> {
+    use lightningcss::properties::grid::GridTemplateAreas as Areas;
+    let Areas::Areas { columns, areas } = value else {
+        return Vec::new();
+    };
+    let columns = (*columns as usize).max(1);
+    let mut out: Vec<NamedAreaRaw> = Vec::new();
+    for (index, cell) in areas.iter().enumerate() {
+        let Some(name) = cell else { continue };
+        let row = index / columns;
+        let col = index % columns;
+        if let Some(area) = out.iter_mut().find(|a| a.name == *name) {
+            area.row_start = area.row_start.min(row as u16);
+            area.row_end = area.row_end.max((row + 1) as u16);
+            area.col_start = area.col_start.min(col as u16);
+            area.col_end = area.col_end.max((col + 1) as u16);
+        } else {
+            out.push(NamedAreaRaw {
+                name: name.clone(),
+                row_start: row as u16,
+                row_end: (row + 1) as u16,
+                col_start: col as u16,
+                col_end: (col + 1) as u16,
+            });
+        }
+    }
+    out
+}
+
+fn track_from_size(size: &TrackSize) -> TrackRaw {
+    match size {
+        TrackSize::TrackBreadth(breadth) => track_from_breadth(breadth),
+        TrackSize::MinMax { min, max } => TrackRaw {
+            min: bound_from_breadth_lp(min),
+            max: bound_from_breadth_lp(max),
+        },
+        // fit-content(lp) ≈ minmax(auto, lp)
+        TrackSize::FitContent(lp) => TrackRaw {
+            min: TrackBoundRaw::Auto,
+            max: bound_from_lp(lp),
+        },
+    }
+}
+
+fn track_from_breadth(breadth: &TrackBreadth) -> TrackRaw {
+    match breadth {
+        TrackBreadth::Length(lp) => {
+            let bound = bound_from_lp(lp);
+            TrackRaw {
+                min: bound,
+                max: bound,
+            }
+        }
+        TrackBreadth::Flex(f) => TrackRaw {
+            min: TrackBoundRaw::Auto,
+            max: TrackBoundRaw::Fr(*f),
+        },
+        TrackBreadth::MinContent => TrackRaw {
+            min: TrackBoundRaw::MinContent,
+            max: TrackBoundRaw::Auto,
+        },
+        TrackBreadth::MaxContent => TrackRaw {
+            min: TrackBoundRaw::MaxContent,
+            max: TrackBoundRaw::Auto,
+        },
+        TrackBreadth::Auto => TrackRaw {
+            min: TrackBoundRaw::Auto,
+            max: TrackBoundRaw::Auto,
+        },
+    }
+}
+
+/// A minmax() bound is a TrackBreadth: min-content/max-content/auto are
+/// valid mins; flex is only valid as a max (degrade to auto).
+fn bound_from_breadth_lp(breadth: &TrackBreadth) -> TrackBoundRaw {
+    match breadth {
+        TrackBreadth::Length(lp) => bound_from_lp(lp),
+        TrackBreadth::MinContent => TrackBoundRaw::MinContent,
+        TrackBreadth::MaxContent => TrackBoundRaw::MaxContent,
+        TrackBreadth::Auto => TrackBoundRaw::Auto,
+        TrackBreadth::Flex(f) => TrackBoundRaw::Fr(*f),
+    }
+}
+
+fn bound_from_lp(lp: &LengthPercentage) -> TrackBoundRaw {
+    match lp {
+        LengthPercentage::Dimension(value) => {
+            TrackBoundRaw::Px(convert_length_value(value).resolve(16.0))
+        }
+        LengthPercentage::Percentage(p) => TrackBoundRaw::Percent(p.0),
+        _ => TrackBoundRaw::Auto,
+    }
+}
+
 fn convert_display(value: &Display) -> DisplayMode {
     match value {
         Display::Keyword(keyword) => match keyword {
             DisplayKeyword::None => DisplayMode::None,
             DisplayKeyword::Contents => DisplayMode::Inline,
+            // Table parts: match the UA stylesheet's table→flex mapping so
+            // author `display: table-row` keeps cells side by side.
+            DisplayKeyword::TableRow
+            | DisplayKeyword::TableRowGroup
+            | DisplayKeyword::TableHeaderGroup
+            | DisplayKeyword::TableFooterGroup => DisplayMode::Flex,
+            DisplayKeyword::TableCell
+            | DisplayKeyword::TableColumn
+            | DisplayKeyword::TableColumnGroup
+            | DisplayKeyword::TableCaption => DisplayMode::Block,
             _ => DisplayMode::Block,
         },
         Display::Pair(pair) => match pair.inside {

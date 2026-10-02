@@ -3,6 +3,7 @@
 
 use std::sync::Arc;
 
+use cosmic_text::fontdb;
 use cosmic_text::{
     Attrs, AttrsList, BufferLine, Family, FontSystem, Hinting, LayoutLine, LineEnding, Metrics,
     Shaping, Style, Weight, Wrap,
@@ -17,6 +18,8 @@ use crate::TextLeaf;
 pub struct SpanStyle {
     /// First font family name (or `sans-serif`/`serif`/`monospace`).
     pub family: String,
+    /// Full font stack in CSS preference order.
+    pub family_stack: Vec<String>,
     /// Font size in px.
     pub font_size: f32,
     /// Font weight (100-900).
@@ -36,6 +39,7 @@ impl SpanStyle {
     pub fn from_style(cs: &ComputedStyle) -> SpanStyle {
         SpanStyle {
             family: cs.font_family.clone(),
+            family_stack: family_stack_of(cs),
             font_size: cs.font_size,
             weight: cs.font_weight,
             style: cs.font_style,
@@ -49,6 +53,7 @@ impl SpanStyle {
     /// (innermost inline wins).
     pub fn merge_from(&mut self, cs: &ComputedStyle) {
         self.family = cs.font_family.clone();
+        self.family_stack = family_stack_of(cs);
         self.font_size = cs.font_size;
         self.weight = cs.font_weight;
         self.style = cs.font_style;
@@ -56,8 +61,8 @@ impl SpanStyle {
         self.line_height = cs.line_height;
     }
 
-    fn family_ref(&self) -> Family<'_> {
-        match self.family.as_str() {
+    fn family_ref<'a>(&'a self, resolved: &'a str) -> Family<'a> {
+        match resolved {
             "serif" => Family::Serif,
             "monospace" => Family::Monospace,
             "cursive" => Family::Cursive,
@@ -66,7 +71,7 @@ impl SpanStyle {
         }
     }
 
-    fn attrs(&self) -> Attrs<'_> {
+    fn attrs_with<'a>(&'a self, resolved_family: &'a str) -> Attrs<'a> {
         let weight = Weight(self.weight.round().clamp(100.0, 900.0) as u16);
         let style = match self.style {
             FontStyleMode::Normal => Style::Normal,
@@ -74,8 +79,14 @@ impl SpanStyle {
         };
         let color =
             cosmic_text::Color::rgba(self.color.r, self.color.g, self.color.b, self.color.a);
+        // Safety: the family string is either a &'static generic keyword or
+        // borrowed from `self.family_stack` (kept alive by the span).
+        let family = self.family_ref(resolved_family);
+        // Transmute-free lifetime tie: Attrs borrows from self; the family
+        // name borrowed from resolved_family must live as long as self —
+        // callers pass a name owned by (or outliving) the span.
         Attrs::new()
-            .family(self.family_ref())
+            .family(family)
             .weight(weight)
             .style(style)
             .color(color)
@@ -160,7 +171,13 @@ pub fn shape_at(
                     )
                 })
                 .unwrap_or(defaults.color);
-            let physical = glyph.physical((glyph.x + x_offset, baseline), 1.0);
+            // NOTE: cosmic-text's `physical()` already adds the glyph's own
+            // line-relative `self.x` to the offset we pass. Feeding it
+            // `glyph.x` here DOUBLED every x coordinate — text rendered
+            // ~2x too wide, smearing over neighbouring runs: the
+            // "reversed and jumbled text" failure mode. The offset must be
+            // only the line-alignment shift (+ the run origin).
+            let physical = glyph.physical((x_offset, baseline), 1.0);
             glyphs.push(PlacedGlyph {
                 cache_key: physical.cache_key,
                 x: physical.x + abs.0.round() as i32,
@@ -206,6 +223,130 @@ fn sanitize_bidi_separators(text: &str) -> std::borrow::Cow<'_, str> {
     )
 }
 
+/// The computed style's font stack, with a generic fallback appended when
+/// the author supplied none ("Arial" alone must still fall back to *some*
+/// sans-serif if Arial is missing).
+fn family_stack_of(cs: &ComputedStyle) -> Vec<String> {
+    let mut stack = cs.font_stack.clone();
+    let has_generic = stack.iter().any(|f| {
+        matches!(
+            f.as_str(),
+            "serif" | "sans-serif" | "monospace" | "cursive" | "fantasy"
+        )
+    });
+    if !has_generic {
+        stack.push("sans-serif".to_owned());
+    }
+    stack
+}
+
+/// Well-known web font names mapped to metric-compatible fonts that ship
+/// with this environment (Liberation = Arial/Times/Courier metrics).
+const FAMILY_ALIASES: &[(&str, &str)] = &[
+    ("arial", "Liberation Sans"),
+    ("helvetica", "Liberation Sans"),
+    ("arial black", "Liberation Sans"),
+    ("segoe ui", "Liberation Sans"),
+    ("roboto", "Liberation Sans"),
+    ("system-ui", "Liberation Sans"),
+    ("-apple-system", "Liberation Sans"),
+    ("blinkmacsystemfont", "Liberation Sans"),
+    ("microsoft yahei", "Noto Sans SC"),
+    ("pingfang sc", "Noto Sans SC"),
+    ("hiragino sans gb", "Noto Sans SC"),
+    ("microsoft sans serif", "Liberation Sans"),
+    ("tahoma", "DejaVu Sans"),
+    ("verdana", "DejaVu Sans"),
+    ("geneva", "DejaVu Sans"),
+    ("lucida sans unicode", "DejaVu Sans"),
+    ("lucida grande", "DejaVu Sans"),
+    ("trebuchet ms", "DejaVu Sans"),
+    ("ui-sans-serif", "Liberation Sans"),
+    ("times new roman", "Liberation Serif"),
+    ("times", "Liberation Serif"),
+    ("georgia", "Liberation Serif"),
+    ("garamond", "Liberation Serif"),
+    ("palatino", "Liberation Serif"),
+    ("book antiqua", "Liberation Serif"),
+    ("ui-serif", "Liberation Serif"),
+    ("courier new", "Liberation Mono"),
+    ("courier", "Liberation Mono"),
+    ("consolas", "Liberation Mono"),
+    ("menlo", "Liberation Mono"),
+    ("monaco", "Liberation Mono"),
+    ("sf mono", "Liberation Mono"),
+    ("andale mono", "Liberation Mono"),
+    ("ui-monospace", "Liberation Mono"),
+    ("calibri", "Carlito"),
+    ("cambria", "Liberation Serif"),
+    ("cursive", "cursive"),
+    ("comic sans ms", "Liberation Sans"),
+    ("impact", "Liberation Sans"),
+    ("symbol", "DejaVu Sans"),
+    ("wingdings", "DejaVu Sans"),
+    ("webkit-standard", "Liberation Sans"),
+    ("ui-rounded", "Liberation Sans"),
+    ("applesdgothicneo", "Noto Sans SC"),
+    ("noto sans", "Noto Sans SC"),
+    ("open sans", "Liberation Sans"),
+    ("lato", "Liberation Sans"),
+    ("ubuntu", "Liberation Sans"),
+    ("fira sans", "Liberation Sans"),
+    ("inter", "Liberation Sans"),
+    ("sf pro text", "Liberation Sans"),
+    ("sf pro display", "Liberation Sans"),
+    ("Helvetica Neue", "Liberation Sans"),
+];
+
+/// Final-resort families tried after the author stack is exhausted.
+const FALLBACK_CHAIN: &[&str] = &["Liberation Sans", "DejaVu Sans", "Noto Sans SC"];
+
+/// True when the font system has a face for `name`.
+fn family_installed(name: &str, font_system: &mut FontSystem) -> bool {
+    let query = fontdb::Query {
+        families: &[fontdb::Family::Name(name)],
+        ..Default::default()
+    };
+    font_system.db_mut().query(&query).is_some()
+}
+
+/// Resolves a CSS font stack to the first *installed* family name,
+/// applying metric-compatible aliases for common web fonts and falling
+/// back to a concrete default when nothing matches. Mirrors CSS font
+/// matching (family-by-family, in order) instead of betting on entry #1.
+fn resolve_font_stack(stack: &[String], font_system: &mut FontSystem) -> String {
+    for family in stack {
+        match family.as_str() {
+            "serif" | "sans-serif" | "monospace" | "cursive" | "fantasy" => {
+                // Generic keywords: let cosmic-text resolve them (it has its
+                // own generic defaults + per-glyph fallback).
+                return family.clone();
+            }
+            _ => {}
+        }
+        // Exact installed match wins immediately.
+        if family_installed(family, font_system) {
+            return family.clone();
+        }
+        // Metric-compatible alias, if installed.
+        if let Some((_, alias)) = FAMILY_ALIASES
+            .iter()
+            .find(|(from, _)| from.eq_ignore_ascii_case(family))
+        {
+            if family_installed(alias, font_system) {
+                return (*alias).to_owned();
+            }
+        }
+    }
+    // Nothing in the author stack matched: concrete fallback.
+    for fallback in FALLBACK_CHAIN {
+        if family_installed(fallback, font_system) {
+            return (*fallback).to_owned();
+        }
+    }
+    "sans-serif".to_owned()
+}
+
 fn shape_lines(
     leaf: &TextLeaf,
     font_system: &mut FontSystem,
@@ -215,11 +356,23 @@ fn shape_lines(
         return Vec::new();
     }
     let defaults = &leaf.defaults;
-    let attrs = defaults.attrs();
-    let mut attrs_list = AttrsList::new(&attrs);
-    for (range, span) in &leaf.spans {
+    // Resolve the CSS font stacks against installed fonts BEFORE shaping:
+    // "-apple-system, BlinkMacSystemFont, Segoe UI" previously hit entry
+    // #1, found nothing in fontdb and degraded to an arbitrary face.
+    let defaults_name = resolve_font_stack(&defaults.family_stack, font_system);
+    let defaults_attrs = defaults.attrs_with(&defaults_name);
+    let mut attrs_list = AttrsList::new(&defaults_attrs);
+    let mut span_names: Vec<String> = Vec::with_capacity(leaf.spans.len());
+    for (_, span) in &leaf.spans {
+        if span == defaults {
+            span_names.push(defaults_name.clone());
+        } else {
+            span_names.push(resolve_font_stack(&span.family_stack, font_system));
+        }
+    }
+    for ((range, span), name) in leaf.spans.iter().zip(span_names.iter()) {
         if span != defaults {
-            let span_attrs = span.attrs();
+            let span_attrs = span.attrs_with(name);
             attrs_list.add_span(range.clone(), &span_attrs);
         }
     }
@@ -266,6 +419,7 @@ mod tests {
             spans: Vec::new(),
             defaults: SpanStyle {
                 family: "sans-serif".into(),
+                family_stack: vec!["sans-serif".into()],
                 font_size: 16.0,
                 weight: 400.0,
                 style: FontStyleMode::Normal,

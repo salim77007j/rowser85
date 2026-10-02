@@ -42,7 +42,14 @@ impl RuleIndex {
                     let kind = if b == b'#' { 1 } else { 2 };
                     let (ident, next) = scan_ident(bytes, pos + 1);
                     if !ident.is_empty() {
-                        bucket_kinds.push((kind, ident));
+                        // Lowercase at insertion: the lookup path lowercases
+                        // the element's id/classes, and a camelCase id
+                        // ("#bodyContent") indexed verbatim was never found
+                        // again — the rule silently never matched. This is
+                        // exactly how Wikipedia's
+                        // `.mw-body #bodyContent{grid-area:content}` was
+                        // dropped and the main content column misplaced.
+                        bucket_kinds.push((kind, ident.to_ascii_lowercase()));
                     }
                     pos = next;
                 }

@@ -1384,7 +1384,7 @@ impl Page {
             );
         }
         self.display_list = Some(list.clone());
-        let background = page_background(&styles, &layout);
+        let background = page_background(&dom.borrow(), &styles, &layout);
         let options = RenderOptions {
             viewport_width: self.viewport.width as u32,
             viewport_height: self.viewport.height as u32,
@@ -2141,15 +2141,35 @@ fn serialize_dom(dom: &Dom) -> String {
     html
 }
 
-fn page_background(styles: &StyleMap, layout: &LayoutResult) -> rowser_parsing::cascade::Rgba {
-    // Find the body element's background; default to white.
-    for (node, style) in styles.styles.iter() {
-        if style.background_color.a > 0 && layout.rects.contains_key(node) {
-            let _ = node;
-            return style.background_color;
+fn page_background(
+    dom: &rowser_dom::Dom,
+    styles: &StyleMap,
+    layout: &LayoutResult,
+) -> rowser_parsing::cascade::Rgba {
+    // CSS canvas background propagation, spec order: the root element's
+    // (html) background wins; if it has none, body's is used. The previous
+    // implementation returned the first opaque background of ANY element in
+    // HashMap iteration order — a random banner/logo cell could (and did,
+    // on Hacker News) paint the entire canvas orange.
+    let mut html_bg = None;
+    let mut body_bg = None;
+    for node in dom.subtree_elements(dom.document()) {
+        if let Some(el) = dom.element(node) {
+            let bg = styles
+                .get(node)
+                .filter(|s| s.background_color.a > 0)
+                .map(|s| s.background_color);
+            match &*el.name.local {
+                "html" => html_bg = bg,
+                "body" => body_bg = bg.or(body_bg),
+                _ => {}
+            }
         }
     }
-    rowser_parsing::cascade::Rgba::new_opaque(255, 255, 255)
+    let _ = layout;
+    html_bg.or(body_bg).unwrap_or_else(|| {
+        rowser_parsing::cascade::Rgba::new_opaque(255, 255, 255)
+    })
 }
 
 fn extract_data_payload(data_url: &str) -> String {

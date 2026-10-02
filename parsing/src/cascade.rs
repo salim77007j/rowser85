@@ -301,6 +301,48 @@ impl BorderEdgeRaw {
     pub const DEFAULT_WIDTH: Length = Length::Px(3.0);
 }
 
+/// One bound (min or max side) of a grid track sizing function.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TrackBoundRaw {
+    /// `auto`
+    Auto,
+    /// `min-content`
+    MinContent,
+    /// `max-content`
+    MaxContent,
+    /// Fixed length in px.
+    Px(f32),
+    /// Percentage of the grid container.
+    Percent(f32),
+    /// Fraction of the remaining space.
+    Fr(f32),
+}
+
+/// One grid track: a (min, max) sizing pair.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TrackRaw {
+    /// Minimum track size.
+    pub min: TrackBoundRaw,
+    /// Maximum track size.
+    pub max: TrackBoundRaw,
+}
+
+/// One named grid area: name → rectangle in grid cells
+/// (0-based, half-open [start, end)).
+#[derive(Debug, Clone, PartialEq)]
+pub struct NamedAreaRaw {
+    /// Area name.
+    pub name: String,
+    /// First grid row (0-based).
+    pub row_start: u16,
+    /// One past the last grid row.
+    pub row_end: u16,
+    /// First grid column (0-based).
+    pub col_start: u16,
+    /// One past the last grid column.
+    pub col_end: u16,
+}
+
 /// Flattened declarations from one rule (or inline style attribute).
 ///
 /// All values are pre-parsed; the cascade resolves them against the
@@ -351,8 +393,18 @@ pub struct StyleProps {
     pub border_bottom: Option<BorderEdgeRaw>,
     /// `border-left`.
     pub border_left: Option<BorderEdgeRaw>,
-    /// `font-family`.
-    pub font_family: Option<String>,
+    /// `font-family` (full stack, in preference order).
+    pub font_family: Option<Vec<String>>,
+    /// `top`.
+    pub top: Option<LengthOrAuto>,
+    /// `right`.
+    pub right: Option<LengthOrAuto>,
+    /// `bottom`.
+    pub bottom: Option<LengthOrAuto>,
+    /// `left`.
+    pub left: Option<LengthOrAuto>,
+    /// `z-index`.
+    pub z_index: Option<i32>,
     /// `font-size`.
     pub font_size: Option<FontSizeRaw>,
     /// `font-weight`.
@@ -383,6 +435,14 @@ pub struct StyleProps {
     pub row_gap: Option<Length>,
     /// `column-gap`.
     pub column_gap: Option<Length>,
+    /// `grid-template-columns` (flattened, repeats expanded).
+    pub grid_template_columns: Option<Vec<TrackRaw>>,
+    /// `grid-template-rows` (flattened, repeats expanded).
+    pub grid_template_rows: Option<Vec<TrackRaw>>,
+    /// `grid-template-areas` (named area rectangles).
+    pub grid_template_areas: Option<Vec<NamedAreaRaw>>,
+    /// `grid-area` (name form).
+    pub grid_area: Option<String>,
 }
 
 /// Fully resolved style for one element.
@@ -392,12 +452,25 @@ pub struct ComputedStyle {
     pub display: DisplayMode,
     /// `position`.
     pub position: PositionMode,
+    /// `top` inset.
+    pub top: LengthOrAuto,
+    /// `right` inset.
+    pub right: LengthOrAuto,
+    /// `bottom` inset.
+    pub bottom: LengthOrAuto,
+    /// `left` inset.
+    pub left: LengthOrAuto,
+    /// `z-index` (None = auto).
+    pub z_index: Option<i32>,
     /// Foreground color.
     pub color: Rgba,
     /// Background color.
     pub background_color: Rgba,
-    /// First font family.
+    /// First font family (resolved stack head; see `font_stack`).
     pub font_family: String,
+    /// Full font stack in CSS preference order — walked at shaping time
+    /// until an installed font is found (CSS font matching).
+    pub font_stack: Vec<String>,
     /// Font size in px.
     pub font_size: f32,
     /// Font weight (100-900).
@@ -446,6 +519,14 @@ pub struct ComputedStyle {
     pub gap_row: f32,
     /// Column gap in px.
     pub gap_column: f32,
+    /// Grid column track list (empty = auto).
+    pub grid_template_columns: Vec<TrackRaw>,
+    /// Grid row track list (empty = auto).
+    pub grid_template_rows: Vec<TrackRaw>,
+    /// Named grid areas (for `grid-area: name` placement).
+    pub grid_template_areas: Vec<NamedAreaRaw>,
+    /// `grid-area` name (placed against the parent's areas).
+    pub grid_area: Option<String>,
 }
 
 impl Default for ComputedStyle {
@@ -453,9 +534,15 @@ impl Default for ComputedStyle {
         ComputedStyle {
             display: DisplayMode::Inline,
             position: PositionMode::Static,
+            top: LengthOrAuto::Auto,
+            right: LengthOrAuto::Auto,
+            bottom: LengthOrAuto::Auto,
+            left: LengthOrAuto::Auto,
+            z_index: None,
             color: Rgba::new_opaque(0, 0, 0),
             background_color: Rgba::TRANSPARENT,
             font_family: "sans-serif".to_owned(),
+            font_stack: vec!["sans-serif".to_owned()],
             font_size: 16.0,
             font_weight: 400.0,
             font_style: FontStyleMode::Normal,
@@ -511,6 +598,10 @@ impl Default for ComputedStyle {
             align_content: AlignItemsMode::Stretch,
             gap_row: 0.0,
             gap_column: 0.0,
+            grid_template_columns: Vec::new(),
+            grid_template_rows: Vec::new(),
+            grid_template_areas: Vec::new(),
+            grid_area: None,
         }
     }
 }
@@ -734,12 +825,41 @@ fn apply_props(style: &mut ComputedStyle, props: &StyleProps, parent: &ComputedS
     if let Some(mode) = props.align_content {
         style.align_content = mode;
     }
+    // Inset + stacking: non-inherited, applied directly.
+    if let Some(v) = props.top {
+        style.top = resolve_ems(v);
+    }
+    if let Some(v) = props.right {
+        style.right = resolve_ems(v);
+    }
+    if let Some(v) = props.bottom {
+        style.bottom = resolve_ems(v);
+    }
+    if let Some(v) = props.left {
+        style.left = resolve_ems(v);
+    }
+    if let Some(z) = props.z_index {
+        style.z_index = Some(z);
+    }
+    if let Some(tracks) = &props.grid_template_columns {
+        style.grid_template_columns = tracks.clone();
+    }
+    if let Some(tracks) = &props.grid_template_rows {
+        style.grid_template_rows = tracks.clone();
+    }
+    if let Some(areas) = &props.grid_template_areas {
+        style.grid_template_areas = areas.clone();
+    }
+    if let Some(area) = &props.grid_area {
+        style.grid_area = Some(area.clone());
+    }
 }
 
 fn inherited_from(parent: &ComputedStyle) -> ComputedStyle {
     ComputedStyle {
         color: parent.color,
         font_family: parent.font_family.clone(),
+        font_stack: parent.font_stack.clone(),
         font_size: parent.font_size,
         font_weight: parent.font_weight,
         font_style: parent.font_style,
@@ -816,7 +936,7 @@ fn cascade_element(
     let mut font_size: Option<FontSizeRaw> = None;
     let mut font_weight: Option<FontWeightRaw> = None;
     let mut line_height: Option<LineHeightRaw> = None;
-    let mut font_family: Option<String> = None;
+    let mut font_family: Option<Vec<String>> = None;
     sources.for_each(|props| {
         if props.font_size.is_some() {
             font_size = props.font_size;
@@ -837,8 +957,12 @@ fn cascade_element(
     if let Some(raw) = font_weight {
         style.font_weight = resolve_font_weight(raw, parent);
     }
-    if let Some(family) = font_family {
-        style.font_family = family;
+    if let Some(stack) = font_family {
+        style.font_family = stack
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "sans-serif".to_owned());
+        style.font_stack = stack;
     }
     style.line_height = match line_height {
         Some(raw) => resolve_line_height_raw(raw, style.font_size),

@@ -18,6 +18,7 @@ use std::collections::HashMap;
 use rowser_dom::{Dom, NodeId};
 use rowser_parsing::cascade::{compute_styles, ComputedStyle, DisplayMode, StyleMap};
 use rowser_parsing::css::{MediaContext, ParsedStylesheet};
+use taffy::geometry::Line;
 use taffy::geometry::{Rect as TaffyRect, Size as TaffySize};
 use taffy::style::{
     AlignContent as TaffyAlignContent, AlignItems as TaffyAlignItems, AlignSelf, AvailableSpace,
@@ -25,7 +26,15 @@ use taffy::style::{
     FlexWrap as TaffyFlexWrap, JustifyContent as TaffyJustify, LengthPercentage,
     LengthPercentageAuto, Position as TaffyPosition, Style,
 };
+use taffy::style::{
+    GridPlacement, GridTemplateArea, GridTemplateAreas, GridTemplateComponent,
+    MaxTrackSizingFunction, MinTrackSizingFunction,
+};
 use taffy::style_helpers::TaffyAuto;
+use taffy::style_helpers::{
+    auto as track_auto, fr, length as track_length, max_content, min_content, minmax,
+    percent as track_percent, TaffyGridLine,
+};
 use taffy::tree::{CollapsibleMarginSet, LayoutInput, LayoutOutput, TaffyTree};
 use taffy::{Baselines, NodeId as TaffyNode};
 
@@ -150,6 +159,7 @@ impl LayoutEngine {
             &mut dom_to_taffy,
             &mut taffy_to_dom,
             intrinsic,
+            &[],
         );
         let Some(taffy_root) = taffy_root else {
             return LayoutResult::default();
@@ -266,6 +276,15 @@ fn taffy_style(cs: &ComputedStyle) -> Style {
             left: length_pct(cs.paddings.left, cs.font_size),
         },
         border,
+        // Inset (top/right/bottom/left): anchors for position:absolute,
+        // offsets for position:relative. Previously dropped — absolutely
+        // positioned navigation stacked at the containing block origin.
+        inset: TaffyRect {
+            top: lp(cs.top),
+            right: lp(cs.right),
+            bottom: lp(cs.bottom),
+            left: lp(cs.left),
+        },
         flex_direction: match cs.flex_direction {
             rowser_parsing::cascade::FlexDirectionMode::Row => TaffyFlexDirection::Row,
             rowser_parsing::cascade::FlexDirectionMode::RowReverse => {
@@ -315,8 +334,43 @@ fn taffy_style(cs: &ComputedStyle) -> Style {
             width: LengthPercentage::length(cs.gap_column),
             height: LengthPercentage::length(cs.gap_row),
         },
+        // CSS grid templates: track sizing (px, %, fr, min/max-content).
+        grid_template_columns: cs
+            .grid_template_columns
+            .iter()
+            .map(track_sizing_fn)
+            .collect(),
+        grid_template_rows: cs.grid_template_rows.iter().map(track_sizing_fn).collect(),
         ..Style::default()
     }
+}
+
+/// Maps one cascade track (min, max) pair onto a taffy grid template
+/// component. Every track is a minmax pair; lonely bounds pair with auto.
+fn track_sizing_fn(track: &rowser_parsing::cascade::TrackRaw) -> GridTemplateComponent<String> {
+    use rowser_parsing::cascade::TrackBoundRaw as B;
+    let min_bound = |b: &B| -> MinTrackSizingFunction {
+        match b {
+            B::Auto => track_auto(),
+            B::MinContent => min_content(),
+            B::MaxContent => max_content(),
+            B::Px(v) => track_length(*v),
+            B::Percent(p) => track_percent(*p),
+            // fr is invalid as a minimum in CSS: degrade to auto.
+            B::Fr(_) => track_auto(),
+        }
+    };
+    let max_bound = |b: &B| -> MaxTrackSizingFunction {
+        match b {
+            B::Auto => track_auto(),
+            B::MinContent => min_content(),
+            B::MaxContent => max_content(),
+            B::Px(v) => track_length(*v),
+            B::Percent(p) => track_percent(*p),
+            B::Fr(f) => fr(*f),
+        }
+    };
+    GridTemplateComponent::Single(minmax(min_bound(&track.min), max_bound(&track.max)))
 }
 
 fn length_pct(l: rowser_parsing::cascade::LengthOrAuto, font_size: f32) -> LengthPercentage {
@@ -333,6 +387,8 @@ fn length_pct(l: rowser_parsing::cascade::LengthOrAuto, font_size: f32) -> Lengt
 }
 
 /// Builds a taffy box for `node` (recursively). Returns the taffy node.
+/// `parent_areas` carries the parent grid's named areas for
+/// `grid-area: name` placement of this node.
 #[allow(clippy::too_many_arguments)]
 fn build_box(
     dom: &Dom,
@@ -342,11 +398,14 @@ fn build_box(
     dom_to_taffy: &mut HashMap<NodeId, TaffyNode>,
     taffy_to_dom: &mut HashMap<TaffyNode, NodeId>,
     intrinsic: &HashMap<NodeId, (f32, f32)>,
+    parent_areas: &[rowser_parsing::cascade::NamedAreaRaw],
 ) -> Option<TaffyNode> {
     let style = styles.get(node)?;
     if style.display == DisplayMode::None {
         return None;
     }
+    // This node's named grid areas — children placed with `grid-area:`.
+    let own_areas = style.grid_template_areas.clone();
 
     let mut children: Vec<TaffyNode> = Vec::new();
     let mut text = String::new();
@@ -380,6 +439,7 @@ fn build_box(
                                 dom_to_taffy,
                                 taffy_to_dom,
                                 intrinsic,
+                                &own_areas,
                             ) {
                                 children.push(t);
                             }
@@ -401,6 +461,7 @@ fn build_box(
                             dom_to_taffy,
                             taffy_to_dom,
                             intrinsic,
+                            &own_areas,
                         ) {
                             children.push(t);
                         }
@@ -430,6 +491,41 @@ fn build_box(
     }
 
     let mut style = taffy_style(styles.get(node)?);
+    // Named grid-area placement: `grid-area: name` on this node resolves
+    // against the PARENT's template areas into explicit line placements
+    // (taffy lines are 1-based; our areas are 0-based half-open).
+    if let Some(name) = styles.get(node).and_then(|cs| cs.grid_area.as_ref()) {
+        if let Some(area) = parent_areas.iter().find(|a| &a.name == name) {
+            style.grid_row = Line {
+                start: GridPlacement::from_line_index(area.row_start as i16 + 1),
+                end: GridPlacement::from_line_index(area.row_end as i16 + 1),
+            };
+            style.grid_column = Line {
+                start: GridPlacement::from_line_index(area.col_start as i16 + 1),
+                end: GridPlacement::from_line_index(area.col_end as i16 + 1),
+            };
+        }
+    }
+    // Register the container's named areas (needed when taffy resolves
+    // placements spanning multiple tracks).
+    if !own_areas.is_empty() {
+        let row_count = own_areas.iter().map(|a| a.row_end).max().unwrap_or(0);
+        let column_count = own_areas.iter().map(|a| a.col_end).max().unwrap_or(0);
+        style.grid_template_areas = Some(GridTemplateAreas {
+            areas: own_areas
+                .iter()
+                .map(|a| GridTemplateArea {
+                    name: a.name.clone(),
+                    row_start: a.row_start,
+                    row_end: a.row_end,
+                    column_start: a.col_start,
+                    column_end: a.col_end,
+                })
+                .collect(),
+            row_count,
+            column_count,
+        });
+    }
     // Replaced-element sizing: video/audio default to 300x150; video
     // adopts the decoded aspect ratio when the height is auto and the
     // width is not a percentage (taffy 0.14 collapses percent-width +
@@ -658,12 +754,23 @@ fn extract(
     for child in children {
         if let Some(leaf) = tree.get_node_context(child) {
             // Final shaping at the settled width, with absolute offsets.
-            let width = tree
-                .layout(child)
+            // The leaf's own taffy layout location (its position inside the
+            // parent's content box — flex row slots, paddings, margins) is
+            // part of the glyph origin. Positioning text at the PARENT's
+            // origin instead made every text leaf in a flex row overlap at
+            // the container corner: nav bars, table rows (our table→flex
+            // mapping) and grid tracks collapsed into one jumbled column.
+            let child_layout = tree.layout(child);
+            let width = child_layout
+                .as_ref()
                 .map(|l| l.size.width)
                 .unwrap_or(0.0)
                 .max(0.0);
-            let glyphs = text::shape_at(leaf, font_system, Some(width), node_abs);
+            let origin = match child_layout.as_ref() {
+                Ok(l) => (node_abs.0 + l.location.x, node_abs.1 + l.location.y),
+                Err(_) => node_abs,
+            };
+            let glyphs = text::shape_at(leaf, font_system, Some(width), origin);
             if !glyphs.is_empty() {
                 out.text.push(TextRun {
                     node: leaf.node,

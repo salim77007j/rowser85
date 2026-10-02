@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use rowser_dom::{Dom, NodeId};
 use rowser_layout::LayoutResult;
-use rowser_parsing::cascade::{DisplayMode, StyleMap};
+use rowser_parsing::cascade::{ComputedStyle, DisplayMode, PositionMode, StyleMap};
 
 use crate::{DecodedImage, Rect};
 
@@ -71,8 +71,12 @@ pub type MediaOverlays = std::collections::HashMap<NodeId, MediaOverlay>;
 
 /// Builds the display list for a laid-out document.
 ///
-/// Paint order per element (document order): background → border → the
-/// element's own text runs → child elements.
+/// Paint order implements a simplified CSS stacking model: the in-flow
+/// layer paints in document order (background → border → text → children
+/// per element), then every *positioned* subtree (position ≠ static, or
+/// z-index set) paints after the in-flow layer, ordered by (z-index, DOM
+/// order). That is why an absolutely positioned dropdown or a relative
+/// nav overlay no longer ends up UNDER later content.
 pub fn build_display_list(
     dom: &Dom,
     styles: &StyleMap,
@@ -93,18 +97,45 @@ pub fn build_display_list(
             .or_default()
             .push(Arc::new(run.clone()));
     }
-    walk(
-        dom,
+    let mut ctx = WalkCtx {
         styles,
         layout,
         images,
         video_frames,
         media,
-        root,
-        &mut list,
-        &runs,
-    );
+        runs: &runs,
+        order: 0,
+        positioned: Vec::new(),
+    };
+    walk(dom, &mut ctx, root, &mut list);
+    // Positioned layer: sorted by (z, DOM order); painted above in-flow.
+    ctx.positioned
+        .sort_by(|a, b| (a.z, a.order).cmp(&(b.z, b.order)));
+    for entry in ctx.positioned {
+        list.commands.extend(entry.commands);
+    }
     list
+}
+
+/// One collected positioned subtree.
+struct PositionedEntry {
+    z: i32,
+    order: u32,
+    commands: Vec<DrawCmd>,
+}
+
+/// Shared immutable inputs plus the positioned-subtree collector.
+struct WalkCtx<'a> {
+    styles: &'a StyleMap,
+    layout: &'a LayoutResult,
+    images: &'a ImageMap,
+    video_frames: &'a ImageMap,
+    media: &'a MediaOverlays,
+    runs: &'a std::collections::HashMap<NodeId, Vec<Arc<rowser_layout::text::TextRun>>>,
+    /// Monotonic DOM order counter (stacking tiebreak).
+    order: u32,
+    /// Positioned subtrees collected during the walk.
+    positioned: Vec<PositionedEntry>,
 }
 
 fn layout_root(dom: &Dom) -> Option<NodeId> {
@@ -118,25 +149,20 @@ fn layout_root(dom: &Dom) -> Option<NodeId> {
     dom.subtree_elements(dom.document()).next()
 }
 
-#[allow(clippy::too_many_arguments)]
-fn walk(
-    dom: &Dom,
-    styles: &StyleMap,
-    layout: &LayoutResult,
-    images: &ImageMap,
-    video_frames: &ImageMap,
-    media: &MediaOverlays,
-    node: NodeId,
-    list: &mut DisplayList,
-    runs: &std::collections::HashMap<NodeId, Vec<Arc<rowser_layout::text::TextRun>>>,
-) {
-    let Some(style) = styles.get(node) else {
+/// True when the element participates in the positioned (upper) paint
+/// layer: positioned elements, or anything carrying an explicit z-index.
+fn is_positioned(style: &ComputedStyle) -> bool {
+    style.position != PositionMode::Static || style.z_index.is_some()
+}
+
+fn walk(dom: &Dom, ctx: &mut WalkCtx<'_>, node: NodeId, list: &mut DisplayList) {
+    let Some(style) = ctx.styles.get(node) else {
         return;
     };
     if style.display == DisplayMode::None {
         return;
     }
-    let Some(rect) = layout.rects.get(&node) else {
+    let Some(rect) = ctx.layout.rects.get(&node) else {
         return;
     };
     let rect = Rect {
@@ -146,6 +172,34 @@ fn walk(
         h: rect.h,
     };
 
+    let order = ctx.order;
+    ctx.order += 1;
+
+    // Positioned subtrees paint into their own layer, not the in-flow list.
+    if is_positioned(style) && ctx.order > 1 {
+        let mut sub = DisplayList::default();
+        paint_element(dom, ctx, node, style, rect, &mut sub);
+        ctx.positioned.push(PositionedEntry {
+            z: style.z_index.unwrap_or(0),
+            order,
+            commands: sub.commands,
+        });
+        return;
+    }
+
+    paint_element(dom, ctx, node, style, rect, list);
+}
+
+/// Paints one element (background, replaced content, border, text, then
+/// children in DOM order) into `list`.
+fn paint_element(
+    dom: &Dom,
+    ctx: &mut WalkCtx<'_>,
+    node: NodeId,
+    style: &ComputedStyle,
+    rect: Rect,
+    list: &mut DisplayList,
+) {
     // Background.
     if style.background_color.a > 0 {
         list.commands.push(DrawCmd::Rect {
@@ -155,7 +209,7 @@ fn walk(
     }
 
     // Images (img elements with a decoded image).
-    if let Some(image) = images.get(&node) {
+    if let Some(image) = ctx.images.get(&node) {
         list.commands.push(DrawCmd::Image {
             rect,
             image: Arc::clone(image),
@@ -168,7 +222,7 @@ fn walk(
     if let Some(element) = dom.element(node) {
         let tag = &*element.name.local;
         if tag == "video" || tag == "audio" {
-            if let Some(image) = video_frames.get(&node) {
+            if let Some(image) = ctx.video_frames.get(&node) {
                 let fitted =
                     fit_rect_aspect(rect, image.width.max(1) as f32, image.height.max(1) as f32);
                 if fitted.w < rect.w || fitted.h < rect.h {
@@ -189,7 +243,7 @@ fn walk(
             }
             // Native controls bar (controls attribute).
             if dom.get_attr(node, "controls").is_some() && rect.w > 60.0 && rect.h > 40.0 {
-                draw_media_controls(list, rect, media.get(&node));
+                draw_media_controls(list, rect, ctx.media.get(&node));
             }
         }
     }
@@ -207,7 +261,7 @@ fn walk(
     }
 
     // The element's own text.
-    if let Some(element_runs) = runs.get(&node) {
+    if let Some(element_runs) = ctx.runs.get(&node) {
         for run in element_runs {
             list.commands.push(DrawCmd::Text {
                 run: Arc::clone(run),
@@ -218,17 +272,7 @@ fn walk(
     // Children (flat tree: shadow content composes in at its host).
     for child in dom.flat_children(node) {
         if dom.element(child).is_some() {
-            walk(
-                dom,
-                styles,
-                layout,
-                images,
-                video_frames,
-                media,
-                child,
-                list,
-                runs,
-            );
+            walk(dom, ctx, child, list);
         }
     }
 }
