@@ -1493,7 +1493,6 @@ fn spawn_subresource_fetch(
     let request_url = request.url.clone();
     tracing::debug!(target: "rowser::engine", "spawning fetch task for {request_url}");
     state.runtime.spawn(async move {
-        tracing::debug!(target: "rowser::engine", "fetch task running for {request_url}");
         match rowser_networking::fetch(&network, request).await {
             Ok(response) => {
                 tracing::debug!(target: "rowser::engine", "fetch completed: {request_url} status {}", response.status);

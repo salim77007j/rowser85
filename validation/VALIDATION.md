@@ -273,6 +273,20 @@ pipeline + original ISOBMFF demuxer + openh264/symphonia/cpal behind it).
 11. Relative fetch URLs failed (`relative URL without a base`) — fetch
     resolves against the document URL now.
 
+### Session 4 follow-up: the external-script regression (critical)
+11. **External scripts never executed their real bodies.** Session 3's
+    "execute scripts exactly once" dedupe collided with the external-script
+    placeholder scheme: `document_fetched` inserts an EMPTY placeholder per
+    `<script src>`, `run_scripts` marked that placeholder executed (an
+    empty no-op), and the real body arriving later was skipped by the
+    dedupe. Every external script on the web had silently run as a no-op
+    since session 3 (the battery missed it: pages still paint from HTML +
+    CSS, and the e2e test that catches it was red in CI for the previous
+    session too). Fixed twice over: placeholders are replaced in place
+    when their body arrives, and the executor refuses to run empty
+    external entries. Battery re-run 29/29; `full_pipeline` e2e green;
+    media E2E re-verified.
+
 ### Journey status after session 4
 | Journey | Status |
 |---|---|

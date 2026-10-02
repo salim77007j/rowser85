@@ -853,7 +853,17 @@ impl Page {
             }
             SubresourceKind::Script => {
                 let text = String::from_utf8_lossy(&body).into_owned();
-                self.scripts.push((Some(url), text));
+                // The document pass already inserted an empty placeholder
+                // for this src; REPLACE it in place. Appending a second
+                // entry with the same name made the run-once dedupe pick
+                // the empty placeholder and never execute the real body.
+                let placeholder = self.scripts.iter_mut().find(|(src, code)| {
+                    src.as_deref() == Some(url.as_str()) && code.is_empty()
+                });
+                match placeholder {
+                    Some(entry) => entry.1 = text,
+                    None => self.scripts.push((Some(url), text)),
+                }
             }
             SubresourceKind::Image => {
                 if let Some(image) = DecodedImage::decode(&body) {
@@ -1233,6 +1243,12 @@ impl Page {
         let mut to_run: Vec<(usize, String, String)> = Vec::new();
         for (i, (src, code)) in scripts.iter().enumerate() {
             let name = src.clone().unwrap_or_else(|| format!("inline-{i}.js"));
+            // External scripts arrive as empty placeholders and are filled
+            // by subresource_fetched; executing the placeholder would burn
+            // the run-once slot on an empty body, so wait for the bytes.
+            if src.is_some() && code.is_empty() {
+                continue;
+            }
             // Chrome semantics: a script executes exactly once per document
             // load — never again on re-render.
             if self.executed_scripts.insert(name.clone()) {
