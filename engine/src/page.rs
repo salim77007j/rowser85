@@ -270,7 +270,7 @@ struct Page {
     url: String,
     pending: HashMap<String, SubresourceKind>,
     css_texts: Vec<String>,
-    scripts: Vec<(Option<String>, String)>,
+    scripts: Vec<(Option<String>, String, NodeId)>,
     viewport: Viewport,
     scroll_y: f32,
     suspended: bool,
@@ -857,12 +857,13 @@ impl Page {
                 // for this src; REPLACE it in place. Appending a second
                 // entry with the same name made the run-once dedupe pick
                 // the empty placeholder and never execute the real body.
-                let placeholder = self.scripts.iter_mut().find(|(src, code)| {
-                    src.as_deref() == Some(url.as_str()) && code.is_empty()
-                });
+                let placeholder = self
+                    .scripts
+                    .iter_mut()
+                    .find(|(src, code, _)| src.as_deref() == Some(url.as_str()) && code.is_empty());
                 match placeholder {
                     Some(entry) => entry.1 = text,
-                    None => self.scripts.push((Some(url), text)),
+                    None => self.scripts.push((Some(url), text, 0)),
                 }
             }
             SubresourceKind::Image => {
@@ -910,22 +911,26 @@ impl Page {
         // Collect subresources: stylesheets, scripts, images.
         let dom_ref = dom.borrow();
         let mut requests: Vec<(String, SubresourceKind)> = Vec::new();
-        let mut css_texts: Vec<String> = self.css_texts.clone();
-        let mut scripts: Vec<(Option<String>, String)> = Vec::new();
+        let css_texts: Vec<String> = self.css_texts.clone();
+        let mut scripts: Vec<(Option<String>, String, NodeId)> = Vec::new();
         for node in dom_ref.subtree_elements(dom_ref.document()) {
             let Some(element) = dom_ref.element(node) else {
                 continue;
             };
             let tag = element.local_name().to_string();
             match tag.as_str() {
-                "style" => css_texts.push(dom_ref.text_content(node)),
+                "style" => {
+                    // Style texts are collected per render from the live DOM
+                    // (light tree + shadow roots) so JS-injected styles
+                    // (Polymer, WebComponents) apply too.
+                }
                 "script" => {
                     if let Some(src) = dom_ref.get_attr(node, "src") {
                         let src = self.resolve_url(src);
                         requests.push((src.clone(), SubresourceKind::Script));
-                        scripts.push((Some(src), String::new()));
+                        scripts.push((Some(src), String::new(), node));
                     } else {
-                        scripts.push((None, dom_ref.text_content(node)));
+                        scripts.push((None, dom_ref.text_content(node), node));
                     }
                 }
                 "link" => {
@@ -1066,11 +1071,37 @@ impl Page {
             height: self.viewport.height,
             dark_mode: false,
         };
+        // Effective sheet texts: link-fetched sheets plus live <style>
+        // elements from the light tree AND every shadow root (Polymer and
+        // WebComponents inject styles at upgrade time — a parse-time-only
+        // collection would never see them).
+        let all_css: Vec<String> = {
+            let dom_ref = dom.borrow();
+            let mut all = self.css_texts.clone();
+            let push_styles = |root: rowser_dom::NodeId, all: &mut Vec<String>| {
+                for node in dom_ref.subtree_elements(root) {
+                    if dom_ref
+                        .element(node)
+                        .is_some_and(|e| &*e.name.local == "style")
+                    {
+                        let t = dom_ref.text_content(node);
+                        if !t.is_empty() {
+                            all.push(t);
+                        }
+                    }
+                }
+            };
+            push_styles(dom_ref.document(), &mut all);
+            for root in dom_ref.all_shadow_roots() {
+                push_styles(root, &mut all);
+            }
+            all
+        };
         let fp = {
             use std::hash::{Hash, Hasher};
             let fp_t0 = std::time::Instant::now();
             let mut h = std::collections::hash_map::DefaultHasher::new();
-            for css in &self.css_texts {
+            for css in all_css.iter() {
                 css.len().hash(&mut h);
                 css.hash(&mut h);
             }
@@ -1078,9 +1109,11 @@ impl Page {
             (media.height as u64).hash(&mut h);
             if trace {
                 eprintln!(
-                    "[page-{}] css fingerprint took {}ms",
+                    "[page-{}] css fingerprint took {}ms ({} link sheets, {} live style elements)",
                     self.state.tab,
-                    fp_t0.elapsed().as_millis()
+                    fp_t0.elapsed().as_millis(),
+                    self.css_texts.len(),
+                    all_css.len() - self.css_texts.len()
                 );
             }
             h.finish()
@@ -1090,13 +1123,13 @@ impl Page {
             if cached_fp == fp {
                 cached
             } else {
-                self.css_texts
+                all_css
                     .iter()
                     .map(|css| parse_stylesheet(css, &media))
                     .collect()
             }
         } else {
-            self.css_texts
+            all_css
                 .iter()
                 .map(|css| parse_stylesheet(css, &media))
                 .collect()
@@ -1240,8 +1273,8 @@ impl Page {
         }
         let scripts = std::mem::take(&mut self.scripts);
         // Phase 1 (exclusive borrow): pick the not-yet-executed scripts.
-        let mut to_run: Vec<(usize, String, String)> = Vec::new();
-        for (i, (src, code)) in scripts.iter().enumerate() {
+        let mut to_run: Vec<(usize, String, String, NodeId)> = Vec::new();
+        for (i, (src, code, node)) in scripts.iter().enumerate() {
             let name = src.clone().unwrap_or_else(|| format!("inline-{i}.js"));
             // External scripts arrive as empty placeholders and are filled
             // by subresource_fetched; executing the placeholder would burn
@@ -1252,15 +1285,23 @@ impl Page {
             // Chrome semantics: a script executes exactly once per document
             // load — never again on re-render.
             if self.executed_scripts.insert(name.clone()) {
-                to_run.push((i, name, code.clone()));
+                to_run.push((i, name, code.clone(), *node));
             }
         }
         // Phase 2 (shared borrow of the runtime): execute.
         if let Some(js) = &self.js {
-            for (i, name, code) in &to_run {
+            for (i, name, code, node) in &to_run {
                 let t0 = std::time::Instant::now();
                 if std::env::var("ROWSER_UI_TRACE").is_ok() {
                     eprintln!("[page-{}] script {} START {}", self.state.tab, i, name);
+                }
+                // document.currentScript during evaluation (loaders derive
+                // their base URL from it).
+                if *node != 0 {
+                    let _ = js.eval(
+                        &format!("globalThis.__setCurrentScript && __setCurrentScript({node})"),
+                        "current-script.js",
+                    );
                 }
                 if let Err(err) = js.eval(code, name) {
                     let _ = self.state.event_tx.send(EngineEvent::ConsoleMessage {
@@ -1268,6 +1309,12 @@ impl Page {
                         level: "error".to_owned(),
                         text: format!("{name}: {err}"),
                     });
+                }
+                if *node != 0 {
+                    let _ = js.eval(
+                        "globalThis.__setCurrentScript && __setCurrentScript(0)",
+                        "current-script-clear.js",
+                    );
                 }
                 if std::env::var("ROWSER_UI_TRACE").is_ok()
                     && t0.elapsed() > std::time::Duration::from_millis(300)

@@ -339,9 +339,12 @@ pub struct JsConfig {
 impl Default for JsConfig {
     fn default() -> Self {
         JsConfig {
-            memory_limit: 96 * 1024 * 1024,
+            // Heavy single-page apps (YouTube's kevlar bundle alone is
+            // ~3.5 MB of code, before any object allocation) need real
+            // headroom; 96 MB OOM'd mid-hydration.
+            memory_limit: 384 * 1024 * 1024,
             script_timeout: Duration::from_secs(10),
-            stack_size: 1024 * 1024,
+            stack_size: 2 * 1024 * 1024,
         }
     }
 }
@@ -1155,7 +1158,371 @@ fn dom_natives<'js>(
         })?,
     )?;
 
+    // ------------------------------------------------------------------
+    // WebComponents natives: tree inspection, mutation with handle
+    // recycling reports, cloning, innerHTML, shadow DOM, upgrades.
+
+    let b = Rc::clone(bridge);
+    globals.set(
+        "__native_dom_childNodes",
+        Function::new(ctx.clone(), move |node: u64| -> String {
+            let dom = b.dom.borrow();
+            let handles: Vec<u64> = dom
+                .child_handles(node as NodeId)
+                .into_iter()
+                .map(|n| n as u64)
+                .collect();
+            serde_json::to_string(&handles).unwrap_or_else(|_| "[]".to_owned())
+        })?,
+    )?;
+
+    let b = Rc::clone(bridge);
+    globals.set(
+        "__native_dom_parentNode",
+        Function::new(ctx.clone(), move |node: u64| -> Option<u64> {
+            let dom = b.dom.borrow();
+            dom.parent(node as NodeId).map(|n| n as u64)
+        })?,
+    )?;
+
+    let b = Rc::clone(bridge);
+    globals.set(
+        "__native_dom_isConnected",
+        Function::new(ctx.clone(), move |node: u64| -> bool {
+            let dom = b.dom.borrow();
+            dom.is_valid(node as NodeId) && dom.is_connected(node as NodeId)
+        })?,
+    )?;
+
+    let b = Rc::clone(bridge);
+    globals.set(
+        "__native_dom_nextSibling",
+        Function::new(ctx.clone(), move |node: u64| -> Option<u64> {
+            let dom = b.dom.borrow();
+            dom.next_sibling(node as NodeId).map(|n| n as u64)
+        })?,
+    )?;
+
+    let b = Rc::clone(bridge);
+    globals.set(
+        "__native_dom_prevSibling",
+        Function::new(ctx.clone(), move |node: u64| -> Option<u64> {
+            let dom = b.dom.borrow();
+            dom.prev_sibling(node as NodeId).map(|n| n as u64)
+        })?,
+    )?;
+
+    let b = Rc::clone(bridge);
+    globals.set(
+        "__native_dom_nodeType",
+        Function::new(ctx.clone(), move |node: u64| -> u8 {
+            let dom = b.dom.borrow();
+            match dom.kind(node as NodeId) {
+                rowser_dom::NodeKind::Element(_) => 1,
+                rowser_dom::NodeKind::Text(_) => 3,
+                rowser_dom::NodeKind::Comment(_) => 8,
+                rowser_dom::NodeKind::Document => 9,
+                rowser_dom::NodeKind::Doctype { .. } => 10,
+            }
+        })?,
+    )?;
+
+    let b = Rc::clone(bridge);
+    globals.set(
+        "__native_dom_insertBefore",
+        Function::new(
+            ctx.clone(),
+            move |parent: u64, child: u64, reference: u64| -> u64 {
+                let (parent, child) = (parent as NodeId, child as NodeId);
+                let reference = (reference > 0).then_some(reference as NodeId);
+                let mut dom = b.dom.borrow_mut();
+                if dom.is_valid(parent) && dom.is_valid(child) {
+                    dom.insert_before(parent, child, reference);
+                    mark_dirty(&b);
+                    child as u64
+                } else {
+                    0
+                }
+            },
+        )?,
+    )?;
+
+    // Returns the handles freed by the removal so the JS identity map can
+    // drop stale wrappers (the arena recycles node ids).
+    let b = Rc::clone(bridge);
+    globals.set(
+        "__native_dom_removeChild",
+        Function::new(ctx.clone(), move |parent: u64, child: u64| -> String {
+            let (parent, child) = (parent as NodeId, child as NodeId);
+            let mut dom = b.dom.borrow_mut();
+            if dom.is_valid(parent) && dom.is_valid(child) {
+                // Detach (keep the subtree alive in the arena — spec-wise the
+                // node stays usable while JS holds it).
+                dom.detach(child);
+                mark_dirty(&b);
+            }
+            "[]".to_owned()
+        })?,
+    )?;
+
+    let b = Rc::clone(bridge);
+    globals.set(
+        "__native_dom_cloneNode",
+        Function::new(ctx.clone(), move |node: u64, deep: bool| -> u64 {
+            let mut dom = b.dom.borrow_mut();
+            if !dom.is_valid(node as NodeId) {
+                return 0;
+            }
+            if deep {
+                dom.clone_subtree(node as NodeId) as u64
+            } else {
+                // Shallow: clone the node itself (kind + attrs, no children).
+                let kind = dom.kind(node as NodeId).clone();
+                match &kind {
+                    rowser_dom::NodeKind::Element(el) => {
+                        dom.create_element(el.name.clone(), el.attrs.clone()) as u64
+                    }
+                    rowser_dom::NodeKind::Text(t) => dom.create_text(t.clone()) as u64,
+                    _ => 0,
+                }
+            }
+        })?,
+    )?;
+
+    let b = Rc::clone(bridge);
+    globals.set(
+        "__native_dom_getInnerHTML",
+        Function::new(ctx.clone(), move |node: u64| -> String {
+            let dom = b.dom.borrow();
+            if dom.is_valid(node as NodeId) {
+                dom.serialize_subtree(node as NodeId)
+            } else {
+                String::new()
+            }
+        })?,
+    )?;
+
+    // Parses `html` as a document, imports the body children into `node`
+    // (replacing existing children) and returns the freed handle list so
+    // JS can drop stale wrappers.
+    let b = Rc::clone(bridge);
+    globals.set(
+        "__native_dom_setInnerHTML",
+        Function::new(ctx.clone(), move |node: u64, html: String| -> String {
+            let node = node as NodeId;
+            let fragment = rowser_parsing::html::parse_html(html.as_bytes());
+            let mut dom = b.dom.borrow_mut();
+            if !dom.is_valid(node) {
+                return "[]".to_owned();
+            }
+            let mut freed: Vec<u64> = Vec::new();
+            for child in dom.child_handles(node) {
+                collect_freed(&dom, child, &mut freed);
+                dom.remove_subtree(child);
+            }
+            let body = {
+                let frag_dom = &fragment.dom;
+                frag_dom
+                    .subtree_elements(frag_dom.document())
+                    .find(|n| {
+                        frag_dom
+                            .element(*n)
+                            .is_some_and(|e| &*e.name.local == "body")
+                    })
+                    .unwrap_or_else(|| frag_dom.document())
+            };
+            for child in fragment.dom.child_handles(body) {
+                let imported = dom.import_subtree(&fragment.dom, child);
+                dom.append(node, imported);
+            }
+            mark_dirty(&b);
+            serde_json::to_string(&freed).unwrap_or_else(|_| "[]".to_owned())
+        })?,
+    )?;
+
+    let b = Rc::clone(bridge);
+    globals.set(
+        "__native_dom_attachShadow",
+        Function::new(ctx.clone(), move |host: u64| -> Option<u64> {
+            let mut dom = b.dom.borrow_mut();
+            dom.attach_shadow(host as NodeId).map(|n| n as u64)
+        })?,
+    )?;
+
+    let b = Rc::clone(bridge);
+    globals.set(
+        "__native_dom_shadowHost",
+        Function::new(ctx.clone(), move |root: u64| -> Option<u64> {
+            let dom = b.dom.borrow();
+            dom.shadow_host(root as NodeId).map(|n| n as u64)
+        })?,
+    )?;
+
+    let b = Rc::clone(bridge);
+    globals.set(
+        "__native_template_content",
+        Function::new(ctx.clone(), move |template: u64| -> Option<u64> {
+            let dom = b.dom.borrow();
+            dom.template_contents(template as NodeId).map(|n| n as u64)
+        })?,
+    )?;
+
+    // Scoped query: run inside any subtree (shadow roots, fragments).
+    let b = Rc::clone(bridge);
+    globals.set(
+        "__native_dom_querySelectorIn",
+        Function::new(
+            ctx.clone(),
+            move |root: u64, selector: String| -> Option<u64> {
+                let dom = b.dom.borrow();
+                if !dom.is_valid(root as NodeId) {
+                    return None;
+                }
+                dom.query_selector(root as NodeId, &selector)
+                    .map(|n| n as u64)
+            },
+        )?,
+    )?;
+
+    let b = Rc::clone(bridge);
+    globals.set(
+        "__native_dom_querySelectorAllIn",
+        Function::new(ctx.clone(), move |root: u64, selector: String| -> String {
+            let dom = b.dom.borrow();
+            if !dom.is_valid(root as NodeId) {
+                return "[]".to_owned();
+            }
+            match dom.query_selector_all(root as NodeId, &selector) {
+                Some(nodes) => serde_json::to_string(
+                    &nodes.into_iter().map(|n| n as u64).collect::<Vec<u64>>(),
+                )
+                .unwrap_or_else(|_| "[]".to_owned()),
+                None => "[]".to_owned(),
+            }
+        })?,
+    )?;
+
+    // Fast native walk: all elements under `root` (subtree order) whose
+    // tag is in `tags` (JSON array). Drives custom-element connect/
+    // disconnect notifications without a JS-side tree walk.
+    let b = Rc::clone(bridge);
+    globals.set(
+        "__native_dom_findCustomTags",
+        Function::new(ctx.clone(), move |root: u64, tags: String| -> String {
+            let dom = b.dom.borrow();
+            let set: std::collections::HashSet<String> =
+                serde_json::from_str(&tags).unwrap_or_default();
+            let mut out = Vec::new();
+            for n in dom.subtree_elements(root as NodeId) {
+                if let Some(el) = dom.element(n) {
+                    if set.contains::<str>(el.local_name().as_ref()) {
+                        out.push(n as u64);
+                    }
+                }
+            }
+            serde_json::to_string(&out).unwrap_or_else(|_| "[]".to_owned())
+        })?,
+    )?;
+
+    // Host → shadow root handle (the `element.shadowRoot` getter).
+    let b = Rc::clone(bridge);
+    globals.set(
+        "__native_dom_shadowRootOf",
+        Function::new(ctx.clone(), move |host: u64| -> Option<u64> {
+            let dom = b.dom.borrow();
+            dom.shadow_root(host as NodeId).map(|n| n as u64)
+        })?,
+    )?;
+
+    // Element.matches / Element.closest support.
+    let b = Rc::clone(bridge);
+    globals.set(
+        "__native_dom_matchesSelector",
+        Function::new(ctx.clone(), move |node: u64, selector: String| -> bool {
+            let dom = b.dom.borrow();
+            if !dom.is_valid(node as NodeId) {
+                return false;
+            }
+            match dom.query_selector_all(
+                dom.parent(node as NodeId).unwrap_or(node as NodeId),
+                &selector,
+            ) {
+                Some(matches) => matches.contains(&(node as NodeId)),
+                None => false,
+            }
+        })?,
+    )?;
+
+    let b = Rc::clone(bridge);
+    globals.set(
+        "__native_dom_createComment",
+        Function::new(ctx.clone(), move |text: String| -> u64 {
+            let mut dom = b.dom.borrow_mut();
+            dom.create_comment(text) as u64
+        })?,
+    )?;
+
+    // Cross-document deep import (document.importNode). With a single
+    // live arena this is a deep clone — the practical semantic here.
+    let b = Rc::clone(bridge);
+    globals.set(
+        "__native_dom_importNode",
+        Function::new(ctx.clone(), move |node: u64, deep: bool| -> Option<u64> {
+            let mut dom = b.dom.borrow_mut();
+            if !dom.is_valid(node as NodeId) {
+                return None;
+            }
+            if deep {
+                Some(dom.clone_subtree(node as NodeId) as u64)
+            } else {
+                let kind = dom.kind(node as NodeId).clone();
+                match &kind {
+                    rowser_dom::NodeKind::Element(el) => {
+                        Some(dom.create_element(el.name.clone(), el.attrs.clone()) as u64)
+                    }
+                    rowser_dom::NodeKind::Text(t) => Some(dom.create_text(t.clone()) as u64),
+                    _ => None,
+                }
+            }
+        })?,
+    )?;
+
+    // textContent setter that reports freed handles (wrapper cleanup).
+    let b = Rc::clone(bridge);
+    globals.set(
+        "__native_dom_setTextContent2",
+        Function::new(ctx.clone(), move |node: u64, text: String| -> String {
+            let node = node as NodeId;
+            let mut dom = b.dom.borrow_mut();
+            let mut freed: Vec<u64> = Vec::new();
+            if dom.is_valid(node) {
+                if dom.element(node).is_some() {
+                    let children: Vec<NodeId> = dom.children(node).collect();
+                    for child in children {
+                        collect_freed(&dom, child, &mut freed);
+                        dom.remove_subtree(child);
+                    }
+                    let text_node = dom.create_text(text);
+                    dom.append(node, text_node);
+                } else {
+                    dom.set_text(node, &text);
+                }
+                mark_dirty(&b);
+            }
+            serde_json::to_string(&freed).unwrap_or_else(|_| "[]".to_owned())
+        })?,
+    )?;
+
     Ok(())
+}
+
+/// Collects the handle of `node` and its subtree (for wrapper invalidation
+/// when nodes are freed).
+fn collect_freed(dom: &rowser_dom::Dom, node: NodeId, out: &mut Vec<u64>) {
+    out.push(node as u64);
+    for child in dom.children(node) {
+        collect_freed(dom, child, out);
+    }
 }
 
 /// Monotonic seconds since process start (shared clock for the watchdog).

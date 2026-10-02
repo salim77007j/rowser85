@@ -8,6 +8,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+log = "0.4"
 cosmic-text = "0.17.0"
 rowser-dom = { path = "../dom" }
 rowser-parsing = { path = "../parsing" }

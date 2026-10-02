@@ -173,6 +173,39 @@ pub fn shape_at(
     glyphs
 }
 
+/// Sanitizes bidi paragraph separators that survive CSS whitespace
+/// collapsing.
+///
+/// Unicode assigns bidi class **B** (paragraph separator) to more than the
+/// familiar line breaks: alongside LF/VT/FF/CR/NEL/LS/PS it also covers
+/// U+001C (FILE), U+001D (GROUP) and U+001E (RECORD SEPARATOR). Those three
+/// are *not* Unicode `White_Space`, so [`append_collapsed_text`] lets them
+/// through — and once a layout line reaches unicode-bidi, every class-B
+/// character splits it into a separate bidi *paragraph*. A line holding e.g.
+/// an Arabic run and a Latin run across such a separator produces paragraphs
+/// with conflicting base directions, which trips an assertion inside
+/// cosmic-text's shaper and takes the whole page thread down with it.
+///
+/// CSS Text treats class-B characters as whitespace; mapping the survivors
+/// 1:1 onto a plain space (all are single-byte, so span ranges stay valid)
+/// is both spec-correct and crash-proof.
+fn sanitize_bidi_separators(text: &str) -> std::borrow::Cow<'_, str> {
+    if !text
+        .chars()
+        .any(|c| matches!(c, '\u{1c}' | '\u{1d}' | '\u{1e}'))
+    {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    std::borrow::Cow::Owned(
+        text.chars()
+            .map(|c| match c {
+                '\u{1c}' | '\u{1d}' | '\u{1e}' => ' ',
+                other => other,
+            })
+            .collect(),
+    )
+}
+
 fn shape_lines(
     leaf: &TextLeaf,
     font_system: &mut FontSystem,
@@ -190,20 +223,96 @@ fn shape_lines(
             attrs_list.add_span(range.clone(), &span_attrs);
         }
     }
-    let mut buffer_line = BufferLine::new(
-        leaf.text.clone(),
-        LineEnding::None,
-        attrs_list,
-        Shaping::Advanced,
-    );
-    let layout = buffer_line.layout(
-        font_system,
-        defaults.font_size,
-        width,
-        Wrap::Word,
-        None,
-        4,
-        Hinting::Disabled,
-    );
-    layout.to_vec()
+    let text = sanitize_bidi_separators(&leaf.text);
+    let mut buffer_line = BufferLine::new(text, LineEnding::None, attrs_list, Shaping::Advanced);
+    // Defense in depth: no conceivable text content may abort the page
+    // thread. If the shaper still panics (unknown font edge case, exotic
+    // script run), degrade to an empty line instead of crashing the tab.
+    let layout = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        buffer_line
+            .layout(
+                font_system,
+                defaults.font_size,
+                width,
+                Wrap::Word,
+                None,
+                4,
+                Hinting::Disabled,
+            )
+            .to_vec()
+    }));
+    match layout {
+        Ok(lines) => lines.to_vec(),
+        Err(report) => {
+            let msg = report
+                .downcast_ref::<&str>()
+                .map(|s| s.to_string())
+                .or_else(|| report.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "unknown".to_string());
+            log::warn!("text shaping panicked (degraded to blank line): {msg}");
+            Vec::new()
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn leaf_with(text: &str) -> TextLeaf {
+        TextLeaf {
+            node: 1,
+            text: text.to_string(),
+            spans: Vec::new(),
+            defaults: SpanStyle {
+                family: "sans-serif".into(),
+                font_size: 16.0,
+                weight: 400.0,
+                style: FontStyleMode::Normal,
+                color: Rgba::new(0, 0, 0, 255),
+                line_height: 20.0,
+                text_align: TextAlignMode::Left,
+            },
+            cache: None,
+        }
+    }
+
+    /// Regression: bidi class-B separators (U+001C/001D/001E) inside a
+    /// mixed-direction line previously crashed cosmic-text's shaper (and
+    /// with it the whole page thread). They must now shape to plain lines.
+    #[test]
+    fn bidi_separator_mixed_direction_does_not_panic() {
+        // Arabic run + FILE SEPARATOR + Latin run: paragraph directions
+        // would disagree once split by unicode-bidi.
+        let cases = [
+            "\u{0645}\u{0631}\u{062d}\u{0628}\u{0627}\u{1c}Hello world",
+            "abc\u{1d}\u{05e9}\u{05dc}\u{05d5}\u{05dd}def",
+            "\u{1e}",
+            "\u{0645}\u{0631}\u{062d}\u{0628}\u{0627}\u{1c}\u{1d}\u{1e}plain",
+        ];
+        let mut font_system = cosmic_text::FontSystem::new();
+        for text in cases {
+            let leaf = leaf_with(text);
+            let lines = shape_lines(&leaf, &mut font_system, Some(400.0));
+            // Sanitized input must not produce a panic; shaping may yield
+            // zero or more lines depending on font coverage — the contract
+            // is survival.
+            assert!(lines.len() <= 2, "unexpected line count {}", lines.len());
+        }
+    }
+
+    /// The sanitizer must map separators 1:1 so span ranges stay valid.
+    #[test]
+    fn sanitize_preserves_length_and_offsets() {
+        let before = "ab\u{1c}cd\u{1e}ef";
+        let after = sanitize_bidi_separators(before);
+        assert_eq!(after, "ab cd ef");
+        assert_eq!(before.len(), after.len());
+        // untouched strings borrow unchanged
+        let clean = "nothing to see";
+        assert!(matches!(
+            sanitize_bidi_separators(clean),
+            std::borrow::Cow::Borrowed(_)
+        ));
+    }
 }

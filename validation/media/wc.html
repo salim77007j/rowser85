@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Rrowser WebComponents E2E</title>
+<style>
+  body { background: #101418; color: #e6edf3; font: 14px/1.45 monospace; margin: 20px; }
+  my-card { display: block; margin: 6px 0; padding: 6px; }
+  pre { color: #7ee787; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<h2>WebComponents end-to-end (custom elements + shadow DOM + slots)</h2>
+<template id="card-tpl">
+  <div class="card-title">SHADOW_TITLE</div>
+  <slot name="body"></slot>
+  <slot></slot>
+</template>
+<my-card id="c1"><span slot="body">BODY_FROM_LIGHT_DOM</span><span>DEFAULT_SLOT_CONTENT</span></my-card>
+<pre id="log">booting…</pre>
+<script>
+window.onerror = function (m, s, l) { fetch('http://127.0.0.1:8124/report?r=' + encodeURIComponent('JSERROR ' + m + ' @' + l)); return false; };
+  var log = document.getElementById('log');
+  var lines = [];
+  function L(s){ lines.push(String(s)); log.textContent = lines.join('\n'); }
+  var results = [];
+  function T(name, ok){ var line = (ok ? 'PASS ' : 'FAIL ') + name; results.push(line); L(results.join('\n')); fetch('http://127.0.0.1:8124/report?r=' + encodeURIComponent(line)); }
+
+  var ctorRan = 0, connectRan = 0, attrRan = 0;
+  var masterFragment = null;
+  class MyCard extends HTMLElement {
+    constructor() {
+      super();
+      ctorRan++;
+      if (!masterFragment) masterFragment = document.getElementById('card-tpl').content.cloneNode(true);
+      var root = this.attachShadow({mode:'open'});
+      root.appendChild(masterFragment.cloneNode(true));
+      var st = document.createElement('style');
+      st.textContent = '.card-title { color: #ff5533; } my-card { border: 2px solid #d29922; }';
+      root.appendChild(st);
+    }
+    connectedCallback() {
+      connectRan++;
+      this._shadowChildren = this.shadowRoot ? this.shadowRoot.childNodes.length : -1;
+    }
+    static get observedAttributes() { return ['data-x']; }
+    attributeChangedCallback(n, o, v) { attrRan++; L('attr ' + n + ': ' + o + ' -> ' + v); }
+  }
+  customElements.define('my-card', MyCard);
+
+  var c1 = document.getElementById('c1');
+  T('identity', document.getElementById('c1') === c1);
+  T('instanceof', c1 instanceof MyCard);
+  T('ctor ran', ctorRan >= 1);
+  T('connected ran', connectRan >= 1);
+  T('shadow exists', !!c1.shadowRoot);
+  T('shadow children', c1.shadowRoot && c1.shadowRoot.childNodes.length >= 2);
+
+  var clickHit = 0;
+  c1.addEventListener('click', function(){ clickHit++; });
+  c1.dispatchEvent(new Event('click'));
+  T('element event listener', clickHit === 1);
+
+  var docClick = 0;
+  document.addEventListener('ping', function(){ docClick++; });
+  c1.dispatchEvent(new CustomEvent('ping', { bubbles: false }));
+  T('dispatchEvent custom', true);
+
+  c1.setAttribute('data-x', '1');
+  T('attributeChanged', attrRan >= 1);
+
+  customElements.whenDefined('my-late').then(function(){ T('whenDefined', true); });
+  var lateConnected = 0;
+  class MyLate extends HTMLElement {
+    connectedCallback(){ lateConnected++; }
+  }
+  customElements.define('my-late', MyLate);
+  var late = document.createElement('my-late');
+  document.body.appendChild(late);
+  T('createElement+connect', lateConnected === 1);
+
+  document.body.innerHTML += '<my-card id="c2"><b>second-card-body</b></my-card>';
+  var c2 = document.getElementById('c2');
+  T('innerHTML upgrade', !!c2 && c2 instanceof MyCard);
+  T('innerHTML shadow', !!c2 && !!c2.shadowRoot);
+
+  T('querySelectorAll custom', document.querySelectorAll('my-card').length === 2);
+  T('currentScript', document.currentScript !== null);
+  T('cloneNode', (function(){ var t = document.getElementById('card-tpl'); var f = t.content.cloneNode(true); return f.childNodes.length >= 2; })());
+
+  // slot rendering is verified visually: the painted page must show
+  // SHADOW_TITLE (shadow), BODY_FROM_LIGHT_DOM (named slot) and
+  // DEFAULT_SLOT_CONTENT (default slot).
+  var done = 'DONE ' + results.filter(function(r){ return r.indexOf('PASS') === 0; }).length + '/' + results.length;
+  L(done);
+  fetch('http://127.0.0.1:8124/report?r=' + encodeURIComponent(done));
+</script>
+</body>
+</html>

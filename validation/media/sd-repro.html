@@ -1,0 +1,28 @@
+<html><head>
+<script nonce="a">window.Polymer=window.Polymer||{};window.Polymer.legacyOptimizations=true;window.Polymer.setPassiveTouchGestures=true;window.ShadyDOM={force:true,preferPerformance:true,noPatch:true};
+window.polymerSkipLoadingFontRoboto = true;</script>
+</head>
+<body>
+<pre id="log"></pre>
+<script src="wc-sd.js"></script>
+<script>
+function __report(label, e) {
+  var msg = label + ': ' + (e && e.stack ? e.stack : String(e));
+  document.getElementById('log').textContent += msg + '\n';
+  fetch('http://127.0.0.1:8124/report?r=' + encodeURIComponent(msg.slice(0, 600)));
+}
+try {
+  var sd = window.ShadyDOM || {};
+  var info = 'LOADED inUse=' + sd.inUse + ' Sb=' + sd.Sb + ' noPatch=' + sd.noPatch + ' flush=' + typeof sd.flush;
+  document.getElementById('log').textContent += info + '\n';
+  fetch('http://127.0.0.1:8124/report?r=' + encodeURIComponent(info));
+  // Exercise the ShadyDOM API the way YouTube does:
+  var host = document.createElement('my-host');
+  document.body.appendChild(host);
+  var root = host.attachShadow ? host.attachShadow({mode:'open'}) : null;
+  var info2 = 'attachShadow=' + (root ? 'ShadyRoot:' + (root && root.localName === 'shadow-root' ? 'shady' : typeof root) : 'none');
+  fetch('http://127.0.0.1:8124/report?r=' + encodeURIComponent(info2));
+  if (window.ShadyDOM && window.ShadyDOM.flush) { window.ShadyDOM.flush(); fetch('http://127.0.0.1:8124/report?r=' + encodeURIComponent('flush ok')); }
+} catch (e) { __report('EXC', e); }
+</script>
+</body></html>

@@ -1,0 +1,8 @@
+<html><head><script>window.ShadyDOM={force:true,preferPerformance:true,noPatch:true};</script></head><body>
+<script>
+'use strict';
+fetch('http://127.0.0.1:8124/report?r=' + encodeURIComponent('PAGE-RAN'));
+try { var o = { get x() { return 1 } }; o.x = 2; } catch (e) {
+  fetch('http://127.0.0.1:8124/report?r=' + encodeURIComponent('NOSETER stack: ' + (e.stack || 'NONE') + ' | ' + e.message));
+}
+</script></body></html>

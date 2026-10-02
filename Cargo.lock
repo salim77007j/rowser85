@@ -5039,6 +5039,7 @@ name = "rowser-layout"
 version = "0.1.0"
 dependencies = [
  "cosmic-text",
+ "log",
  "rowser-dom",
  "rowser-parsing",
  "taffy",

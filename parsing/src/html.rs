@@ -4,7 +4,6 @@
 //! [`TreeSink`] that writes directly into [`rowser_dom::Dom`].
 
 use std::cell::RefCell;
-use std::collections::HashMap;
 
 use encoding_rs::Encoding;
 use html5ever::driver::{parse_document, ParseOpts};
@@ -208,7 +207,6 @@ impl ElemName for DomElemName {
 /// held in a `RefCell` and released by [`TreeSink::finish`].
 pub struct DomSink {
     dom: RefCell<Dom>,
-    template_contents: RefCell<HashMap<NodeId, NodeId>>,
 }
 
 impl DomSink {
@@ -216,7 +214,6 @@ impl DomSink {
     pub fn new() -> Self {
         DomSink {
             dom: RefCell::new(Dom::new()),
-            template_contents: RefCell::new(HashMap::new()),
         }
     }
 
@@ -290,8 +287,12 @@ impl TreeSink for DomSink {
         let node = self.with_dom(|dom| dom.create_element(name, convert_attrs(attrs)));
         if flags.template {
             // The template contents live in a detached (invisible) holder.
-            let contents = self.with_dom(|dom| dom.create_comment("template-contents"));
-            self.template_contents.borrow_mut().insert(node, contents);
+            // The association is persisted in the Dom itself so post-parse
+            // consumers (template.content, cloneNode) can reach it.
+            self.with_dom(|dom| {
+                let contents = dom.create_comment("template-contents");
+                dom.set_template_contents(node, contents);
+            });
         }
         node
     }
@@ -337,10 +338,9 @@ impl TreeSink for DomSink {
     }
 
     fn get_template_contents(&self, target: &Self::Handle) -> Self::Handle {
-        *self
-            .template_contents
+        self.dom
             .borrow()
-            .get(target)
+            .template_contents(*target)
             .expect("template contents requested for non-template")
     }
 

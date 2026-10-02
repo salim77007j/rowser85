@@ -183,8 +183,8 @@ fn walk(
         }
     }
 
-    // Children.
-    for child in dom.children(node) {
+    // Children (flat tree: shadow content composes in at its host).
+    for child in dom.flat_children(node) {
         if dom.element(child).is_some() {
             walk(dom, styles, layout, images, video_frames, child, list, runs);
         }

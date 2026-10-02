@@ -556,7 +556,13 @@ pub fn compute_styles(dom: &Dom, author: &[ParsedStylesheet], media: &MediaConte
     let mut map = StyleMap::default();
     let mut caches = CachesWrap::default();
     let root = dom.document();
-    let nodes: Vec<NodeId> = std::iter::once(root).chain(dom.descendants(root)).collect();
+    // Flat-tree node set: the light document plus every shadow subtree
+    // (WebComponents). Shadow content composes into the light tree at its
+    // host; slotted light children keep their light-tree inheritance.
+    let mut nodes: Vec<NodeId> = std::iter::once(root).chain(dom.descendants(root)).collect();
+    for shadow_root in dom.all_shadow_roots() {
+        nodes.extend(dom.descendants(shadow_root));
+    }
     let trace = std::env::var("ROWSER_UI_TRACE").is_ok();
     let t0 = std::time::Instant::now();
     for (n, node) in nodes.iter().enumerate() {
@@ -571,7 +577,7 @@ pub fn compute_styles(dom: &Dom, author: &[ParsedStylesheet], media: &MediaConte
             continue;
         }
         let parent_style = dom
-            .parent_element(*node)
+            .flat_parent_element(*node)
             .and_then(|p| map.styles.get(&p))
             .cloned()
             .unwrap_or_default();

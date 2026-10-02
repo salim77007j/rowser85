@@ -343,7 +343,7 @@ fn build_box(
     let defaults = SpanStyle::from_style(style);
     let ctx = defaults.clone();
 
-    for child in dom.children(node) {
+    for child in dom.flat_children(node) {
         match dom.kind(child) {
             rowser_dom::NodeKind::Text(t) => {
                 append_collapsed_text(&mut text, &mut spans, t, &ctx);
@@ -418,7 +418,7 @@ fn build_box(
 /// True when the element subtree (excluding the element itself) contains
 /// block-level content — used to promote block-in-inline wrappers to boxes.
 fn has_block_descendant(dom: &Dom, styles: &StyleMap, node: NodeId) -> bool {
-    for child in dom.children(node) {
+    for child in dom.flat_children(node) {
         if dom.element(child).is_some() {
             let display = styles
                 .get(child)
@@ -448,7 +448,7 @@ fn collect_inline(
     text: &mut String,
     spans: &mut Vec<(std::ops::Range<usize>, SpanStyle)>,
 ) {
-    for child in dom.children(node) {
+    for child in dom.flat_children(node) {
         match dom.kind(child) {
             rowser_dom::NodeKind::Text(t) => {
                 append_collapsed_text(text, spans, t, &ctx);

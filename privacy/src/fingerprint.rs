@@ -16,10 +16,14 @@
 
 use serde::{Deserialize, Serialize};
 
-/// The user agent every session profile uses (Chrome-compatible, with a
-/// Rrowser brand token). Kept as a constant so the network layer, JS
-/// `navigator.userAgent`, and downloads all present the SAME identity — a
-/// mismatch between any of them is itself a fingerprinting signal.
+/// The user agent every session profile uses. Deliberately NOT a bare
+/// Chrome-clone: Google's bot detection cross-checks the UA against the
+/// TLS fingerprint — a Chrome-claiming UA over a rustls ClientHello is a
+/// classic bot signature and gets served 3 KB challenge stubs. The honest
+/// Rrowser brand token receives the real (ES5) app. Kept as a constant so
+/// the network layer, JS `navigator.userAgent`, and downloads all present
+/// the SAME identity — a mismatch between any of them is itself a
+/// fingerprinting signal.
 pub const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Rrowser/1.0 Chrome/140.0.0.0 Safari/537.36";
 
 /// Default Accept-Language presented on requests (negotiable via settings

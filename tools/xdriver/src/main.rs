@@ -229,12 +229,16 @@ fn type_char(conn: &RustConnection, map: &Keymap, ch: char) -> anyhow::Result<()
             }
         }
     }
-    // 2. Plain keysym (Latin-1: keysym == code point).
-    let sym = ch as u32;
-    if let Some(code) = map.by_sym.get(&sym).copied() {
-        fake_key(conn, code, true);
-        fake_key(conn, code, false);
-        return Ok(());
+    // 2. Plain keysym (Latin-1: keysym == code point). Uppercase letters
+    // share their keycode with the lowercase twin; pressing it bare
+    // translates to lowercase — route them to the shift path below.
+    if !(ch.is_alphabetic() && ch.is_uppercase()) {
+        let sym = ch as u32;
+        if let Some(code) = map.by_sym.get(&sym).copied() {
+            fake_key(conn, code, true);
+            fake_key(conn, code, false);
+            return Ok(());
+        }
     }
     // 3. Case counterpart (maps that only list one case per letter).
     let swapped = if ch.is_uppercase() {

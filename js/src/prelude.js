@@ -87,7 +87,7 @@
     const t = timers.get(id);
     if (!t) return;
     if (!t.interval) timers.delete(id);
-    try { t.cb.apply(null, t.args); } catch (e) { console.error(String(e)); }
+    try { t.cb.apply(null, t.args); } catch (e) { console.error(errString(e)); }
   };
 
   // ------------------------------------------------------------------ storage
@@ -196,17 +196,216 @@
   }
 
   // ------------------------------------------------------------------ DOM
+  // Wrapper identity: one JS object per arena node (NodeId → wrapper).
+  // Without it `document.getElementById('x') === getElementById('x')` was
+  // false, element listeners were lost, and custom-element instances could
+  // never be re-discovered — the prerequisite for WebComponents.
+  const wraps = new Map();
+  // Pending upgrade handle consumed by the Element constructor when a
+  // custom-element class is `new`ed onto an existing node.
+  let __wcUpgradeHandle = null;
+  // tag → { ctor, observed } for defined custom elements.
+  const registry = new Map();
+  // tag → [resolve] for pending whenDefined promises.
+  const definedResolvers = new Map();
+  // JSON array of registered tags for the native custom-subtree scan.
+  let registryTagsJson = '[]';
+
+  function errString(e) {
+    if (!e) return 'unknown error';
+    if (e instanceof Error) return e.stack || (e.name + ': ' + e.message);
+    return String(e);
+  }
+
+  function safeCall(target, method, ...args) {
+    try {
+      if (target && typeof target[method] === 'function') target[method](...args);
+    } catch (e) {
+      console.error(method + ' callback: ' + errString(e));
+    }
+  }
+
+  function refreshRegistryTags() {
+    registryTagsJson = JSON.stringify(Array.from(registry.keys()));
+  }
+
+  // Upgrade an existing arena node to its registered custom-element class.
+  // Constructs the instance with the node pre-bound (via
+  // __wcUpgradeHandle), registers it as the node's wrapper and fires
+  // connectedCallback when the node is in the document.
+  function tryUpgrade(handle, tag) {
+    const def = registry.get(tag);
+    if (!def) return null;
+    const existing = wraps.get(handle);
+    if (existing && existing._isCustom) return existing;
+    if (existing) wraps.delete(handle); // replace the plain wrapper
+    const prevPending = __wcUpgradeHandle;
+    __wcUpgradeHandle = handle;
+    let inst = null;
+    try {
+      inst = new def.ctor();
+    } catch (e) {
+      console.error('custom element constructor ' + tag + ': ' + ((e && e.message) || String(e)));
+    }
+    if (__wcUpgradeHandle === handle) __wcUpgradeHandle = null;
+    __wcUpgradeHandle = prevPending;
+    if (!inst || inst._h !== handle) {
+      // Constructor failed or misbehaved: fall back to a plain wrapper so
+      // the node stays usable.
+      if (inst && inst._h === 0) inst._h = handle;
+      else if (!inst) { const cls = (__htmlClassesRef || {})[tagClass(tag)] || Element; inst = new cls(handle); }
+    }
+    inst._isCustom = true;
+    inst._def = def;
+    inst._connected = false;
+    wraps.set(handle, inst);
+    if (__native_dom_isConnected(handle)) {
+      inst._connected = true;
+      safeCall(inst, 'connectedCallback');
+    }
+    return inst;
+  }
+
+  // After a subtree insertion: upgrade + connect every custom element it
+  // contains (the native scan keeps this cheap for large subtrees).
+  function afterInsert(rootHandle) {
+    if (!rootHandle) return;
+    if (!__native_dom_isConnected(rootHandle)) return;
+    const handles = JSON.parse(__native_dom_findCustomTags(rootHandle, registryTagsJson) || '[]');
+    for (const h of handles) {
+      const w = wraps.get(h);
+      if (w && w._isCustom) {
+        if (!w._connected) { w._connected = true; safeCall(w, 'connectedCallback'); }
+      } else if (!w) {
+        tryUpgrade(h, __native_dom_tagName(h));
+      }
+    }
+  }
+
+  // Before removal: collect custom descendants of a connected subtree so
+  // disconnectedCallback can fire after the detach.
+  function collectForDisconnect(rootHandle) {
+    if (!rootHandle || !__native_dom_isConnected(rootHandle)) return [];
+    return JSON.parse(__native_dom_findCustomTags(rootHandle, registryTagsJson) || '[]');
+  }
+  function fireDisconnected(handles) {
+    for (const h of handles) {
+      const w = wraps.get(h);
+      if (w && w._isCustom && w._connected) { w._connected = false; safeCall(w, 'disconnectedCallback'); }
+    }
+  }
+
+  function dropWrappers(freedJson) {
+    try {
+      const freed = JSON.parse(freedJson || '[]');
+      for (const h of freed) { wraps.delete(h); }
+    } catch (e) {}
+  }
+
   class Element {
-    constructor(handle) { this._h = handle; }
+    constructor(handle) {
+      let h = handle;
+      if (h === undefined || h === null) {
+        if (__wcUpgradeHandle !== null) { h = __wcUpgradeHandle; __wcUpgradeHandle = null; }
+        else { h = 0; }
+      }
+      this._h = h;
+      if (h) wraps.set(h, this);
+    }
     getAttribute(n) { const v = __native_dom_getAttr(this._h, String(n)); return (v === null || v === undefined) ? null : v; }
-    setAttribute(n, v) { __native_dom_setAttr(this._h, String(n), String(v)); }
-    removeAttribute(n) { __native_dom_removeAttr(this._h, String(n)); }
+    setAttribute(n, v) {
+      n = String(n); v = String(v);
+      const isObserved = this._isCustom && this._def && this._def.observed && this._def.observed.indexOf(n) >= 0;
+      const old = isObserved ? this.getAttribute(n) : null;
+      __native_dom_setAttr(this._h, n, v);
+      if (isObserved) safeCall(this, 'attributeChangedCallback', n, old, v);
+    }
+    removeAttribute(n) {
+      n = String(n);
+      const isObserved = this._isCustom && this._def && this._def.observed && this._def.observed.indexOf(n) >= 0;
+      const old = isObserved ? this.getAttribute(n) : null;
+      __native_dom_removeAttr(this._h, n);
+      if (isObserved) safeCall(this, 'attributeChangedCallback', n, old, null);
+    }
     hasAttribute(n) { return this.getAttribute(n) !== null; }
-    appendChild(child) { if (child && child._h) __native_dom_appendChild(this._h, child._h); return child; }
-    removeChild(child) { if (child && child._h) __native_dom_removeChild(this._h, child._h); return child; }
-    get parentNode() { return null; }
+    appendChild(child) {
+      if (child && child._h) {
+        if (child.nodeType === 11) {
+          // DocumentFragment: its children are moved, not the fragment.
+          const kids = JSON.parse(__native_dom_childNodes(child._h) || '[]');
+          for (const k of kids) { __native_dom_appendChild(this._h, k); afterInsert(k); }
+          return child;
+        }
+        __native_dom_appendChild(this._h, child._h);
+        afterInsert(child._h);
+      }
+      return child;
+    }
+    removeChild(child) {
+      if (child && child._h) {
+        const customs = collectForDisconnect(child._h);
+        __native_dom_removeChild(this._h, child._h);
+        fireDisconnected(customs);
+      }
+      return child;
+    }
+    insertBefore(child, ref) {
+      if (child && child._h) {
+        const refH = (ref && ref._h) ? ref._h : 0;
+        if (child.nodeType === 11) {
+          const kids = JSON.parse(__native_dom_childNodes(child._h) || '[]');
+          for (const k of kids) { __native_dom_insertBefore(this._h, k, refH); afterInsert(k); }
+          return child;
+        }
+        __native_dom_insertBefore(this._h, child._h, refH);
+        afterInsert(child._h);
+      }
+      return child;
+    }
+    replaceChild(newChild, oldChild) {
+      if (newChild && newChild._h && oldChild && oldChild._h) {
+        const customs = collectForDisconnect(oldChild._h);
+        this.insertBefore(newChild, oldChild);
+        this.removeChild(oldChild);
+        fireDisconnected(customs);
+      }
+      return oldChild;
+    }
+    get parentNode() { const h = __native_dom_parentNode(this._h); return h ? wrapElement(h) : null; }
+    get childNodes() { return JSON.parse(__native_dom_childNodes(this._h) || '[]').map(wrapElement); }
+    get children() { return this.childNodes.filter(function (n) { return n && n.nodeType === 1; }); }
+    get firstChild() { const kids = JSON.parse(__native_dom_childNodes(this._h) || '[]'); return kids.length ? wrapElement(kids[0]) : null; }
+    get nextSibling() { const h = __native_dom_nextSibling(this._h); return h ? wrapElement(h) : null; }
+    get previousSibling() { const h = __native_dom_prevSibling(this._h); return h ? wrapElement(h) : null; }
+    get nextElementSibling() { let n = this.nextSibling; while (n && n.nodeType !== 1) n = n.nextSibling; return n; }
+    get previousElementSibling() { let n = this.previousSibling; while (n && n.nodeType !== 1) n = n.previousSibling; return n; }
+    get parentElement() { const p = this.parentNode; return (p && p.nodeType === 1) ? p : null; }
+    get firstElementChild() { const c = this.children; return c.length ? c[0] : null; }
+    get lastElementChild() { const c = this.children; return c.length ? c[c.length - 1] : null; }
+    get childElementCount() { return this.children.length; }
+    get nodeValue() { return this.nodeType === 3 ? this.textContent : null; }
+    get nodeType() { return __native_dom_nodeType(this._h); }
+    get isConnected() { return !!__native_dom_isConnected(this._h); }
+    hasChildNodes() { return JSON.parse(__native_dom_childNodes(this._h) || '[]').length > 0; }
+    cloneNode(deep) {
+      const h = __native_dom_cloneNode(this._h, !!deep);
+      if (!h) return null;
+      return this.nodeType === 11 ? new DocumentFragment(h) : wrapElement(h);
+    }
+    get tagName() { return __native_dom_tagName(this._h); }
     get textContent() { return __native_dom_textContent(this._h); }
-    set textContent(t) { __native_dom_setTextContent(this._h, String(t)); }
+    set textContent(t) {
+      dropWrappers(__native_dom_setTextContent2(this._h, String(t)));
+      markCustomText(this._h);
+    }
+    get innerHTML() { return __native_dom_getInnerHTML(this._h); }
+    set innerHTML(html) {
+      dropWrappers(__native_dom_setInnerHTML(this._h, String(html)));
+      afterInsert(this._h);
+    }
+    get outerHTML() { return __native_dom_getInnerHTML(this._h); }
+    querySelector(sel) { const h = __native_dom_querySelectorIn(this._h, String(sel)); return h ? wrapElement(h) : null; }
+    querySelectorAll(sel) { return JSON.parse(__native_dom_querySelectorAllIn(this._h, String(sel)) || '[]').map(wrapElement); }
     get style() {
       const self = this;
       return new Proxy({}, {
@@ -215,10 +414,24 @@
       });
     }
     addEventListener(type, cb) {
-      __native_dom_addEventListener(this._h, String(type));
-      (this._ls = this._ls || {})[type] = cb;
+      type = String(type);
+      if (typeof cb !== 'function') return;
+      const ls = (this._ls = this._ls || {});
+      const list = (ls[type] = ls[type] || []);
+      if (list.indexOf(cb) < 0) list.push(cb);
     }
-    removeEventListener(type) { if (this._ls) delete this._ls[type]; }
+    removeEventListener(type, cb) {
+      const ls = this._ls;
+      if (!ls || !ls[type]) return;
+      if (cb) { const i = ls[type].indexOf(cb); if (i >= 0) ls[type].splice(i, 1); }
+      else delete ls[type];
+    }
+    dispatchEvent(ev) {
+      ev = ev || { type: 'unknown' };
+      ev.target = this;
+      fireAt(this._h, ev.type, ev);
+      return true;
+    }
     click() { __native_dom_click(this._h); }
     focus() {}
     blur() {}
@@ -226,12 +439,67 @@
     set id(v) { this.setAttribute('id', v); }
     get className() { return this.getAttribute('class') || ''; }
     set className(v) { this.setAttribute('class', v); }
-    get innerHTML() { return ''; }
-    get children() { return []; }
-    get firstChild() { return null; }
+    get classList() {
+      const self = this;
+      return {
+        add(...cs) { const cur = (self.getAttribute('class') || '').split(/\s+/).filter(Boolean); for (const c of cs) if (cur.indexOf(c) < 0) cur.push(String(c)); self.setAttribute('class', cur.join(' ')); },
+        remove(...cs) { const cur = (self.getAttribute('class') || '').split(/\s+/).filter(Boolean).filter(c => cs.indexOf(c) < 0); self.setAttribute('class', cur.join(' ')); },
+        contains(c) { return (self.getAttribute('class') || '').split(/\s+/).indexOf(String(c)) >= 0; },
+        toggle(c) { const cur = (self.getAttribute('class') || '').split(/\s+/).filter(Boolean); const i = cur.indexOf(String(c)); if (i >= 0) cur.splice(i, 1); else cur.push(String(c)); self.setAttribute('class', cur.join(' ')); return i < 0; },
+        get length() { return (self.getAttribute('class') || '').split(/\s+/).filter(Boolean).length; },
+      };
+    }
+    attachShadow(opts) {
+      const root = __native_dom_attachShadow(this._h);
+      if (root === null || root === undefined) return null;
+      return new ShadowRoot(root, this);
+    }
+    get shadowRoot() {
+      const h = __native_dom_shadowRootOf(this._h);
+      return h ? new ShadowRoot(h, this) : null;
+    }
+    getRootNode() { return document; }
+    closest(sel) {
+      let h = this._h;
+      let guard = 0;
+      while (h && guard++ < 100) {
+        const found = __native_dom_matchesSelector(h, String(sel));
+        if (found) return wrapElement(h);
+        h = __native_dom_parentNode(h);
+      }
+      return null;
+    }
+    matches(sel) { return !!__native_dom_matchesSelector(this._h, String(sel)); }
+    getBoundingClientRect() {
+      return { x: 0, y: 0, top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0 };
+    }
   }
 
+  function markCustomText(h) { /* replaced children are plain text — nothing to upgrade */ }
+
+  class ShadowRoot extends Element {
+    constructor(handle, host) {
+      super(handle);
+      this._host = host || null;
+    }
+    get nodeType() { return 11; }
+    get host() { return this._host || (function () { const h = __native_dom_shadowHost(this._h); return h ? wrapElement(h) : null; })(); }
+    get mode() { return 'open'; }
+    getElementById(id) {
+      const h = __native_dom_querySelectorIn(this._h, '#' + String(id).replace(/[^\w-]/g, ''));
+      return h ? wrapElement(h) : null;
+    }
+  }
+  globalThis.ShadowRoot = ShadowRoot;
+
+  class DocumentFragment extends Element {
+    constructor(handle) { super(handle); }
+    get nodeType() { return 11; }
+  }
+  globalThis.DocumentFragment = DocumentFragment;
+
   class Document {
+    constructor() { this._currentScript = null; }
     getElementById(id) { const h = __native_dom_getElementById(String(id)); return (h === null || h === undefined || h === 0) ? null : wrapElement(h); }
     querySelector(sel) { const h = __native_dom_querySelector(String(sel)); return (h === null || h === undefined) ? null : wrapElement(h); }
     querySelectorAll(sel) {
@@ -242,32 +510,58 @@
     getElementsByClassName(cls) { return this.querySelectorAll('.' + String(cls)); }
     getElementsByName() { return []; }
     createElement(tag) {
-      const h = __native_dom_createElement(String(tag));
-      const cls = htmlClasses[tagClass(String(tag).toLowerCase())] || Element;
+      tag = String(tag);
+      const lower = tag.toLowerCase();
+      const h = __native_dom_createElement(lower);
+      if (registry.has(lower)) return tryUpgrade(h, lower);
+      const cls = htmlClasses[tagClass(lower)] || Element;
       return new cls(h);
     }
-    createTextNode(text) { return new Element(__native_dom_createTextNode(String(text))); }
-    createDocumentFragment() { return new Element(__native_dom_createElement('fragment')); }
-    get body() { const h = __native_dom_body(); return h === null ? null : new Element(h); }
-    get head() { const h = __native_dom_querySelector('head'); return h === null ? null : new Element(h); }
-    get documentElement() { const h = __native_dom_html(); return h === null ? null : new Element(h); }
+    createTextNode(text) { return wrapElement(__native_dom_createTextNode(String(text))); }
+    createComment(text) { return wrapElement(__native_dom_createComment(String(text))); }
+    createDocumentFragment() { return new DocumentFragment(__native_dom_createComment('fragment')); }
+    importNode(node, deep) {
+      if (!node || !node._h) return node;
+      const h = __native_dom_importNode(node._h, !!deep);
+      return h ? wrapElement(h) : null;
+    }
+    adoptNode(node) { return node; }
+    get body() { const h = __native_dom_body(); return h === null ? null : wrapElement(h); }
+    get head() { const h = __native_dom_querySelector('head'); return h === null ? null : wrapElement(h); }
+    get documentElement() { const h = __native_dom_html(); return h === null ? null : wrapElement(h); }
     get title() { return __native_document_title(); }
     set title(t) { /* engine-managed; JS title sets are a UI nicety for later */ }
-    get readyState() { return 'complete'; }
+    // Scripts here run after the document is parsed and subresources are
+    // in — the 'complete' answer keeps `readyState === 'complete'` bootstraps
+    // (very common) on the fast path. WRITABLE because WebComponents
+    // polyfills emulate readyState transitions.
+    get readyState() { return this._readyState || 'complete'; }
+    set readyState(v) { this._readyState = String(v); }
     get visibilityState() { return 'visible'; }
     get hidden() { return false; }
-    get currentScript() { return null; }
+    get currentScript() { return this._currentScript; }
     get cookie() { return ''; }
     set cookie(value) { /* engine cookie-jar integration is a documented gap */ }
     get timeline() { return { currentTime: 0, play() {} }; }
     getAnimations() { return []; }
-    addEventListener(type, cb) { __native_document_addEventListener(String(type)); (this._ls = this._ls || {})[type] = cb; }
-    removeEventListener(type) { if (this._ls) delete this._ls[type]; }
+    createElementNS(ns, tag) { return this.createElement(tag); }
+    createTreeWalker(root, whatToShow, filter) { return new TreeWalker(root); }
+    createNodeIterator(root, whatToShow, filter) { return new TreeWalker(root); }
+    get implementation() { return DOMImplementation; }
+    get activeElement() { return document.body; }
+    hasFocus() { return true; }
+    get styleSheets() { return []; }
+    addEventListener(type, cb) { type = String(type); const ls = (this._ls = this._ls || {}); const list = (ls[type] = ls[type] || []); if (typeof cb === 'function' && list.indexOf(cb) < 0) list.push(cb); }
+    removeEventListener(type, cb) { const ls = this._ls; if (!ls || !ls[type]) return; if (cb) { const i = ls[type].indexOf(cb); if (i >= 0) ls[type].splice(i, 1); } else delete ls[type]; }
   }
   globalThis.document = new Document();
+  globalThis.Document = Document;
   globalThis.Element = Element;
   globalThis.Node = Element;
   globalThis.Text = Element;
+  globalThis.__setCurrentScript = function (h) {
+    document._currentScript = h ? wrapElement(h) : null;
+  };
 
   // ------------------------------------------------------------------ DOM classes
   // `class X extends HTMLElement` is ubiquitous; without the HTML* element
@@ -339,18 +633,87 @@
     HTMLBodyElement: class HTMLBodyElement extends HTMLElementBase {},
     HTMLHeadElement: class HTMLHeadElement extends HTMLElementBase {},
     HTMLTemplateElement: class HTMLTemplateElement extends HTMLElementBase {
-      get content() { return this; }
+      get content() {
+        const h = __native_template_content(this._h);
+        return h ? new DocumentFragment(h) : new DocumentFragment(this._h);
+      }
     },
     HTMLVideoElement: class HTMLVideoElement extends HTMLMediaElement {},
     HTMLAudioElement: class HTMLAudioElement extends HTMLMediaElement {},
     HTMLCanvasElement: class HTMLCanvasElement extends HTMLElementBase {},
     HTMLIFrameElement: class HTMLIFrameElement extends HTMLElementBase {},
     HTMLUnknownElement: class HTMLUnknownElement extends HTMLElementBase {},
+    // The rest of the HTML element family: feature detection ("textarea"
+    // in window) and instanceof checks reach for these constantly.
+    HTMLTextAreaElement: class HTMLTextAreaElement extends HTMLElementBase {},
+    HTMLSelectElement: class HTMLSelectElement extends HTMLElementBase {},
+    HTMLOptionElement: class HTMLOptionElement extends HTMLElementBase {},
+    HTMLOptGroupElement: class HTMLOptGroupElement extends HTMLElementBase {},
+    HTMLLabelElement: class HTMLLabelElement extends HTMLElementBase {},
+    HTMLFieldSetElement: class HTMLFieldSetElement extends HTMLElementBase {},
+    HTMLLegendElement: class HTMLLegendElement extends HTMLElementBase {},
+    HTMLTableElement: class HTMLTableElement extends HTMLElementBase {},
+    HTMLTableSectionElement: class HTMLTableSectionElement extends HTMLElementBase {},
+    HTMLTableRowElement: class HTMLTableRowElement extends HTMLElementBase {},
+    HTMLTableCellElement: class HTMLTableCellElement extends HTMLElementBase {},
+    HTMLTableCaptionElement: class HTMLTableCaptionElement extends HTMLElementBase {},
+    HTMLTableColElement: class HTMLTableColElement extends HTMLElementBase {},
+    HTMLTitleElement: class HTMLTitleElement extends HTMLElementBase {},
+    HTMLMetaElement: class HTMLMetaElement extends HTMLElementBase {},
+    HTMLBaseElement: class HTMLBaseElement extends HTMLElementBase {},
+    HTMLAreaElement: class HTMLAreaElement extends HTMLElementBase {},
+    HTMLMapElement: class HTMLMapElement extends HTMLElementBase {},
+    HTMLQuoteElement: class HTMLQuoteElement extends HTMLElementBase {},
+    HTMLPreElement: class HTMLPreElement extends HTMLElementBase {},
+    HTMLBRElement: class HTMLBRElement extends HTMLElementBase {},
+    HTMLHRElement: class HTMLHRElement extends HTMLElementBase {},
+    HTMLModElement: class HTMLModElement extends HTMLElementBase {},
+    HTMLPictureElement: class HTMLPictureElement extends HTMLElementBase {},
+    HTMLSourceElement: class HTMLSourceElement extends HTMLElementBase {},
+    HTMLTrackElement: class HTMLTrackElement extends HTMLElementBase {},
+    HTMLParamElement: class HTMLParamElement extends HTMLElementBase {},
+    HTMLEmbedElement: class HTMLEmbedElement extends HTMLElementBase {},
+    HTMLObjectElement: class HTMLObjectElement extends HTMLElementBase {},
+    HTMLDetailsElement: class HTMLDetailsElement extends HTMLElementBase {},
+    HTMLSummaryElement: class HTMLSummaryElement extends HTMLElementBase {},
+    HTMLDialogElement: class HTMLDialogElement extends HTMLElementBase {},
+    HTMLDataListElement: class HTMLDataListElement extends HTMLElementBase {},
+    HTMLOutputElement: class HTMLOutputElement extends HTMLElementBase {},
+    HTMLProgressElement: class HTMLProgressElement extends HTMLElementBase {},
+    HTMLMeterElement: class HTMLMeterElement extends HTMLElementBase {},
+    HTMLMarqueeElement: class HTMLMarqueeElement extends HTMLElementBase {},
     SVGSVGElement: class SVGSVGElement extends Element {},
     SVGElement: class SVGElement extends Element {},
   };
   for (const name of Object.keys(htmlClasses)) globalThis[name] = htmlClasses[name];
   __htmlClassesRef = htmlClasses;
+  // Extra constructor globals probed by polyfills and framework feature
+  // detection (documented as classes, not just instances). The WebComponents
+  // polyfill walks ["Text","Comment","CDATASection","ProcessingInstruction"]
+  // patching window[name].prototype — every one of these must exist.
+  globalThis.HTMLElement = HTMLElementBase;
+  globalThis.HTMLSlotElement = class HTMLSlotElement extends HTMLElementBase {};
+  globalThis.HTMLContentElement = class HTMLContentElement extends HTMLElementBase {};
+  globalThis.HTMLUnknownElement = htmlClasses.HTMLUnknownElement;
+  globalThis.CharacterData = class CharacterData extends Element {};
+  globalThis.Comment = class Comment extends Element {};
+  globalThis.CDATASection = class CDATASection extends Element {};
+  globalThis.ProcessingInstruction = class ProcessingInstruction extends Element {};
+  globalThis.DocumentType = class DocumentType extends Element {};
+  globalThis.Window = class Window {};
+  globalThis.Attr = class Attr extends Element {};
+  globalThis.Range = class Range {
+    constructor() { this.startContainer = null; this.endContainer = null; this.collapsed = true; }
+    setStart() {} setEnd() {} collapse() {} selectNodeContents() {}
+    getBoundingClientRect() { return { top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0 }; }
+    getClientRects() { return []; }
+    cloneContents() { return document.createDocumentFragment(); }
+    cloneRange() { return new Range(); }
+    commonAncestorContainer() { return null; }
+  };
+  globalThis.Selection = class Selection {
+    addRange() {} removeAllRanges() {} getRangeAt() { return null; } get toString() { return ''; }
+  };
 
   // Event classes (constructors are feature-probed constantly).
   globalThis.Event = class Event {
@@ -380,14 +743,51 @@
     dispatchEvent() { return true; }
   };
 
-  // WebComponents: registry + observers. These are *stubs* — custom elements
-  // register, scripts continue, upgrade callbacks are not synthesized.
-  const registry = new Map();
+  // WebComponents: the custom-element registry. Definitions upgrade
+  // matching elements (parser-inserted and JS-created), fire the v1
+  // callback set (connected/disconnected/attributeChanged) through the
+  // mutation hooks in the Element class, and honor whenDefined.
   globalThis.customElements = {
-    define(name, ctor) { registry.set(String(name).toLowerCase(), ctor); },
-    get(name) { return registry.get(String(name).toLowerCase()); },
-    whenDefined(name) { return Promise.resolve(); },
-    upgrade() {},
+    define(name, ctor) {
+      name = String(name).toLowerCase();
+      if (typeof ctor !== 'function') throw new TypeError('constructor required');
+      if (registry.has(name)) throw new Error("a custom element with name '" + name + "' is already defined");
+      let observed = null;
+      try { observed = ctor.observedAttributes; } catch (e) {}
+      registry.set(name, {
+        ctor,
+        observed: Array.isArray(observed) ? observed.map(String) : (observed ? [String(observed)] : null),
+      });
+      refreshRegistryTags();
+      // Upgrade every element with this tag already in the document.
+      const existing = JSON.parse(__native_dom_querySelectorAll(name) || '[]');
+      for (const h of existing) {
+        if (!wraps.get(h)) tryUpgrade(h, name);
+      }
+      const rs = definedResolvers.get(name);
+      if (rs) { for (const r of rs) { try { r(); } catch (e) {} } definedResolvers.delete(name); }
+    },
+    get(name) { const def = registry.get(String(name).toLowerCase()); return def ? def.ctor : undefined; },
+    whenDefined(name) {
+      name = String(name).toLowerCase();
+      if (registry.has(name)) return Promise.resolve();
+      return new Promise(function (res) {
+        let list = definedResolvers.get(name);
+        if (!list) { list = []; definedResolvers.set(name, list); }
+        list.push(res);
+      });
+    },
+    upgrade(root) {
+      if (!root || root._h === undefined) return;
+      const handles = JSON.parse(__native_dom_findCustomTags(root._h, registryTagsJson) || '[]');
+      for (const h of handles) {
+        if (!wraps.get(h)) tryUpgrade(h, __native_dom_tagName(h));
+      }
+    },
+    // webcomponents.js polyfill hook: the polyfill asks native custom
+    // elements to wrap its flush callback; we run flushes eagerly.
+    polyfillWrapFlushCallback(cb) { if (typeof cb === 'function') { try { cb(); } catch (e) {} } },
+    polyfillIfNeeded() { return true; },
   };
   globalThis.MutationObserver = class MutationObserver {
     constructor(cb) { this._cb = cb; }
@@ -451,18 +851,106 @@
     },
     { acceptNode() { return 1; } }
   );
+  // Real tree walkers over the arena (childNodes + sibling links).
   globalThis.TreeWalker = class TreeWalker {
-    constructor(root) { this.root = root; this.currentNode = root; }
-    nextNode() { return null; }
-    previousNode() { return null; }
-    firstChild() { return null; }
-    parentNode() { return null; }
+    constructor(root, whatToShow, filter) {
+      this.root = root || null;
+      this.currentNode = this.root;
+      this.whatToShow = whatToShow === undefined ? 0xFFFFFFFF : whatToShow;
+      this.filter = filter || null;
+    }
+    _ok(n) { return !!n; }
+    parentNode() {
+      if (!this.currentNode || !this.currentNode.parentNode) return null;
+      this.currentNode = this.currentNode.parentNode;
+      return this.currentNode;
+    }
+    firstChild() {
+      if (!this.currentNode) return null;
+      const c = this.currentNode.firstChild;
+      if (c) this.currentNode = c;
+      return c || null;
+    }
+    nextSibling() {
+      if (!this.currentNode) return null;
+      const n = this.currentNode.nextSibling;
+      if (n) this.currentNode = n;
+      return n || null;
+    }
+    nextNode() {
+      // Pre-order traversal.
+      let n = this.currentNode;
+      if (!n) return null;
+      if (n.firstChild) { this.currentNode = n.firstChild; return this.currentNode; }
+      while (n) {
+        if (n.nextSibling) { this.currentNode = n.nextSibling; return this.currentNode; }
+        n = n.parentNode;
+      }
+      return null;
+    }
+    previousNode() {
+      const p = this.currentNode && this.currentNode.parentNode;
+      if (!p) return null;
+      const prev = this.currentNode.previousSibling;
+      if (prev) {
+        let n = prev;
+        while (n.lastChild) n = n.lastChild;
+        this.currentNode = n;
+        return n;
+      }
+      this.currentNode = p;
+      return p;
+    }
   };
-  globalThis.NodeIterator = class NodeIterator {
-    constructor(root) { this.root = root; }
-    nextNode() { return null; }
-    previousNode() { return null; }
+  globalThis.NodeIterator = globalThis.TreeWalker;
+  // Minimal DOMImplementation: createHTMLDocument returns a detached
+  // document (a fragment holder in the same arena + a plain, fully
+  // settable Document-like face — polyfills assign body/documentElement).
+  const DOMImplementation = {
+    createHTMLDocument(title) {
+      const holder = __native_dom_createComment('html-document');
+      let body = new DocumentFragment(holder);
+      let docElem = body;
+      const doc = {
+        _root: holder,
+        _h: holder,
+        get nodeType() { return 9; },
+        get body() { return body; },
+        set body(v) { body = v; },
+        get documentElement() { return docElem; },
+        set documentElement(v) { docElem = v; },
+        get head() { return null; },
+        get title() { return typeof title === 'string' ? title : ''; },
+        set title(v) {},
+        get readyState() { return 'complete'; },
+        set readyState(v) {},
+        get currentScript() { return null; },
+        createElement(tag) { return wrapElement(__native_dom_createElement(String(tag).toLowerCase())); },
+        createElementNS(ns, tag) { return wrapElement(__native_dom_createElement(String(tag).toLowerCase())); },
+        createTextNode(t) { return wrapElement(__native_dom_createTextNode(String(t))); },
+        createComment(t) { return wrapElement(__native_dom_createComment(String(t))); },
+        createDocumentFragment() { return new DocumentFragment(__native_dom_createComment('fragment')); },
+        createTreeWalker(root) { return new TreeWalker(root); },
+        createEvent() { return new Event(''); },
+        getElementById(id) { return null; },
+        querySelector(sel) { const h = __native_dom_querySelectorIn(holder, String(sel)); return h ? wrapElement(h) : null; },
+        querySelectorAll(sel) { return JSON.parse(__native_dom_querySelectorAllIn(holder, String(sel)) || '[]').map(wrapElement); },
+        addEventListener() {},
+        removeEventListener() {},
+        write() {},
+        writeln() {},
+        open() {},
+        close() {},
+        importNode(node, deep) { return document.importNode(node, deep); },
+        adoptNode(node) { return node; },
+      };
+      return doc;
+    },
+    createDocument() { return this.createHTMLDocument(''); },
+    hasFeature() { return true; },
   };
+  globalThis.DOMImplementation = DOMImplementation;
+
   globalThis.DOMParser = class DOMParser {
     parseFromString() { return document; }
   };
@@ -514,6 +1002,152 @@
       }
       return out;
     }
+  };
+
+  // ------------------------------------------------------------------ Intl
+  // Minimal Intl: format/compare primitives without full ICU. YouTube's
+  // player and Material date formatting need these classes to EXIST; the
+  // en-US fallbacks are byte-compatible for common cases.
+  globalThis.Intl = {
+    NumberFormat: class NumberFormat {
+      static supportedLocalesOf(locales) { return Array.isArray(locales) ? locales.map(String) : [String(locales || 'en')]; }
+      constructor(locales, opts) {
+        opts = opts || {};
+        this._min = opts.minimumFractionDigits !== undefined ? opts.minimumFractionDigits : 0;
+        this._max = opts.maximumFractionDigits !== undefined ? opts.maximumFractionDigits : (this._min || (opts.style === 'percent' ? 0 : 2));
+        this._style = opts.style || 'decimal';
+        this._currency = opts.currency || 'USD';
+        this._grouping = opts.useGrouping !== false;
+      }
+      format(n) {
+        n = Number(n);
+        if (!isFinite(n)) return String(n);
+        if (this._style === 'percent') n = n * 100;
+        let fixed = n.toFixed(this._max === undefined ? this._min : Math.max(this._min, this._max === undefined ? this._min : this._max));
+        if (this._max !== undefined && this._max > this._min) {
+          fixed = fixed.replace(/(\.\d*?)0+$/, '$1').replace(/\.$/, '');
+        }
+        let body = fixed;
+        let sign = '';
+        if (body.startsWith('-')) { sign = '-'; body = body.slice(1); }
+        if (this._grouping) {
+          const parts = body.split('.');
+          parts[0] = parts[0].replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+          body = parts.join('.');
+        }
+        if (this._style === 'percent') return sign + body + '%';
+        if (this._style === 'currency') return sign + (this._currency || 'USD') + ' ' + body;
+        return sign + body;
+      }
+      resolvedOptions() { return { locale: 'en-US', minimumFractionDigits: this._min, maximumFractionDigits: this._max, useGrouping: this._grouping, style: this._style, currency: this._currency }; }
+      formatToParts(n) {
+        const str = this.format(n);
+        return str.split('').map(function (c) { return { type: /\d/.test(c) ? 'integer' : (c === '.' ? 'decimal' : (c === ',' ? 'group' : 'literal')), value: c }; });
+      }
+    },
+    DateTimeFormat: class DateTimeFormat {
+      static supportedLocalesOf(locales) { return Array.isArray(locales) ? locales.map(String) : [String(locales || 'en')]; }
+      constructor(locales, opts) { this._opts = opts || {}; }
+      format(date) {
+        const d = (date instanceof Date) ? date : new Date(date);
+        if (!(d instanceof Date) || isNaN(d.getTime())) return String(date);
+        const Y = d.getFullYear(), M = d.getMonth() + 1, D = d.getDate();
+        const pad = function (x) { return (x < 10 ? '0' : '') + x; };
+        if (this._opts.year !== undefined || this._opts.month !== undefined || this._opts.day !== undefined) {
+          const parts = [];
+          if (this._opts.year !== false) parts.push(Y);
+          if (this._opts.month !== false) parts.push(pad(M));
+          if (this._opts.day !== false) parts.push(pad(D));
+          return parts.join('/') + (this._opts.hour !== undefined ? ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds()) : '');
+        }
+        return pad(M) + '/' + pad(D) + '/' + Y;
+      }
+      formatToParts(date) { return this.format(date).split('').map(function (c) { return { type: 'literal', value: c }; }); }
+      resolvedOptions() { return { locale: 'en-US', timeZone: 'UTC' }; }
+    },
+    Collator: class Collator {
+      static supportedLocalesOf(locales) { return Array.isArray(locales) ? locales.map(String) : [String(locales || 'en')]; }
+      constructor() {}
+      compare(a, b) { a = String(a); b = String(b); return a < b ? -1 : (a > b ? 1 : 0); }
+      resolvedOptions() { return { locale: 'en-US', sensitivity: 'variant' }; }
+    },
+    getCanonicalLocales(locales) {
+      return Array.isArray(locales) ? locales.map(String) : [String(locales || 'en')];
+    },
+  };
+
+  // ------------------------------------------------------------------ messaging
+  // MessageChannel / MessagePort / postMessage: synchronous delivery via
+  // microtasks. YouTube's app shell and many libs construct these even
+  // when they only use them for local signalling.
+  globalThis.MessageEvent = class MessageEvent extends globalThis.Event {
+    constructor(type, opts) {
+      super(type, opts);
+      this.data = opts && opts.data;
+      this.origin = (opts && opts.origin) || '';
+      this.source = opts && opts.source;
+    }
+  };
+  class MessagePort {
+    constructor(id) {
+      this._id = id;
+      this.onmessage = null;
+      this._other = null;
+      this._queue = [];
+      this._started = false;
+    }
+    postMessage(data) {
+      if (!this._other) return;
+      const ev = new MessageEvent('message', { data: data });
+      if (this._other._started && (this._other.onmessage || this._other._ls)) {
+        queueMicrotask(function () { this._other._deliver(ev); }.bind(this));
+      } else {
+        this._other._queue.push(ev);
+      }
+    }
+    _deliver(ev) {
+      if (typeof this.onmessage === 'function') { try { this.onmessage(ev); } catch (e) { console.error('onmessage: ' + (e && e.message)); } }
+      if (this._ls && this._ls.message) {
+        for (const cb of this._ls.message.slice()) { try { cb(ev); } catch (e) { console.error('message port handler: ' + (e && e.message)); } }
+      }
+    }
+    start() {
+      this._started = true;
+      const q = this._queue; this._queue = [];
+      for (const ev of q) queueMicrotask(function () { this._deliver(ev); }.bind(this));
+    }
+    close() { this._other = null; }
+    addEventListener(type, cb) {
+      if (type !== 'message') return;
+      const ls = (this._ls = this._ls || {});
+      (ls.message = ls.message || []).push(cb);
+      this._started = true;
+      this.start();
+    }
+    removeEventListener() {}
+  }
+  globalThis.MessagePort = MessagePort;
+  globalThis.MessageChannel = class MessageChannel {
+    constructor() {
+      this.port1 = new MessagePort(1);
+      this.port2 = new MessagePort(2);
+      this.port1._other = this.port2;
+      this.port2._other = this.port1;
+    }
+  };
+  globalThis.postMessage = function (data, origin) {
+    // window.postMessage: deliver to our own window listeners.
+    queueMicrotask(function () {
+      const ev = new MessageEvent('message', { data: data, origin: origin || '' });
+      ev.target = windowAlias;
+      (winListeners.message || []).forEach(function (cb) { try { cb(ev); } catch (e) {} });
+    });
+  };
+  globalThis.BroadcastChannel = class BroadcastChannel {
+    constructor(name) { this._name = String(name); this.onmessage = null; }
+    postMessage() {}
+    close() {}
+    addEventListener() {}
   };
 
   // ------------------------------------------------------------------ crypto (non-security)
@@ -623,11 +1257,12 @@
   globalThis.structuredClone = function (value) {
     return JSON.parse(JSON.stringify(value === undefined ? null : value));
   };
-  globalThis.__elementFromHandle = function (h) { return new Element(h); };
+  globalThis.__elementFromHandle = function (h) { return wrapElement(h); };
 
   // Window-level listeners + event dispatch (from the engine/UI).
   const winListeners = {};
   globalThis.addEventListener = function (type, cb) {
+    type = String(type);
     (winListeners[type] = winListeners[type] || []).push(cb);
   };
   globalThis.removeEventListener = function (type, cb) {
@@ -639,20 +1274,49 @@
     (winListeners[ev && ev.type] || []).forEach(function (cb) { try { cb(ev); } catch (e) {} });
     return true;
   };
+
+  // Element-level listener fan-out with wrapper identity: listeners live
+  // on the persistent wrapper, so `el.addEventListener` now actually fires.
+  function fireAt(handle, type, ev) {
+    const w = wraps.get(handle);
+    if (w && w._ls && w._ls[type]) {
+      const list = w._ls[type].slice();
+      for (const cb of list) {
+        try { ev.currentTarget = w; cb(ev); } catch (e) { console.error(type + ' handler: ' + errString(e)); }
+      }
+    }
+  }
+
   globalThis.__onDomEvent = function (handle, type) {
-    const el = new Element(handle);
-    (winListeners[type] || []).forEach(function (cb) { try { cb({ type: type, target: el }); } catch (e) {} });
-    const list = el._ls && el._ls[type];
-    if (list) { try { list({ type: type, target: el }); } catch (e) {} }
+    const el = wrapElement(handle);
+    const ev = new Event(type);
+    ev.target = el;
+    // Bubble: element → ancestors → document → window (delegation-safe).
+    let h = handle;
+    let guard = 0;
+    while (h && guard++ < 300) {
+      fireAt(h, type, ev);
+      const next = __native_dom_parentNode(h);
+      if (!next) {
+        // Shadow boundary: hop from the shadow root to its host.
+        const host = __native_dom_shadowHost(h);
+        if (host) { h = host; continue; }
+        break;
+      }
+      h = next;
+    }
     const docLs = document._ls && document._ls[type];
-    if (docLs) { try { docLs({ type: type, target: el }); } catch (e) {} }
+    if (docLs) {
+      for (const cb of docLs.slice()) { try { ev.currentTarget = document; cb(ev); } catch (e) { console.error(type + ' doc handler: ' + errString(e)); } }
+    }
+    (winListeners[type] || []).forEach(function (cb) { try { ev.currentTarget = windowAlias; cb(ev); } catch (e) {} });
   };
 
   // Lifecycle events, fired by the engine once scripts have run.
   globalThis.__fireDocumentEvent = function (type) {
     const ev = new Event(type);
     ev.target = document;
-    (winListeners[type] || []).forEach(function (cb) { try { cb(ev); } catch (e) { __native_console('error', 'DOMContentLoaded handler: ' + (e && e.message)); } });
+    (winListeners[type] || []).forEach(function (cb) { try { cb(ev); } catch (e) { __native_console('error', 'DOMContentLoaded handler: ' + errString(e)); } });
     const docLs = document._ls && document._ls[type];
     if (docLs) { try { docLs(ev); } catch (e) { __native_console('error', 'DOMContentLoaded doc handler: ' + (e && e.message)); } }
   };
@@ -674,11 +1338,51 @@
       case 'canvas': return 'HTMLCanvasElement';
       case 'iframe': return 'HTMLIFrameElement';
       case 'template': return 'HTMLTemplateElement';
+      case 'textarea': return 'HTMLTextAreaElement';
+      case 'select': return 'HTMLSelectElement';
+      case 'option': return 'HTMLOptionElement';
+      case 'optgroup': return 'HTMLOptGroupElement';
+      case 'label': return 'HTMLLabelElement';
+      case 'fieldset': return 'HTMLFieldSetElement';
+      case 'legend': return 'HTMLLegendElement';
+      case 'table': return 'HTMLTableElement';
+      case 'tbody': case 'thead': case 'tfoot': return 'HTMLTableSectionElement';
+      case 'tr': return 'HTMLTableRowElement';
+      case 'td': case 'th': return 'HTMLTableCellElement';
+      case 'caption': return 'HTMLTableCaptionElement';
+      case 'col': case 'colgroup': return 'HTMLTableColElement';
+      case 'title': return 'HTMLTitleElement';
+      case 'meta': return 'HTMLMetaElement';
+      case 'base': return 'HTMLBaseElement';
+      case 'area': return 'HTMLAreaElement';
+      case 'map': return 'HTMLMapElement';
+      case 'blockquote': case 'q': return 'HTMLQuoteElement';
+      case 'pre': return 'HTMLPreElement';
+      case 'br': return 'HTMLBRElement';
+      case 'hr': return 'HTMLHRElement';
+      case 'ins': case 'del': return 'HTMLModElement';
+      case 'picture': return 'HTMLPictureElement';
+      case 'source': return 'HTMLSourceElement';
+      case 'track': return 'HTMLTrackElement';
+      case 'param': return 'HTMLParamElement';
+      case 'embed': return 'HTMLEmbedElement';
+      case 'object': return 'HTMLObjectElement';
+      case 'details': return 'HTMLDetailsElement';
+      case 'summary': return 'HTMLSummaryElement';
+      case 'dialog': return 'HTMLDialogElement';
+      case 'datalist': return 'HTMLDataListElement';
+      case 'output': return 'HTMLOutputElement';
+      case 'progress': return 'HTMLProgressElement';
+      case 'meter': return 'HTMLMeterElement';
+      case 'marquee': return 'HTMLMarqueeElement';
       default: return 'HTMLElement';
     }
   }
   // htmlClasses is defined below; wrapElement is called after it exists.
   function wrapElement(handle) {
+    if (handle === null || handle === undefined || handle === 0) return null;
+    const existing = wraps.get(handle);
+    if (existing) return existing;
     const tag = __native_dom_tagName(handle);
     const map = __htmlClassesRef || {};
     const cls = map[tagClass(tag)] || Element;
@@ -687,7 +1391,7 @@
 
   // Media element events: (node, type, detailJson).
   globalThis.__onMediaEvent = function (handle, type, detailJson) {
-    const el = new Element(handle);
+    const el = wrapElement(handle);
     // Refresh the element's state mirror before handlers run.
     if (el._mirror) { try { el._mirror(); } catch (e) {} }
     let detail = {};

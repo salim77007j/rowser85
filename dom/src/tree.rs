@@ -128,6 +128,16 @@ pub struct Dom {
     /// next layout wedges the page thread for hours. All post-cap
     /// allocations alias this one detached node, keeping the tree bounded.
     overflow: NodeId,
+    /// `<template>` elements → their detached contents holder node.
+    /// Populated by the HTML parser; the holder lives outside the document
+    /// tree so ordinary walks never see template content.
+    template_contents: std::collections::HashMap<NodeId, NodeId>,
+    /// Shadow-DOM hosts → their detached shadow root node (one per host,
+    /// v1). The root is a comment-kind holder whose subtree is the shadow
+    /// tree; `flat_children` composes it back in.
+    shadow_roots: std::collections::HashMap<NodeId, NodeId>,
+    /// Reverse map (shadow root → host) for flat-tree parent resolution.
+    shadow_hosts: std::collections::HashMap<NodeId, NodeId>,
 }
 
 /// Hard cap on live DOM nodes (real pages use 5–20k; heavy JS hydration
@@ -152,6 +162,9 @@ impl Dom {
             version: 1,
             quirks: QuirksMode::NoQuirks,
             overflow: 0,
+            template_contents: std::collections::HashMap::new(),
+            shadow_roots: std::collections::HashMap::new(),
+            shadow_hosts: std::collections::HashMap::new(),
         };
         dom.document = dom.alloc(NodeKind::Document);
         dom.overflow = dom.create_html_element("rowser-overflow");
@@ -618,6 +631,278 @@ impl Dom {
         }
     }
 
+    // ------------------------------------------------------------------
+    // WebComponents: templates, shadow DOM, flat tree, cloning, serialization
+
+    /// Records the contents holder of a `<template>` (used by the parser).
+    pub fn set_template_contents(&mut self, template: NodeId, contents: NodeId) {
+        self.template_contents.insert(template, contents);
+    }
+
+    /// The detached contents holder of a `<template>`, if `id` is one.
+    pub fn template_contents(&self, id: NodeId) -> Option<NodeId> {
+        self.template_contents.get(&id).copied()
+    }
+
+    /// Creates a shadow root for `host` and returns it. Returns `None` when
+    /// the host already has one (spec: `attachShadow` throws — v1 answers
+    /// by refusing).
+    pub fn attach_shadow(&mut self, host: NodeId) -> Option<NodeId> {
+        if self.shadow_roots.contains_key(&host) || self.element(host).is_none() {
+            return None;
+        }
+        let root = self.create_comment("shadow-root");
+        self.shadow_roots.insert(host, root);
+        self.shadow_hosts.insert(root, host);
+        self.version += 1;
+        Some(root)
+    }
+
+    /// The shadow root attached to `host`, if any.
+    pub fn shadow_root(&self, host: NodeId) -> Option<NodeId> {
+        self.shadow_roots.get(&host).copied()
+    }
+
+    /// The host element owning shadow root `root` (flat-tree parent jump).
+    pub fn shadow_host(&self, root: NodeId) -> Option<NodeId> {
+        self.shadow_hosts.get(&root).copied()
+    }
+
+    /// All shadow root holder nodes currently attached (for cascade and
+    /// style collection walks).
+    pub fn all_shadow_roots(&self) -> impl Iterator<Item = NodeId> + '_ {
+        self.shadow_hosts.keys().copied()
+    }
+
+    /// True when `id` is a shadow root holder node.
+    pub fn is_shadow_root(&self, id: NodeId) -> bool {
+        self.shadow_hosts.contains_key(&id)
+    }
+
+    /// True when the parent chain of `id` reaches this document's root —
+    /// the `Node.isConnected` semantics.
+    pub fn is_connected(&self, id: NodeId) -> bool {
+        let mut cur = Some(id);
+        while let Some(n) = cur {
+            if n == self.document {
+                return true;
+            }
+            cur = self.parent(n);
+        }
+        false
+    }
+
+    /// All children of `id` (elements and text) as a vector — the JS
+    /// `childNodes` bridge.
+    pub fn child_handles(&self, id: NodeId) -> Vec<NodeId> {
+        self.children(id).collect()
+    }
+
+    /// The **flat tree** children of `id` (shadow DOM composed).
+    ///
+    /// * An element with a shadow root renders its *shadow* children
+    ///   instead of its light children; light children reappear only via
+    ///   `<slot>` assignment (matching `name` attrs; unnamed slot takes the
+    ///   unslotted children), and a slot with no assignment renders its
+    ///   fallback content.
+    /// * Plain nodes return their ordinary children.
+    pub fn flat_children(&self, id: NodeId) -> Vec<NodeId> {
+        let Some(root) = self.shadow_roots.get(&id).copied() else {
+            return self.children(id).collect();
+        };
+        let mut out = Vec::new();
+        for child in self.children(root) {
+            let is_slot = self
+                .element(child)
+                .is_some_and(|e| &*e.name.local == "slot");
+            if is_slot {
+                let slot_name = self.get_attr(child, "name");
+                let assigned: Vec<NodeId> = self
+                    .children(id)
+                    .filter(|light| {
+                        let light_slot = self.get_attr(*light, "slot");
+                        match (slot_name, light_slot) {
+                            (None, None) => true, // default slot
+                            (Some(n), Some(ls)) => *n == *ls,
+                            _ => false,
+                        }
+                    })
+                    .collect();
+                if !assigned.is_empty() {
+                    out.extend(assigned);
+                } else {
+                    // Slot fallback content.
+                    out.extend(self.children(child));
+                }
+            } else {
+                out.push(child);
+            }
+        }
+        out
+    }
+
+    /// Flat-tree parent (composed parent): the host for shadow-root
+    /// children, the ordinary parent otherwise. Used for style
+    /// inheritance and event paths.
+    pub fn flat_parent_element(&self, id: NodeId) -> Option<NodeId> {
+        let parent = self.parent(id)?;
+        if let Some(host) = self.shadow_hosts.get(&parent) {
+            return Some(*host);
+        }
+        if self.element(parent).is_some() {
+            return Some(parent);
+        }
+        self.parent_element(parent)
+    }
+
+    /// Deep-clones the subtree rooted at `id` into a fresh set of nodes
+    /// (same arena) and returns the clone of `id`. Template contents and
+    /// shadow trees are NOT copied (per spec: clones carry neither).
+    pub fn clone_subtree(&mut self, id: NodeId) -> NodeId {
+        let kind = self.kind(id).clone();
+        let clone = match &kind {
+            NodeKind::Element(el) => self.create_element(el.name.clone(), el.attrs.clone()),
+            NodeKind::Text(t) => self.create_text(t.clone()),
+            NodeKind::Comment(c) => self.create_comment(c.clone()),
+            NodeKind::Document | NodeKind::Doctype { .. } => {
+                // Cloning a document node yields a fragment-ish container.
+                self.create_comment("clone")
+            }
+        };
+        if let NodeKind::Element(_) = &kind {
+            // `template` clones are inert: per spec cloneNode does not copy
+            // content, but the template element carries an empty contents
+            // holder so `clone.content` stays usable.
+            if let Some(contents) = self.template_contents.get(&id).copied() {
+                let new_contents = self.create_comment("template-contents");
+                self.set_template_contents(clone, new_contents);
+                let _ = contents;
+            }
+        }
+        let children: Vec<NodeId> = self.children(id).collect();
+        for child in children {
+            let child_clone = self.clone_subtree(child);
+            self.append(clone, child_clone);
+        }
+        clone
+    }
+
+    /// Imports a subtree from a *different* `Dom` arena into this one
+    /// (deep copy) and returns the new root. Used by `innerHTML` (parse a
+    /// standalone fragment, then import its nodes) and `importNode`.
+    pub fn import_subtree(&mut self, other: &Dom, id: NodeId) -> NodeId {
+        let kind = other.kind(id).clone();
+        let local = match &kind {
+            NodeKind::Element(el) => self.create_element(el.name.clone(), el.attrs.clone()),
+            NodeKind::Text(t) => self.create_text(t.clone()),
+            NodeKind::Comment(c) => self.create_comment(c.clone()),
+            NodeKind::Document | NodeKind::Doctype { .. } => self.create_comment("import"),
+        };
+        // Template contents travel with the template on import (innerHTML
+        // round-trips must keep `<template>` inert content usable).
+        if let NodeKind::Element(el) = &kind {
+            if &*el.name.local == "template" {
+                if let Some(src_contents) = other.template_contents.get(&id) {
+                    let dst_contents = self.create_comment("template-contents");
+                    self.set_template_contents(local, dst_contents);
+                    let src_children: Vec<NodeId> = other.children(*src_contents).collect();
+                    for child in src_children {
+                        let child_clone = self.import_subtree(other, child);
+                        self.append(dst_contents, child_clone);
+                    }
+                }
+            }
+        }
+        let children: Vec<NodeId> = other.children(id).collect();
+        for child in children {
+            let child_clone = self.import_subtree(other, child);
+            self.append(local, child_clone);
+        }
+        local
+    }
+
+    /// Serializes the subtree of `id` as HTML (the `innerHTML` semantics).
+    pub fn serialize_subtree(&self, id: NodeId) -> String {
+        let mut out = String::new();
+        self.serialize_node(id, &mut out);
+        out
+    }
+
+    fn serialize_node(&self, id: NodeId, out: &mut String) {
+        match self.kind(id) {
+            NodeKind::Text(t) => {
+                for c in t.chars() {
+                    match c {
+                        '&' => out.push_str("&amp;"),
+                        '<' => out.push_str("&lt;"),
+                        '>' => out.push_str("&gt;"),
+                        _ => out.push(c),
+                    }
+                }
+            }
+            NodeKind::Comment(c) => {
+                out.push_str("<!--");
+                out.push_str(c);
+                out.push_str("-->");
+            }
+            NodeKind::Doctype { name, .. } => {
+                out.push_str("<!DOCTYPE ");
+                out.push_str(name);
+                out.push('>');
+            }
+            NodeKind::Document => {
+                for child in self.children(id) {
+                    self.serialize_node(child, out);
+                }
+            }
+            NodeKind::Element(el) => {
+                let tag = el.name.local.to_string();
+                out.push('<');
+                out.push_str(&tag);
+                for attr in &el.attrs {
+                    out.push(' ');
+                    out.push_str(&attr.name);
+                    out.push_str("=\"");
+                    for c in attr.value.chars() {
+                        match c {
+                            '&' => out.push_str("&amp;"),
+                            '"' => out.push_str("&quot;"),
+                            '<' => out.push_str("&lt;"),
+                            _ => out.push(c),
+                        }
+                    }
+                    out.push('"');
+                }
+                out.push('>');
+                if !Self::VOID_ELEMENTS.contains(&tag.as_str()) {
+                    // <template>: serialize the detached contents holder's
+                    // children (innerHTML round-trips must preserve them).
+                    if tag == "template" {
+                        if let Some(contents) = self.template_contents.get(&id) {
+                            for child in self.children(*contents) {
+                                self.serialize_node(child, out);
+                            }
+                        }
+                    } else {
+                        for child in self.children(id) {
+                            self.serialize_node(child, out);
+                        }
+                    }
+                    out.push_str("</");
+                    out.push_str(&tag);
+                    out.push('>');
+                }
+            }
+        }
+    }
+
+    /// Elements whose content model is empty — never serialized with a
+    /// closing tag, never given children by the serializer.
+    const VOID_ELEMENTS: &'static [&'static str] = &[
+        "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param",
+        "source", "track", "wbr",
+    ];
+
     /// Finds the first element with the given `id` in `root`'s subtree.
     pub fn find_by_id(&self, root: NodeId, id: &str) -> Option<NodeId> {
         self.subtree_elements(root)
@@ -720,5 +1005,168 @@ impl Iterator for Descendants<'_> {
             child = self.dom.prev_sibling(id);
         }
         Some(cur)
+    }
+}
+
+#[cfg(test)]
+mod wc_tests {
+    use super::*;
+
+    fn find_by_tag(dom: &Dom, tag: &str) -> NodeId {
+        dom.subtree_elements(dom.document())
+            .find(|n| dom.element(*n).is_some_and(|e| &*e.name.local == tag))
+            .unwrap()
+    }
+
+    /// Template contents are recorded and stay invisible to document walks.
+    #[test]
+    fn template_contents_recorded() {
+        let mut dom = Dom::new();
+        let template = dom.create_html_element("template");
+        dom.append(dom.document(), template);
+        let contents = dom.template_contents(template);
+        assert!(
+            contents.is_none(),
+            "no contents until set_template_contents"
+        );
+        let holder = dom.create_comment("template-contents");
+        dom.set_template_contents(template, holder);
+        let inner = dom.create_html_element("b");
+        dom.append(holder, inner);
+        assert_eq!(dom.template_contents(template), Some(holder));
+        assert!(!dom.is_connected(holder));
+        // Document walk sees the template element but not its contents.
+        let seen: Vec<String> = dom
+            .subtree_elements(dom.document())
+            .filter_map(|n| dom.element(n).map(|e| e.name.local.to_string()))
+            .collect();
+        assert!(seen.contains(&"template".to_string()));
+        assert!(!seen.contains(&"b".to_string()));
+    }
+
+    /// attachShadow + flat_children: shadow children compose in place of
+    /// light children; slots pull light children back in.
+    #[test]
+    fn shadow_flat_tree() {
+        let mut dom = Dom::new();
+        let host = dom.create_html_element("my-el");
+        dom.append(dom.document(), host);
+        let light_named = dom.create_html_element("span");
+        dom.set_attr(light_named, "slot", "a");
+        dom.append(host, light_named);
+        // Before attach: flat children are the light children.
+        assert_eq!(dom.flat_children(host), vec![light_named]);
+        let root = dom.attach_shadow(host).expect("attach");
+        let s1 = dom.create_html_element("div");
+        let slot = dom.create_html_element("slot");
+        dom.set_attr(slot, "name", "a");
+        dom.append(root, s1);
+        dom.append(root, slot);
+        // Composed: div + the slotted <span slot=a>.
+        let flat = dom.flat_children(host);
+        assert_eq!(flat, vec![s1, light_named]);
+        // Shadow host resolution.
+        assert_eq!(dom.shadow_host(root), Some(host));
+        assert_eq!(dom.flat_parent_element(s1), Some(host));
+        // A second attachShadow is refused.
+        assert!(dom.attach_shadow(host).is_none());
+    }
+
+    /// Unnamed slot collects light children with no slot attribute;
+    /// named slots fall back to their own children.
+    #[test]
+    fn default_slot_assignment() {
+        let mut dom = Dom::new();
+        let host = dom.create_html_element("my-el");
+        dom.append(dom.document(), host);
+        let unslotted = dom.create_text("X");
+        dom.append(host, unslotted);
+        let root = dom.attach_shadow(host).unwrap();
+        let slot = dom.create_html_element("slot");
+        dom.append(root, slot);
+        assert_eq!(dom.flat_children(host), vec![unslotted]);
+        // Named slot with no assignment renders fallback content.
+        let named = dom.create_html_element("slot");
+        dom.set_attr(named, "name", "zzz");
+        let fb = dom.create_text("fallback");
+        dom.append(named, fb);
+        dom.append(root, named);
+        let flat = dom.flat_children(host);
+        assert_eq!(flat, vec![unslotted, fb]);
+    }
+
+    /// clone_subtree deep-clones elements, attributes and text.
+    #[test]
+    fn clone_subtree_copies() {
+        let mut dom = Dom::new();
+        let list = dom.create_html_element("ul");
+        dom.append(dom.document(), list);
+        let li = dom.create_html_element("li");
+        dom.set_attr(li, "class", "a");
+        dom.append(list, li);
+        let text = dom.create_text("one");
+        dom.append(li, text);
+        let clone = dom.clone_subtree(list);
+        assert_ne!(clone, list);
+        assert_eq!(dom.serialize_subtree(clone), dom.serialize_subtree(list));
+        dom.set_attr(clone_first(&dom, clone), "class", "changed");
+        assert_eq!(dom.get_attr(clone_first(&dom, list), "class"), Some("a"));
+    }
+
+    fn clone_first(dom: &Dom, parent: NodeId) -> NodeId {
+        dom.children(parent).next().unwrap()
+    }
+
+    /// serialize_subtree escapes text and attributes, void elements have
+    /// no closing tag.
+    #[test]
+    fn serialize_escapes_and_void() {
+        let mut dom = Dom::new();
+        let p = dom.create_html_element("p");
+        dom.append(dom.document(), p);
+        dom.set_attr(p, "title", "a\"b <c>");
+        let t = dom.create_text("x & y < z >");
+        dom.append(p, t);
+        let img = dom.create_html_element("img");
+        dom.set_attr(img, "src", "a.png");
+        dom.append(p, img);
+        let out = dom.serialize_subtree(p);
+        assert!(out.contains("title=\"a&quot;b &lt;c>\""), "out: {out}");
+        assert!(out.contains("x &amp; y &lt; z &gt;"), "out: {out}");
+        assert!(out.contains("<img src=\"a.png\">"), "out: {out}");
+        assert!(!out.contains("</img>"), "out: {out}");
+        assert!(out.ends_with("</p>"), "out: {out}");
+    }
+
+    /// is_connected walks to the document root.
+    #[test]
+    fn connectivity() {
+        let mut dom = Dom::new();
+        let div = dom.create_html_element("div");
+        dom.append(dom.document(), div);
+        let p = dom.create_html_element("p");
+        dom.append(div, p);
+        assert!(dom.is_connected(p));
+        let orphan = dom.create_html_element("x");
+        assert!(!dom.is_connected(orphan));
+    }
+
+    /// import_subtree copies across arenas.
+    #[test]
+    fn import_across_arenas() {
+        let mut src = Dom::new();
+        let ul = src.create_html_element("ul");
+        src.append(src.document(), ul);
+        let li = src.create_html_element("li");
+        src.append(ul, li);
+        let text = src.create_text("hi");
+        src.append(li, text);
+
+        let mut dst = Dom::new();
+        let imported = dst.import_subtree(&src, ul);
+        assert!(dst
+            .element(imported)
+            .is_some_and(|e| &*e.name.local == "ul"));
+        assert_eq!(dst.serialize_subtree(imported), src.serialize_subtree(ul));
     }
 }
