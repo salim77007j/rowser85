@@ -155,6 +155,35 @@ pub enum ClearMode {
     Both,
 }
 
+/// The `visibility` property.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VisibilityMode {
+    /// Painted.
+    #[default]
+    Visible,
+    /// Not painted (children may re-enable with `visibility: visible`).
+    Hidden,
+    /// Treated as hidden for row/column boxes; we map to Hidden.
+    Collapse,
+}
+
+/// The `overflow` property per axis, painting-oriented.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OverflowMode {
+    /// Overflowing content paints outside the box.
+    #[default]
+    Visible,
+    /// Overflowing content is clipped to the padding box.
+    Hidden,
+}
+
+impl OverflowMode {
+    /// Hidden (covers hidden/clip/scroll/auto for clipping purposes).
+    pub fn clips(self) -> bool {
+        matches!(self, OverflowMode::Hidden)
+    }
+}
+
 /// Flex direction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FlexDirectionMode {
@@ -518,6 +547,14 @@ pub struct StyleProps {
     /// raw value text. Substituted against the element's custom map at
     /// compute time, then re-parsed through the typed pipeline.
     pub var_props: Vec<(String, String)>,
+    /// `overflow-x`.
+    pub overflow_x: Option<OverflowMode>,
+    /// `overflow-y`.
+    pub overflow_y: Option<OverflowMode>,
+    /// `opacity`.
+    pub opacity: Option<f32>,
+    /// `visibility`.
+    pub visibility: Option<VisibilityMode>,
     /// `float` (mined from raw declarations; see css.rs).
     pub float: Option<FloatMode>,
     /// `clear` (mined from raw declarations; see css.rs).
@@ -618,6 +655,14 @@ pub struct ComputedStyle {
     /// own declarations layered over the inherited set. `var()` references
     /// in substituted declarations resolve against this map.
     pub custom: HashMap<String, String>,
+    /// `overflow-x` (clipping).
+    pub overflow_x: OverflowMode,
+    /// `overflow-y` (clipping).
+    pub overflow_y: OverflowMode,
+    /// `opacity` (0 = fully transparent subtree; approximated binary).
+    pub opacity: f32,
+    /// `visibility` (inherited).
+    pub visibility: VisibilityMode,
     /// `float` — not inherited.
     pub float: FloatMode,
     /// `clear` — not inherited.
@@ -702,6 +747,10 @@ impl Default for ComputedStyle {
             grid_auto_rows: Vec::new(),
             grid_auto_columns: Vec::new(),
             custom: HashMap::new(),
+            overflow_x: OverflowMode::Visible,
+            overflow_y: OverflowMode::Visible,
+            opacity: 1.0,
+            visibility: VisibilityMode::Visible,
             float: FloatMode::None,
             clear: ClearMode::None,
         }
@@ -859,6 +908,18 @@ fn apply_props(style: &mut ComputedStyle, props: &StyleProps, parent: &ComputedS
     }
     if let Some(position) = props.position {
         style.position = position;
+    }
+    if let Some(v) = props.overflow_x {
+        style.overflow_x = v;
+    }
+    if let Some(v) = props.overflow_y {
+        style.overflow_y = v;
+    }
+    if let Some(v) = props.opacity {
+        style.opacity = v.clamp(0.0, 1.0);
+    }
+    if let Some(v) = props.visibility {
+        style.visibility = v;
     }
     if let Some(p) = props.grid_column.as_ref() {
         style.grid_column = *p;

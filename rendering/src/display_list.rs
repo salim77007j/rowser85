@@ -40,6 +40,15 @@ pub enum DrawCmd {
         /// Decoded image.
         image: Arc<DecodedImage>,
     },
+    /// Pushes a clip rectangle (intersected with the current clip): all
+    /// commands until the matching [`DrawCmd::PopClip`] are clipped to it.
+    /// Emitted for `overflow`-clipping containers.
+    PushClip {
+        /// Clip rectangle in document coordinates.
+        rect: Rect,
+    },
+    /// Pops the most recent [`DrawCmd::PushClip`].
+    PopClip,
 }
 
 /// An ordered list of paint commands.
@@ -106,12 +115,20 @@ pub fn build_display_list(
         runs: &runs,
         order: 0,
         positioned: Vec::new(),
+        clip: None,
     };
     walk(dom, &mut ctx, root, &mut list);
     // Positioned layer: sorted by (z, DOM order); painted above in-flow.
+    // Each entry replays the clip chain captured where it was collected.
     ctx.positioned.sort_by_key(|a| (a.z, a.order));
     for entry in ctx.positioned {
-        list.commands.extend(entry.commands);
+        if let Some(clip) = entry.clip {
+            list.commands.push(DrawCmd::PushClip { rect: clip });
+            list.commands.extend(entry.commands);
+            list.commands.push(DrawCmd::PopClip);
+        } else {
+            list.commands.extend(entry.commands);
+        }
     }
     list
 }
@@ -121,6 +138,9 @@ struct PositionedEntry {
     z: i32,
     order: u32,
     commands: Vec<DrawCmd>,
+    /// Clip chain captured at collection time (a positioned descendant of a
+    /// clipping container is clipped to it).
+    clip: Option<Rect>,
 }
 
 /// Shared immutable inputs plus the positioned-subtree collector.
@@ -135,6 +155,33 @@ struct WalkCtx<'a> {
     order: u32,
     /// Positioned subtrees collected during the walk.
     positioned: Vec<PositionedEntry>,
+    /// Active clip chain (document coords); None = unclipped.
+    clip: Option<Rect>,
+}
+
+/// Intersects two optional clip rectangles.
+fn intersect_clip(a: Option<Rect>, b: Option<Rect>) -> Option<Rect> {
+    match (a, b) {
+        (Some(a), Some(b)) => {
+            let x0 = a.x.max(b.x);
+            let y0 = a.y.max(b.y);
+            let x1 = (a.x + a.w).min(b.x + b.w);
+            let y1 = (a.y + a.h).min(b.y + b.h);
+            if x1 <= x0 || y1 <= y0 {
+                return Some(Rect { x: x0, y: y0, w: 0.0, h: 0.0 });
+            }
+            Some(Rect { x: x0, y: y0, w: x1 - x0, h: y1 - y0 })
+        }
+        (Some(a), None) | (None, Some(a)) => Some(a),
+        (None, None) => None,
+    }
+}
+
+/// True when the subtree must not paint: `opacity: 0` or
+/// `visibility: hidden` (children can re-enable visibility).
+fn subtree_hidden_by_paint(style: &ComputedStyle) -> bool {
+    style.opacity <= 0.01
+        || style.visibility == rowser_parsing::cascade::VisibilityMode::Hidden
 }
 
 fn layout_root(dom: &Dom) -> Option<NodeId> {
@@ -169,6 +216,24 @@ fn walk(dom: &Dom, ctx: &mut WalkCtx<'_>, node: NodeId, list: &mut DisplayList) 
     if style.display == DisplayMode::None {
         return;
     }
+    // Paint suppression: opacity 0 or visibility hidden hides the subtree
+    // (descendants with visibility:visible re-show — handled per-element in
+    // the recursion, opacity cannot be re-enabled by children).
+    if style.opacity <= 0.01 && ctx.styles.get(node).is_some() {
+        return;
+    }
+    if style.visibility == rowser_parsing::cascade::VisibilityMode::Hidden {
+        // visibility: hidden hides this element's boxes but children with
+        // `visibility: visible` still paint — recurse with suppression of
+        // this element's own background only (approximated by recursing into
+        // children without painting this element).
+        for child in dom.flat_children(node) {
+            if dom.element(child).is_some() {
+                walk(dom, ctx, child, list);
+            }
+        }
+        return;
+    }
     // display:contents — no box of its own (no rect, no background):
     // its children paint HERE, in document order.
     if style.display == DisplayMode::Contents {
@@ -192,19 +257,50 @@ fn walk(dom: &Dom, ctx: &mut WalkCtx<'_>, node: NodeId, list: &mut DisplayList) 
     let order = ctx.order;
     ctx.order += 1;
 
+    // Clip chain: an overflow-clipping element confines its descendants to
+    // its PADDING box (border box inset by border widths).
+    let clip_rect = if style.overflow_x.clips() || style.overflow_y.clips() {
+        let b = &style.borders;
+        Some(Rect {
+            x: rect.x + b.left.width,
+            y: rect.y + b.top.width,
+            w: (rect.w - b.left.width - b.right.width).max(0.0),
+            h: (rect.h - b.top.width - b.bottom.width).max(0.0),
+        })
+    } else {
+        None
+    };
+    let saved_clip = ctx.clip;
+    ctx.clip = intersect_clip(saved_clip, clip_rect);
+
     // Positioned subtrees paint into their own layer, not the in-flow list.
     if is_positioned(style) && ctx.order > 1 {
         let mut sub = DisplayList::default();
         paint_element(dom, ctx, node, style, rect, &mut sub);
+        let clip = ctx.clip;
+        ctx.clip = saved_clip;
         ctx.positioned.push(PositionedEntry {
             z: style.z_index.unwrap_or(0),
             order,
             commands: sub.commands,
+            clip,
         });
         return;
     }
 
+    if clip_rect.is_some() {
+        // The element's own background and border are not clipped by its
+        // overflow box (they live inside it); the DESCENDANTS are.
+        list.commands.push(DrawCmd::PushClip {
+            rect: ctx.clip.unwrap_or(rect),
+        });
+        paint_element(dom, ctx, node, style, rect, list);
+        list.commands.push(DrawCmd::PopClip);
+        ctx.clip = saved_clip;
+        return;
+    }
     paint_element(dom, ctx, node, style, rect, list);
+    ctx.clip = saved_clip;
 }
 
 /// Paints one element (background, replaced content, border, text, then

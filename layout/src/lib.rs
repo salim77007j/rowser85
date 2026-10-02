@@ -267,6 +267,21 @@ fn taffy_style(cs: &ComputedStyle) -> Style {
             rowser_parsing::cascade::ClearMode::Both => TaffyClear::Both,
             rowser_parsing::cascade::ClearMode::None => TaffyClear::None,
         },
+        // overflow: layout side effects only (BFC root for hidden/scroll —
+        // floats stop propagating; flex/grid auto-min-size becomes 0).
+        // Painting-side clipping is handled by the display-list clip stack.
+        overflow: taffy::geometry::Point {
+            x: if cs.overflow_x.clips() {
+                TaffyOverflow::Hidden
+            } else {
+                TaffyOverflow::Visible
+            },
+            y: if cs.overflow_y.clips() {
+                TaffyOverflow::Hidden
+            } else {
+                TaffyOverflow::Visible
+            },
+        },
         size: TaffySize {
             width: dim(cs.width),
             height: dim(cs.height),

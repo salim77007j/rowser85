@@ -33,8 +33,8 @@ use rowser_dom::{parse_selector_list, SelectorList};
 use crate::cascade::{
     AlignItemsMode, BorderEdgeRaw, ClearMode, DisplayMode, FloatMode, FlexDirectionMode, FlexWrapMode,
     FontSizeRaw, FontStyleMode, FontWeightRaw, GridLineRaw, GridPlacementRaw, JustifyContentMode,
-    Length, LengthOrAuto, LineHeightRaw, LineStyleMode, NamedAreaRaw, PositionMode, Rgba, StyleProps,
-    TextAlignMode, TrackBoundRaw, TrackRaw,
+    Length, LengthOrAuto, LineHeightRaw, LineStyleMode, NamedAreaRaw, OverflowMode, PositionMode,
+    Rgba, StyleProps, TextAlignMode, TrackBoundRaw, TrackRaw, VisibilityMode,
 };
 
 /// One style rule ready for cascade.
@@ -708,6 +708,16 @@ fn apply_property(props: &mut StyleProps, property: &Property<'_>) {
         // Implicit track sizing.
         P::GridAutoRows(value) => props.grid_auto_rows = Some(track_size_list(value)),
         P::GridAutoColumns(value) => props.grid_auto_columns = Some(track_size_list(value)),
+        // overflow: hidden/auto/scroll/clip — the containment backbone of
+        // dropdown panels, media viewers and sticky chrome.
+        P::Overflow(value) => {
+            props.overflow_x = Some(convert_overflow(&value.x));
+            props.overflow_y = Some(convert_overflow(&value.y));
+        }
+        P::OverflowX(value) => props.overflow_x = Some(convert_overflow(value)),
+        P::OverflowY(value) => props.overflow_y = Some(convert_overflow(value)),
+        P::Opacity(value) => props.opacity = Some(value.0),
+        P::Visibility(value) => props.visibility = Some(convert_visibility(value)),
         P::Position(value) => props.position = Some(convert_position(value)),
         // Inset properties: anchor absolute elements and offset relative
         // ones. Previously unparsed — position:absolute navigation without
@@ -1117,6 +1127,25 @@ fn convert_gap(value: &GapValue) -> Length {
     match value {
         GapValue::Normal => Length::Px(0.0),
         GapValue::LengthPercentage(lp) => convert_length(lp),
+    }
+}
+
+fn convert_overflow(value: &lightningcss::properties::overflow::OverflowKeyword) -> OverflowMode {
+    use lightningcss::properties::overflow::OverflowKeyword;
+    match value {
+        OverflowKeyword::Visible => OverflowMode::Visible,
+        // clip/scroll/auto all clip for painting purposes.
+        _ => OverflowMode::Hidden,
+    }
+}
+
+fn convert_visibility(
+    value: &lightningcss::properties::display::Visibility,
+) -> VisibilityMode {
+    use lightningcss::properties::display::Visibility;
+    match value {
+        Visibility::Visible => VisibilityMode::Visible,
+        Visibility::Hidden | Visibility::Collapse => VisibilityMode::Hidden,
     }
 }
 
