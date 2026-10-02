@@ -12,7 +12,9 @@ use rowser_media::{open_pipeline, MediaEvent, MediaNotification};
 static REALTIME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn realtime_guard() -> std::sync::MutexGuard<'static, ()> {
-    REALTIME_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    REALTIME_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 fn load(name: &str) -> Vec<u8> {
