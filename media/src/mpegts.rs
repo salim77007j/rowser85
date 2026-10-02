@@ -38,7 +38,7 @@ pub fn looks_like_ts(bytes: &[u8]) -> bool {
     if bytes.len() >= PACKET * 2 {
         return bytes[PACKET] == SYNC && bytes[PACKET * 2] == SYNC;
     }
-    bytes.len() >= PACKET && bytes.len() % PACKET == 0
+    bytes.len() >= PACKET && bytes.len().is_multiple_of(PACKET)
 }
 
 /// Strips a leading ID3v2 tag (10-byte header + syncsafe size).

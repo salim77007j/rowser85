@@ -1484,7 +1484,7 @@ async fn spawn_hls_stream(
         };
         if !init_sent {
             if let Some(init) = &init_uri {
-                let init_url = resolve(&init);
+                let init_url = resolve(init);
                 let mut request = rowser_networking::FetchRequest {
                     url: init_url.clone(),
                     resource_type: rowser_networking::ResourceKind::Media,
