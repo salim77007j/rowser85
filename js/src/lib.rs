@@ -292,8 +292,7 @@ impl JsRuntime {
         js.install_natives(bridge)?;
         js.context.with(|ctx| {
             if let Err(e) = ctx.eval::<(), _>(prelude::PRELUDE_JS) {
-                let detail = exception_detail(&ctx)
-                    .unwrap_or_else(|| err_string(&e));
+                let detail = exception_detail(&ctx).unwrap_or_else(|| err_string(&e));
                 return Err(JsError::Eval(detail));
             }
             Ok(())

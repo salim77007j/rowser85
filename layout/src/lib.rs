@@ -417,11 +417,7 @@ fn build_box(
 
 /// True when the element subtree (excluding the element itself) contains
 /// block-level content — used to promote block-in-inline wrappers to boxes.
-fn has_block_descendant(
-    dom: &Dom,
-    styles: &StyleMap,
-    node: NodeId,
-) -> bool {
+fn has_block_descendant(dom: &Dom, styles: &StyleMap, node: NodeId) -> bool {
     for child in dom.children(node) {
         if dom.element(child).is_some() {
             let display = styles

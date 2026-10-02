@@ -656,8 +656,8 @@ fn convert_position(value: &Position) -> PositionMode {
 /// — the full-viewport HN explosion).
 fn media_matches(query: &lightningcss::media_query::MediaList<'_>, ctx: &MediaContext) -> bool {
     use lightningcss::media_query::{
-        MediaCondition, MediaFeature, MediaFeatureComparison, MediaFeatureName,
-        MediaFeatureValue, MediaQuery, MediaType, Operator, Qualifier,
+        MediaCondition, MediaFeature, MediaFeatureComparison, MediaFeatureName, MediaFeatureValue,
+        MediaQuery, MediaType, Operator, Qualifier,
     };
     if query.media_queries.is_empty() {
         return true;
@@ -691,7 +691,10 @@ fn condition_matches(
     match condition {
         MediaCondition::Feature(feature) => feature_matches(feature, ctx),
         MediaCondition::Not(inner) => !condition_matches(inner, ctx),
-        MediaCondition::Operation { operator, conditions } => match operator {
+        MediaCondition::Operation {
+            operator,
+            conditions,
+        } => match operator {
             Operator::And => conditions.iter().all(|c| condition_matches(c, ctx)),
             Operator::Or => conditions.iter().any(|c| condition_matches(c, ctx)),
         },
@@ -701,7 +704,10 @@ fn condition_matches(
 
 /// The viewport value a length-valued feature compares against, if known.
 fn feature_viewport_value(
-    name: &lightningcss::media_query::MediaFeatureName<'_, lightningcss::media_query::MediaFeatureId>,
+    name: &lightningcss::media_query::MediaFeatureName<
+        '_,
+        lightningcss::media_query::MediaFeatureId,
+    >,
     ctx: &MediaContext,
 ) -> Option<f32> {
     use lightningcss::media_query::{MediaFeatureId, MediaFeatureName};
@@ -732,8 +738,7 @@ fn feature_matches(
     ctx: &MediaContext,
 ) -> bool {
     use lightningcss::media_query::{
-        MediaFeature, MediaFeatureComparison, MediaFeatureId, MediaFeatureName,
-        MediaFeatureValue,
+        MediaFeature, MediaFeatureComparison, MediaFeatureId, MediaFeatureName, MediaFeatureValue,
     };
     match feature {
         MediaFeature::Plain { name, value } => match name {
@@ -748,9 +753,7 @@ fn feature_matches(
                 }
             }
             MediaFeatureName::Standard(MediaFeatureId::PrefersColorScheme) => match value {
-                MediaFeatureValue::Ident(id) => {
-                    id.eq_ignore_ascii_case("dark") == ctx.dark_mode
-                }
+                MediaFeatureValue::Ident(id) => id.eq_ignore_ascii_case("dark") == ctx.dark_mode,
                 _ => false,
             },
             _ => false,

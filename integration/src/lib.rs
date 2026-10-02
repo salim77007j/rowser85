@@ -415,7 +415,10 @@ impl Shell {
             }
             EngineEvent::ConsoleMessage { tab, level, text } => {
                 if std::env::var("ROWSER_UI_TRACE").is_ok() && level != "log" {
-                    eprintln!("[console:{tab}] {level}: {}", text.chars().take(240).collect::<String>());
+                    eprintln!(
+                        "[console:{tab}] {level}: {}",
+                        text.chars().take(240).collect::<String>()
+                    );
                 }
                 self.console.push(ConsoleEntry {
                     level: level.clone(),

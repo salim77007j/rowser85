@@ -64,15 +64,15 @@ async fn main() {
                     println!("{:50}    location: {}", "", loc);
                 }
                 // show first header set for debugging
-                let hs: Vec<String> = resp
-                    .headers
-                    .iter()
-                    .take(0)
-                    .map(|_| String::new())
-                    .collect();
+                let hs: Vec<String> = resp.headers.iter().take(0).map(|_| String::new()).collect();
                 let _ = hs;
             }
-            Ok(Err(e)) => println!("{:50} -> ERROR {} ({}ms)", site, e, t0.elapsed().as_millis()),
+            Ok(Err(e)) => println!(
+                "{:50} -> ERROR {} ({}ms)",
+                site,
+                e,
+                t0.elapsed().as_millis()
+            ),
             Err(_) => println!("{:50} -> TIMEOUT 20s", site),
         }
     }

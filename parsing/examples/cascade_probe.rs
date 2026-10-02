@@ -10,7 +10,11 @@ fn main() {
     let document = parse_html(&html);
     let dom = document.dom;
 
-    let media = MediaContext { width: 1360.0, height: 724.0, dark_mode: false };
+    let media = MediaContext {
+        width: 1360.0,
+        height: 724.0,
+        dark_mode: false,
+    };
     let mut sheets = Vec::new();
     for p in &css_paths {
         let css = std::fs::read_to_string(p).expect("css");
@@ -20,7 +24,11 @@ fn main() {
     }
     let t0 = std::time::Instant::now();
     let styles = compute_styles(&dom, &sheets, &media);
-    println!("cascade: {}ms for {} nodes", t0.elapsed().as_millis(), dom.node_count());
+    println!(
+        "cascade: {}ms for {} nodes",
+        t0.elapsed().as_millis(),
+        dom.node_count()
+    );
 
     // body + a few probes
     for probe in ["body", "html", "div", "p", "h1", "td"] {
@@ -41,7 +49,9 @@ fn main() {
                         );
                         shown += 1;
                     }
-                    if shown >= 2 { break; }
+                    if shown >= 2 {
+                        break;
+                    }
                 }
             }
         }

@@ -28,8 +28,8 @@ pub use client::HickoryDnsConfig;
 pub use h3::H3Settings;
 pub use scheduler::{ResourcePriority, ResourceScheduler};
 
-use rowser_privacy::PrivacySettings;
 use rowser_privacy::fingerprint::{ACCEPT_LANGUAGE, USER_AGENT};
+use rowser_privacy::PrivacySettings;
 use rowser_storage::cookies::{CookieJar, ThirdPartyPolicy};
 use rowser_storage::Storage;
 
@@ -438,11 +438,7 @@ fn fetch_data_url(request: &FetchRequest) -> Result<FetchResponse, NetError> {
 }
 
 /// Builds a standard header list for a request (user agent etc.).
-fn apply_default_headers(
-    request: &mut FetchRequest,
-    client: &ClientIdentity,
-    url: &Url,
-) {
+fn apply_default_headers(request: &mut FetchRequest, client: &ClientIdentity, url: &Url) {
     fn has(headers: &[(String, String)], name: &str) -> bool {
         headers.iter().any(|(n, _)| n.eq_ignore_ascii_case(name))
     }
@@ -455,7 +451,11 @@ fn apply_default_headers(
         set(&mut request.headers, "user-agent", &client.user_agent);
     }
     if !has(&request.headers, "accept-language") {
-        set(&mut request.headers, "accept-language", &client.accept_language);
+        set(
+            &mut request.headers,
+            "accept-language",
+            &client.accept_language,
+        );
     }
     if !has(&request.headers, "accept") {
         let accept = match request.resource_type {
@@ -492,11 +492,11 @@ fn apply_default_headers(
         ResourceKind::Other => ("no-cors", ""),
     };
     let site = fetch_site(url, &request.source_url);
-    request
-        .headers
-        .retain(|(n, _)| !(n.eq_ignore_ascii_case("sec-fetch-mode")
+    request.headers.retain(|(n, _)| {
+        !(n.eq_ignore_ascii_case("sec-fetch-mode")
             || n.eq_ignore_ascii_case("sec-fetch-dest")
-            || n.eq_ignore_ascii_case("sec-fetch-site")));
+            || n.eq_ignore_ascii_case("sec-fetch-site"))
+    });
     set(&mut request.headers, "sec-fetch-mode", mode);
     if !dest.is_empty() {
         set(&mut request.headers, "sec-fetch-dest", dest);

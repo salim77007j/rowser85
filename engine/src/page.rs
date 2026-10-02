@@ -1027,10 +1027,7 @@ impl Page {
             if trace {
                 eprintln!(
                     "[page-{}] painted frame id={} {}x{}",
-                    self.state.tab,
-                    frame.id,
-                    frame.width,
-                    frame.height
+                    self.state.tab, frame.id, frame.width, frame.height
                 );
             }
             let frame = Arc::new(frame);
