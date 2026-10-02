@@ -8,11 +8,14 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::sync::Arc;
 use std::time::Duration;
 
-use rowser_dom::Dom;
+use rowser_dom::{Dom, NodeId};
 use rowser_js::{
     prelude, EngineEvent as JsEngineEvent, JsCommand, JsConfig, JsRuntime, PageBridge,
 };
 use rowser_layout::{LayoutEngine, LayoutResult, Viewport};
+use rowser_media::{
+    MediaEvent as PipelineEvent, MediaIngressSender, MediaNotification, MediaPipeline,
+};
 use rowser_parsing::cascade::StyleMap;
 use rowser_parsing::css::{parse_stylesheet, MediaContext, ParsedStylesheet};
 use rowser_parsing::html::{parse_html, Document};
@@ -99,8 +102,53 @@ pub enum Message {
     ClickAt(f32, f32),
     /// Query what is at a document-space point (hover/status bar).
     HitTest(f32, f32),
+    /// A chunk of media bytes for a media element (direct source stream or
+    /// an appended MSE segment, already routed by lane).
+    MediaData {
+        /// Media element node handle.
+        node: u64,
+        /// Bytes for lane 0 (direct source).
+        data: Vec<u8>,
+    },
+    /// The direct-source stream for a media element finished.
+    MediaEof {
+        /// Media element node handle.
+        node: u64,
+    },
+    /// The media worker presented a new frame for an element.
+    MediaFrameReady {
+        /// Media element node handle.
+        node: u64,
+    },
+    /// A media pipeline event (pre-formatted for JS dispatch).
+    MediaEngineEvent {
+        /// Media element node handle.
+        node: u64,
+        /// Event type (loadedmetadata, canplay, timeupdate, ended, error...).
+        event: String,
+        /// JSON detail payload.
+        detail: String,
+    },
     /// Terminate the page thread.
     Shutdown,
+}
+
+/// One playing (or loaded) media element.
+struct MediaSlot {
+    pipeline: MediaPipeline,
+    #[allow(dead_code)]
+    ingress: MediaIngressSender,
+    autoplay: bool,
+    loop_playback: bool,
+    started: bool,
+}
+
+/// Page-side MSE state: appended-but-unattached bytes per SourceBuffer.
+#[derive(Default)]
+struct MediaSourceState {
+    source_buffers: HashMap<u64, String>,
+    backlog: HashMap<u64, Vec<u8>>,
+    attached_node: Option<u64>,
 }
 
 /// Kinds of subresources a page waits for.
@@ -114,6 +162,8 @@ pub enum SubresourceKind {
     Script,
     /// Image.
     Image,
+    /// Audio/video source (streamed to the media pipeline, never buffered).
+    Media,
 }
 
 impl SubresourceKind {
@@ -124,6 +174,7 @@ impl SubresourceKind {
             SubresourceKind::Stylesheet => rowser_networking::ResourceKind::Stylesheet,
             SubresourceKind::Script => rowser_networking::ResourceKind::Script,
             SubresourceKind::Image => rowser_networking::ResourceKind::Image,
+            SubresourceKind::Media => rowser_networking::ResourceKind::Media,
         }
     }
 }
@@ -240,6 +291,17 @@ struct Page {
     /// Script identities (URL or inline-N) already executed for this
     /// document — Chrome's "execute once" semantics.
     executed_scripts: std::collections::HashSet<String>,
+    /// Playing / loaded media elements keyed by node handle.
+    media_slots: HashMap<u64, MediaSlot>,
+    /// MSE MediaSource states keyed by MediaSource id.
+    mse_sources: HashMap<u64, MediaSourceState>,
+    /// SourceBuffer id → (node handle, lane).
+    sb_lanes: HashMap<u64, (u64, u64)>,
+    /// Latest decoded video frame per <video> node (blitted into the
+    /// display list).
+    video_frames: ImageMap,
+    /// Media state mirror shared with the JS runtime natives.
+    media_mirror: rowser_js::MediaMirrorMap,
 }
 
 impl Page {
@@ -277,6 +339,11 @@ impl Page {
             active_match: None,
             find_query: String::new(),
             executed_scripts: std::collections::HashSet::new(),
+            media_slots: HashMap::new(),
+            mse_sources: HashMap::new(),
+            sb_lanes: HashMap::new(),
+            video_frames: ImageMap::new(),
+            media_mirror: Rc::new(RefCell::new(HashMap::new())),
         }
     }
 
@@ -360,6 +427,14 @@ impl Page {
             Message::SavePage(path) => self.save_page(path),
             Message::ClickAt(x, y) => self.click_at(x, y),
             Message::HitTest(x, y) => self.hit_test(x, y),
+            Message::MediaData { node, data } => self.media_data(node, &data),
+            Message::MediaEof { node } => self.media_eof(node),
+            Message::MediaFrameReady { node } => self.media_frame_ready(node),
+            Message::MediaEngineEvent {
+                node,
+                event,
+                detail,
+            } => self.media_engine_event(node, &event, &detail),
         }
         false
     }
@@ -384,6 +459,47 @@ impl Page {
             }
             JsCommand::MarkDirty => {
                 self.dirty = true;
+            }
+            JsCommand::MediaSetSrc { node, url } => self.media_set_src(node, &url),
+            JsCommand::MediaPlay { node } => self.media_play(node, true),
+            JsCommand::MediaPause { node } => self.media_play(node, false),
+            JsCommand::MediaSeek { node, time } => {
+                if let Some(slot) = self.media_slots.get(&node) {
+                    slot.pipeline.seek(time);
+                }
+            }
+            JsCommand::MediaSetVolume { node, volume } => {
+                if let Some(slot) = self.media_slots.get(&node) {
+                    slot.pipeline.set_volume(volume);
+                }
+            }
+            JsCommand::MediaSetMuted { node, muted } => {
+                if let Some(slot) = self.media_slots.get(&node) {
+                    slot.pipeline.set_muted(muted);
+                }
+            }
+            JsCommand::MediaCreateSource { ms_id } => {
+                self.mse_sources.entry(ms_id).or_default();
+            }
+            JsCommand::MediaAddSourceBuffer { ms_id, mime, sb_id } => {
+                if let Some(source) = self.mse_sources.get_mut(&ms_id) {
+                    source.source_buffers.insert(sb_id, mime);
+                    source.backlog.entry(sb_id).or_default();
+                }
+            }
+            JsCommand::MediaAppendBuffer { sb_id, data } => {
+                self.mse_append(sb_id, &data);
+            }
+            JsCommand::MediaEndOfStream { ms_id } => {
+                if let Some(source) = self.mse_sources.get(&ms_id) {
+                    if let Some(node) = source.attached_node {
+                        if let Some(slot) = self.media_slots.get(&node) {
+                            for sb in source.source_buffers.keys() {
+                                slot.ingress.close_lane(*sb);
+                            }
+                        }
+                    }
+                }
             }
             JsCommand::Navigate { url } => {
                 // Script-initiated navigation (location.href = ...). Resolve
@@ -671,6 +787,14 @@ impl Page {
         self.find_matches.clear();
         self.active_match = None;
         self.find_query.clear();
+        for slot in self.media_slots.values() {
+            slot.pipeline.close();
+        }
+        self.media_slots.clear();
+        self.mse_sources.clear();
+        self.sb_lanes.clear();
+        self.video_frames.clear();
+        self.media_mirror.borrow_mut().clear();
         self.js = None;
         self.workers.clear();
         self.dom = None;
@@ -750,6 +874,12 @@ impl Page {
                     self.dirty = true;
                 }
             }
+            SubresourceKind::Media => {
+                // Media never uses the buffered subresource path (it would
+                // hold whole videos in memory); the streaming loader feeds
+                // Message::MediaData instead. A late completion here means
+                // the navigation moved on: drop the bytes.
+            }
         }
     }
 
@@ -812,6 +942,15 @@ impl Page {
                         } else {
                             requests.push((src, SubresourceKind::Image));
                         }
+                    }
+                }
+                "video" | "audio" => {
+                    if let Some(src) = dom_ref.get_attr(node, "src") {
+                        let src = self.resolve_url(src);
+                        let autoplay = dom_ref.get_attr(node, "autoplay").is_some();
+                        let muted = dom_ref.get_attr(node, "muted").is_some();
+                        let looped = dom_ref.get_attr(node, "loop").is_some();
+                        self.media_register(node, &src, autoplay, muted, looped);
                     }
                 }
                 _ => {}
@@ -1001,7 +1140,13 @@ impl Page {
         };
         let Some(dom) = self.dom.clone() else { return };
         let dl_t0 = std::time::Instant::now();
-        let list = build_display_list(&dom.borrow(), &styles, &layout, &self.images);
+        let list = build_display_list(
+            &dom.borrow(),
+            &styles,
+            &layout,
+            &self.images,
+            &self.video_frames,
+        );
         if std::env::var("ROWSER_UI_TRACE").is_ok() {
             eprintln!(
                 "[page-{}] display_list took {}ms ({} cmds)",
@@ -1073,6 +1218,7 @@ impl Page {
                 storage: Some(Arc::clone(&self.state.storage)),
                 spoof: self.state.spoof.clone(),
                 outgoing: Some(self.js_tx.clone()),
+                media_mirror: Rc::clone(&self.media_mirror),
             };
             match JsRuntime::new(self.state.js_config.clone(), bridge) {
                 Ok(runtime) => self.js = Some(runtime),
@@ -1139,6 +1285,7 @@ impl Page {
             storage: None,
             spoof: self.state.spoof.clone(),
             outgoing: Some(self.js_tx.clone()),
+            media_mirror: Rc::new(RefCell::new(HashMap::new())),
         };
         if let Ok(runtime) = JsRuntime::new(JsConfig::default(), bridge) {
             runtime
@@ -1147,6 +1294,324 @@ impl Page {
             let _ = runtime.eval(prelude::WORKER_PRELUDE_JS, "worker-prelude.js");
             let _ = runtime.eval(&code, "worker.js");
             self.workers.insert(worker, runtime);
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Media: HTMLMediaElement + MSE wiring. The decode pipeline lives in
+    // the `rowser-media` crate; the page thread owns the handles, routes
+    // bytes, blits frames and mirrors state into JS.
+    // ------------------------------------------------------------------
+
+    /// Opens a pipeline for a media element and asks the engine to stream
+    /// its source (unless it is an MSE object URL).
+    fn media_register(
+        &mut self,
+        node: NodeId,
+        src: &str,
+        autoplay: bool,
+        muted: bool,
+        looped: bool,
+    ) {
+        let node_u = node as u64;
+        if self.media_slots.contains_key(&node_u) || src.is_empty() {
+            return;
+        }
+        if src.starts_with("rowser-mse:") {
+            // MSE attach happens through mse_attach once bytes arrive.
+            let ms_id: u64 = src
+                .strip_prefix("rowser-mse:")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0);
+            if ms_id > 0 {
+                self.mse_attach(ms_id, node, autoplay, muted, looped);
+            }
+            return;
+        }
+        let (pipeline, ingress) = rowser_media::open_pipeline(self.media_notify(node_u));
+        self.media_slots.insert(
+            node_u,
+            MediaSlot {
+                pipeline,
+                ingress,
+                autoplay,
+                loop_playback: looped,
+                started: false,
+            },
+        );
+        self.media_muted(node_u, muted);
+        let _ = self.engine_tx.send(Cmd::Internal(Internal::MediaLoad {
+            tab: self.state.tab,
+            node: node_u,
+            url: src.to_owned(),
+        }));
+    }
+
+    /// Notification closure handed to a pipeline worker: routes frame-ready
+    /// and media events back into this page thread via the engine loop.
+    fn media_notify(&self, node: u64) -> Arc<dyn Fn(MediaNotification) + Send + Sync> {
+        let engine_tx = self.engine_tx.clone();
+        let tab = self.state.tab;
+        Arc::new(move |notification| match notification {
+            MediaNotification::FrameReady => {
+                let _ = engine_tx.send(Cmd::Internal(Internal::PageMessage {
+                    tab,
+                    message: Box::new(Message::MediaFrameReady { node }),
+                }));
+            }
+            MediaNotification::Event(event) => {
+                let (event, detail) = media_event_parts(&event);
+                let _ = engine_tx.send(Cmd::Internal(Internal::PageMessage {
+                    tab,
+                    message: Box::new(Message::MediaEngineEvent {
+                        node,
+                        event,
+                        detail,
+                    }),
+                }));
+            }
+        })
+    }
+
+    /// JS set `video.src`.
+    fn media_set_src(&mut self, node: u64, url: &str) {
+        let url = url.to_owned();
+        let (autoplay, muted, looped) = self
+            .dom
+            .as_ref()
+            .and_then(|dom| {
+                let dom = dom.borrow();
+                dom.element(node as NodeId).map(|_el| {
+                    (
+                        dom.get_attr(node as NodeId, "autoplay").is_some(),
+                        dom.get_attr(node as NodeId, "muted").is_some(),
+                        dom.get_attr(node as NodeId, "loop").is_some(),
+                    )
+                })
+            })
+            .unwrap_or((false, false, false));
+        self.media_register(node as NodeId, &url, autoplay, muted, looped);
+    }
+
+    /// play()/pause() from JS. `play` true also starts autoplay tracking.
+    fn media_play(&mut self, node: u64, play: bool) {
+        if let Some(slot) = self.media_slots.get_mut(&node) {
+            if play {
+                slot.started = true;
+                slot.pipeline.play();
+            } else {
+                slot.pipeline.pause();
+            }
+        }
+        if let Some(mirror) = self.media_mirror.borrow_mut().get_mut(&node) {
+            mirror.paused = !play;
+        }
+    }
+
+    /// Direct-source bytes arriving from the engine's streaming fetch.
+    fn media_data(&mut self, node: u64, data: &[u8]) {
+        if let Some(slot) = self.media_slots.get_mut(&node) {
+            slot.ingress.push(0, data.to_vec());
+            if slot.autoplay && !slot.started {
+                slot.started = true;
+                slot.pipeline.play();
+            }
+        }
+    }
+
+    /// Direct-source stream finished.
+    fn media_eof(&mut self, node: u64) {
+        if let Some(slot) = self.media_slots.get(&node) {
+            slot.ingress.close_lane(0);
+        }
+    }
+
+    /// A decoded video frame is presentable: blit it into the frame map.
+    fn media_frame_ready(&mut self, node: u64) {
+        let frame = self
+            .media_slots
+            .get(&node)
+            .and_then(|slot| slot.pipeline.latest_frame());
+        if std::env::var("ROWSER_MEDIA_TRACE").is_ok() {
+            eprintln!(
+                "[page-{}] media_frame_ready node={} have={}",
+                self.state.tab,
+                node,
+                frame.is_some()
+            );
+        }
+        if let Some(image) = frame {
+            let image = DecodedImage {
+                width: image.width,
+                height: image.height,
+                rgba: Arc::clone(&image.rgba),
+            };
+            self.video_frames.insert(node as NodeId, Arc::new(image));
+            self.dirty = true;
+            self.repaint();
+        }
+    }
+
+    /// A pipeline event: refresh the JS mirror and dispatch the DOM event.
+    fn media_engine_event(&mut self, node: u64, event: &str, detail: &str) {
+        let Some(slot) = self.media_slots.get(&node) else {
+            return;
+        };
+        let info = slot.pipeline.info();
+        let playing = !slot.pipeline.is_paused();
+        {
+            let mut mirror = self.media_mirror.borrow_mut();
+            let entry = mirror.entry(node).or_default();
+            entry.duration = info.duration;
+            entry.width = info.width;
+            entry.height = info.height;
+            entry.paused = !playing;
+            entry.error = slot.pipeline.error();
+            match event {
+                "timeupdate" => {
+                    entry.time = detail
+                        .strip_prefix("{\"time\":")
+                        .and_then(|rest| rest.trim_end_matches('}').parse().ok())
+                        .unwrap_or(entry.time);
+                    if entry.ready_state < 1 {
+                        entry.ready_state = 1;
+                    }
+                }
+                "loadedmetadata" => {
+                    if entry.ready_state < 1 {
+                        entry.ready_state = 1;
+                    }
+                }
+                "canplay" => entry.ready_state = 4,
+                _ => {}
+            }
+            entry.buffered_end = slot.pipeline.buffered_end(0);
+        }
+        if let Some(js) = &self.js {
+            js.dispatch(JsEngineEvent::MediaEvent {
+                node,
+                event_type: event.to_owned(),
+                detail: detail.to_owned(),
+            });
+        }
+        // Autoplay + loop handling.
+        if event == "ended" {
+            if std::env::var("ROWSER_MEDIA_TRACE").is_ok() {
+                eprintln!(
+                    "[page-{}] media ended node={} (loop check)",
+                    self.state.tab, node
+                );
+            }
+            // loop attribute: the byte stream is fully consumed by now, so
+            // replay means re-streaming the source into a fresh pipeline.
+            let should_loop = self
+                .media_slots
+                .get(&node)
+                .map(|slot| slot.loop_playback)
+                .unwrap_or(false);
+            if should_loop {
+                let src = self.dom.as_ref().and_then(|dom| {
+                    let dom = dom.borrow();
+                    dom.element(node as NodeId)
+                        .and_then(|_| dom.get_attr(node as NodeId, "src"))
+                        .map(|s| self.resolve_url(s))
+                });
+                if let Some(src) = src {
+                    if let Some(slot) = self.media_slots.remove(&node) {
+                        slot.pipeline.close();
+                    }
+                    self.video_frames.remove(&(node as NodeId));
+                    // autoplay=true: the fresh stream starts playing as soon
+                    // as its first bytes arrive (a loop never waits).
+                    self.media_register(node as NodeId, &src, true, false, true);
+                }
+            }
+        }
+        self.mark_if_dirty();
+    }
+
+    /// Attaches an MSE MediaSource to a media element: creates the pipeline
+    /// and flushes appended backlogs into per-SourceBuffer lanes.
+    fn mse_attach(&mut self, ms_id: u64, node: NodeId, autoplay: bool, muted: bool, looped: bool) {
+        let node_u = node as u64;
+        if !self.mse_sources.contains_key(&ms_id) {
+            return;
+        }
+        if !self.media_slots.contains_key(&node_u) {
+            let (pipeline, ingress) = rowser_media::open_pipeline(self.media_notify(node_u));
+            self.media_slots.insert(
+                node_u,
+                MediaSlot {
+                    pipeline,
+                    ingress,
+                    autoplay,
+                    loop_playback: looped,
+                    started: false,
+                },
+            );
+            self.media_muted(node_u, muted);
+        }
+        let mut flushes: Vec<(u64, Vec<u8>)> = Vec::new();
+        if let Some(source) = self.mse_sources.get_mut(&ms_id) {
+            source.attached_node = Some(node_u);
+            for sb_id in source.source_buffers.keys() {
+                if let Some(backlog) = source.backlog.get_mut(sb_id) {
+                    if !backlog.is_empty() {
+                        flushes.push((*sb_id, std::mem::take(backlog)));
+                    }
+                }
+            }
+        }
+        for (sb_id, bytes) in flushes {
+            self.sb_lanes.insert(sb_id, (node_u, sb_id));
+            if let Some(slot) = self.media_slots.get(&node_u) {
+                slot.ingress.push(sb_id, bytes);
+            }
+        }
+        // Fire sourceopen so players start their append loops.
+        if let Some(js) = &self.js {
+            js.dispatch(JsEngineEvent::MediaSourceEvent {
+                ms_id,
+                sb_id: None,
+                event_type: "sourceopen".to_owned(),
+            });
+        }
+    }
+
+    /// appendBuffer bytes: route to the attached pipeline lane or park in
+    /// the backlog until the MediaSource is attached to an element.
+    fn mse_append(&mut self, sb_id: u64, bytes: &[u8]) {
+        if let Some((node, lane)) = self.sb_lanes.get(&sb_id).copied() {
+            if let Some(slot) = self.media_slots.get(&node) {
+                slot.ingress.push(lane, bytes.to_vec());
+            }
+            return;
+        }
+        // Not routed yet. A SourceBuffer created AFTER the MediaSource was
+        // attached to an element routes immediately; otherwise it parks in
+        // the backlog until attach.
+        for source in self.mse_sources.values_mut() {
+            if source.source_buffers.contains_key(&sb_id) {
+                if let Some(node) = source.attached_node {
+                    self.sb_lanes.insert(sb_id, (node, sb_id));
+                    if let Some(slot) = self.media_slots.get(&node) {
+                        slot.ingress.push(sb_id, bytes.to_vec());
+                        return;
+                    }
+                }
+                source
+                    .backlog
+                    .entry(sb_id)
+                    .or_default()
+                    .extend_from_slice(bytes);
+                return;
+            }
+        }
+    }
+
+    fn media_muted(&mut self, node: u64, muted: bool) {
+        if let Some(slot) = self.media_slots.get(&node) {
+            slot.pipeline.set_muted(muted);
         }
     }
 
@@ -1201,7 +1666,12 @@ impl Page {
             .values()
             .map(|image| image.memory_usage() as u64)
             .sum::<u64>();
-        dom_bytes + js_bytes + worker_bytes.max(0) as u64 + frame_bytes + image_bytes
+        let video_bytes = self
+            .video_frames
+            .values()
+            .map(|image| image.memory_usage() as u64)
+            .sum::<u64>();
+        dom_bytes + js_bytes + worker_bytes.max(0) as u64 + frame_bytes + image_bytes + video_bytes
     }
 
     fn snapshot(&self, f: impl FnOnce(&mut TabSnapshot)) {
@@ -1212,6 +1682,36 @@ impl Page {
         let _ = self
             .engine_tx
             .send(Cmd::Internal(Internal::PageExited(self.state.tab)));
+    }
+}
+
+/// Formats a pipeline event as (DOM event name, JSON detail).
+fn media_event_parts(event: &PipelineEvent) -> (String, String) {
+    match event {
+        PipelineEvent::LoadedMetadata {
+            duration,
+            width,
+            height,
+            has_video,
+            has_audio,
+        } => (
+            "loadedmetadata".to_owned(),
+            format!(
+                "{{\"duration\":{duration},\"width\":{width},\"height\":{height},\"hasVideo\":{has_video},\"hasAudio\":{has_audio}}}"
+            ),
+        ),
+        PipelineEvent::CanPlay => ("canplay".to_owned(), "{}".to_owned()),
+        PipelineEvent::Playing => ("play".to_owned(), "{}".to_owned()),
+        PipelineEvent::Paused => ("pause".to_owned(), "{}".to_owned()),
+        PipelineEvent::Ended => ("ended".to_owned(), "{}".to_owned()),
+        PipelineEvent::TimeUpdate { time } => (
+            "timeupdate".to_owned(),
+            format!("{{\"time\":{time}}}"),
+        ),
+        PipelineEvent::Error(message) => (
+            "error".to_owned(),
+            format!("{{\"message\":{}}}", serde_json::to_string(message).unwrap_or_default()),
+        ),
     }
 }
 

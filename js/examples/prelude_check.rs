@@ -19,6 +19,7 @@ fn main() {
         storage: None,
         spoof: rowser_privacy::fingerprint::SpoofProfile::from_seed([1u8; 32]),
         outgoing: Some(tx),
+        media_mirror: std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashMap::new())),
     };
     let t0 = Instant::now();
     println!("creating runtime (evals prelude)…");

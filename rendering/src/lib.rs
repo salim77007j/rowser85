@@ -170,7 +170,13 @@ mod tests {
                 height: 600.0,
             },
         );
-        let list = build_display_list(&doc.dom, &styles, &layout, &Default::default());
+        let list = build_display_list(
+            &doc.dom,
+            &styles,
+            &layout,
+            &Default::default(),
+            &Default::default(),
+        );
         let mut painter = Painter::new();
         let frame = painter
             .render(&list, RenderOptions::default(), &mut engine.font_system)

@@ -210,3 +210,76 @@ follow-up that unlocks YouTube/Twitch-class players; EME/DRM
 (Widevine) is licensing-blocked for an independent browser — a permanent,
 honest limitation (Netflix et al. will not play).
 
+
+---
+
+## 10. Session 4 addendum (2026-10-02): the media pipeline — video, MSE, live
+
+**Mission:** close the last standard-browser gap: *watch videos and live
+streams*. The decision record is `docs/MEDIA.md` (original byte-stream
+pipeline + original ISOBMFF demuxer + openh264/symphonia/cpal behind it).
+
+### Implemented
+- New `rowser-media` crate: streaming ISOBMFF/fMP4 demuxer (progressive
+  tables + fragments, lanes, consumed-byte dropping), H.264 decode
+  (avcC→Annex-B→openh264→stride-aware YUV420→RGBA8), AAC decode (symphonia),
+  cpal audio sink with silent fallback, wall-clock presentation with a
+  0.30 s scheduling window, per-element worker threads.
+- Engine: `SubresourceKind::Media` + ranged 2 MB streaming loader (privacy
+  stack in charge of every request) + fMP4-HLS playlist reader (init
+  segment, media segments, ENDLIST or live re-poll), MSE state machine on
+  the page (MediaSource/SourceBuffer/backlog/lane routing), video frame
+  blit through the existing image path, media state mirror for JS.
+- JS: `HTMLMediaElement` (play/pause/currentTime/duration/volume/muted/
+  readyState/error/canPlayType), `MediaSource`, `SourceBuffer`
+  (`appendBuffer` with exact ArrayBuffer transport), `URL.createObjectURL`,
+  element wrapping by tag for `querySelector('video')`, byte-exact binary
+  fetch bodies (`arrayBuffer()`), relative-URL fetch resolution, media
+  event dispatch (`loadedmetadata/canplay/timeupdate/ended/error/…`).
+
+### Validation
+- Crate tests (7): progressive demux, fragmented demux, audio-only,
+  non-MP4 rejection, full pipeline (bytes→demux→decode→present→Ended at
+  real-time), frame-advance proof, EOF-duration.
+- Battery: **29/29 stages** (26 prior + 3 new media stages, `media` phase
+  in `ci/ui-validate.sh`): `m1-direct-video`, `m2-mse-video`,
+  `m3-after-media` — PASS with frame-change attestation.
+- Remote proof: Big Buck Bunny 480×270 H.264/AAC over public HTTPS plays
+  in the browser (`screenshots/r1-remote-video-tag.png`).
+- Benchmarks after the change: parse-html/medium 2.0 ms, engine-cold-init
+  3.7 ms — in line with session-2 baselines; media adds zero idle cost
+  (pipelines exist only while an element has a source).
+
+### Defects found and fixed while validating (all live-driven)
+1. Top-level box cursor never advanced → moov unreachable (fixed with a
+   `parsed_to` cursor + safe advance gating before moov).
+2. First-push format validation re-fired after the buffer drained
+   mid-stream → spurious `NotIsobmff` (validate only the first bytes).
+3. tfhd/trun are full boxes: flags live in bytes 1..4, not 0..3 — reading
+   them wrong broke every fragment (sizes/durations from wrong offsets).
+4. `stbl` is nested `mdia/minf/stbl` — single-level walk missed it.
+5. Samples beyond the scheduling window were dropped instead of queued →
+   one-frame playback (pending queues added).
+6. Fragmented mvhd duration is 0 → duration learned at EOF and
+   LoadedMetadata re-published.
+7. `play()` after `ended` latched (loop attribute dead) + loop needs
+   re-streaming (consumed lanes) — loop now re-registers and autoplays.
+8. Video noise garbage: openh264 pads rows — YUV conversion now honors
+   `strides()`.
+9. MSE appendBuffer bytes: latin-1 string bridge corrupted non-UTF-8
+   (50028→47796 bytes); switched to exact ArrayBuffer extraction.
+10. `fetch()` bodies: base64→`from_utf8_lossy` corrupted binary; new
+    byte-exact latin-1 decode path for `arrayBuffer()`.
+11. Relative fetch URLs failed (`relative URL without a base`) — fetch
+    resolves against the document URL now.
+
+### Journey status after session 4
+| Journey | Status |
+|---|---|
+| Search Google | ✓ (session 3) |
+| Browse the web | ✓ 145/145 (session 3) |
+| Watch videos (direct MP4/H.264+AAC) | ✓ remote + local, looping, autoplay |
+| Watch videos (MSE players: hls.js-class) | ✓ fMP4 via appendBuffer plays |
+| Live streams (fMP4-HLS) | ✓ playlist reader (ENDLIST + live re-poll) |
+| YouTube app | ◐ skeleton renders, scripts run clean; Polymer needs custom-element upgrades + shadow DOM (next epic) |
+| DRM (Netflix-class) | ✗ EME/Widevine permanently out (licensing) |

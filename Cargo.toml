@@ -9,6 +9,7 @@ members = [
     "networking",
     "storage",
     "privacy",
+    "media",
     "engine",
     "api",
     "tests",
@@ -25,6 +26,12 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/salim77007j/rowser85"
 rust-version = "1.87"
+
+# Debuginfo is the bulk of dev-profile disk use; tests and the validation
+# rig run without it (backtraces stay usable via line tables in CI logs).
+[profile.dev]
+debug = 0
+strip = "debuginfo"
 
 [profile.release]
 lto = "thin"

@@ -308,6 +308,16 @@ pub enum Internal {
         /// Message.
         message: Box<page::Message>,
     },
+    /// Stream a media source into a page's media element (direct URL or
+    /// HLS playlist).
+    MediaLoad {
+        /// Tab id.
+        tab: TabId,
+        /// Media element node handle.
+        node: u64,
+        /// Source URL.
+        url: String,
+    },
     /// CNAME-cloaking verdict from the privacy gate thread.
     CnameVerdict {
         /// Tab id.
@@ -971,6 +981,33 @@ fn handle_internal(state: &EngineLoop, internal: Internal) {
         Internal::PageMessage { tab, message } => {
             send_page(&state.tabs, tab, |tx| tx.send(*message));
         }
+        Internal::MediaLoad { tab, node, url } => {
+            let request = rowser_networking::FetchRequest {
+                url: url.clone(),
+                resource_type: rowser_networking::ResourceKind::Media,
+                source_url: state.source_url(tab),
+                top_site: None,
+                ..rowser_networking::FetchRequest::default()
+            };
+            if let RequestVerdict::Block(reason) = blocklist_check(state, &request) {
+                let _ = state.event_tx.send(EngineEvent::BlockedRequest {
+                    tab,
+                    url: request.url.clone(),
+                    reason,
+                });
+                send_page_direct(
+                    state.cmd_tx.clone(),
+                    tab,
+                    page::Message::MediaEngineEvent {
+                        node,
+                        event: "error".to_owned(),
+                        detail: "{\"message\":\"blocked\"}".to_owned(),
+                    },
+                );
+                return;
+            }
+            spawn_media_stream(state, tab, node, url);
+        }
         Internal::CnameVerdict {
             tab,
             request,
@@ -1049,6 +1086,13 @@ fn handle_page_command(state: &EngineLoop, tab: TabId, command: JsCommand) {
             // timers are ignored by the JS prelude.
         }
         JsCommand::FetchStart { id, url, init } => {
+            // Resolve relative URLs against the document (fetch('file.mp4')
+            // on https://site/page must hit https://site/file.mp4).
+            let url = url::Url::parse(&state.source_url(tab))
+                .ok()
+                .and_then(|base| base.join(&url).ok())
+                .map(|joined| joined.to_string())
+                .unwrap_or(url);
             let request = js_fetch_request(state, tab, url, init);
             if let RequestVerdict::Block(reason) = blocklist_check(state, &request) {
                 let _ = state.event_tx.send(EngineEvent::BlockedRequest {
@@ -1145,7 +1189,225 @@ fn handle_page_command(state: &EngineLoop, tab: TabId, command: JsCommand) {
         JsCommand::WorkerEgress { .. } => {
             // Local routing only.
         }
+        JsCommand::MediaSetSrc { .. }
+        | JsCommand::MediaPlay { .. }
+        | JsCommand::MediaPause { .. }
+        | JsCommand::MediaSeek { .. }
+        | JsCommand::MediaSetVolume { .. }
+        | JsCommand::MediaSetMuted { .. }
+        | JsCommand::MediaCreateSource { .. }
+        | JsCommand::MediaAddSourceBuffer { .. }
+        | JsCommand::MediaAppendBuffer { .. }
+        | JsCommand::MediaEndOfStream { .. } => {
+            // Handled on the page thread (media registry lives there).
+        }
     }
+}
+
+/// Streams a media URL into the page's element: ranged 2 MB chunks for a
+/// direct resource, playlist-driven segment fetching for HLS. Bytes flow
+/// through the page channel as [`page::Message::MediaData`] so the privacy
+/// stack and the identity headers stay in charge of every request.
+fn spawn_media_stream(state: &EngineLoop, tab: TabId, node: u64, url: String) {
+    let network = Arc::clone(&state.network);
+    let cmd_tx = state.cmd_tx.clone();
+    let source_url = state.source_url(tab);
+    const CHUNK: u64 = 2 * 1024 * 1024;
+    const MAX_TOTAL: u64 = 192 * 1024 * 1024;
+    state.runtime.spawn(async move {
+        if url.contains(".m3u8") {
+            spawn_hls_stream(&network, cmd_tx, tab, node, url, source_url).await;
+            return;
+        }
+        // Direct ranged streaming.
+        let mut pos: u64 = 0;
+        let mut total: Option<u64> = None;
+        loop {
+            let end = pos + CHUNK - 1;
+            let mut request = rowser_networking::FetchRequest {
+                url: url.clone(),
+                resource_type: rowser_networking::ResourceKind::Media,
+                source_url: source_url.clone(),
+                top_site: None,
+                ..rowser_networking::FetchRequest::default()
+            };
+            request
+                .headers
+                .push(("Range".to_owned(), format!("bytes={pos}-{end}")));
+            match rowser_networking::fetch(&network, request).await {
+                Ok(response) if response.is_success() || response.status == 206 => {
+                    if total.is_none() {
+                        total = response
+                            .headers
+                            .iter()
+                            .find(|(name, _)| name.eq_ignore_ascii_case("content-range"))
+                            .and_then(|(_, value)| {
+                                value.split('/').nth(1).and_then(|v| v.parse().ok())
+                            })
+                            .or_else(|| {
+                                response
+                                    .headers
+                                    .iter()
+                                    .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                                    .and_then(|(_, value)| value.parse().ok())
+                            });
+                    }
+                    let len = response.body.len() as u64;
+                    if len == 0 {
+                        break;
+                    }
+                    if cmd_tx
+                        .send(Cmd::Internal(Internal::PageMessage {
+                            tab,
+                            message: Box::new(page::Message::MediaData {
+                                node,
+                                data: response.body.to_vec(),
+                            }),
+                        }))
+                        .is_err()
+                    {
+                        return; // page closed
+                    }
+                    pos += len;
+                    if let Some(total) = total {
+                        if pos >= total {
+                            break;
+                        }
+                    }
+                    if pos > MAX_TOTAL {
+                        break;
+                    }
+                }
+                Ok(_) => break,
+                Err(_) => break,
+            }
+        }
+        let _ = cmd_tx.send(Cmd::Internal(Internal::PageMessage {
+            tab,
+            message: Box::new(page::Message::MediaEof { node }),
+        }));
+    });
+}
+
+/// Minimal fMP4-HLS reader: fetches the playlist, pushes the init segment
+/// and every media segment; live playlists are re-polled until ENDLIST.
+async fn spawn_hls_stream(
+    network: &Arc<rowser_networking::NetworkContext>,
+    cmd_tx: std::sync::mpsc::Sender<Cmd>,
+    tab: TabId,
+    node: u64,
+    url: String,
+    source_url: String,
+) {
+    let base = url::Url::parse(&url).ok();
+    let mut fetched: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut init_sent = false;
+    let mut round = 0u32;
+    while round < 900 {
+        round += 1;
+        let request = rowser_networking::FetchRequest {
+            url: url.clone(),
+            resource_type: rowser_networking::ResourceKind::Media,
+            source_url: source_url.clone(),
+            top_site: None,
+            ..rowser_networking::FetchRequest::default()
+        };
+        let Ok(response) = rowser_networking::fetch(network, request).await else {
+            break;
+        };
+        if !response.is_success() {
+            break;
+        }
+        let text = String::from_utf8_lossy(&response.body).into_owned();
+        let mut init_uri: Option<String> = None;
+        let mut segments: Vec<String> = Vec::new();
+        let mut ended = false;
+        for line in text.lines() {
+            let line = line.trim();
+            if let Some(rest) = line.strip_prefix("#EXT-X-MAP:") {
+                for attr in rest.split(',') {
+                    if let Some(uri) = attr.trim().strip_prefix("URI=") {
+                        init_uri = Some(uri.trim_matches('"').to_owned());
+                    }
+                }
+            } else if line.starts_with("#EXT-X-ENDLIST") {
+                ended = true;
+            } else if !line.starts_with('#') && !line.is_empty() {
+                segments.push(line.to_owned());
+            }
+        }
+        let resolve = |href: &str| -> String {
+            if href.starts_with("http://") || href.starts_with("https://") {
+                href.to_owned()
+            } else if let Some(base) = &base {
+                base.join(href)
+                    .map(|u| u.to_string())
+                    .unwrap_or_else(|_| href.to_owned())
+            } else {
+                href.to_owned()
+            }
+        };
+        if !init_sent {
+            if let Some(init) = &init_uri {
+                let request = rowser_networking::FetchRequest {
+                    url: resolve(init),
+                    resource_type: rowser_networking::ResourceKind::Media,
+                    source_url: source_url.clone(),
+                    top_site: None,
+                    ..rowser_networking::FetchRequest::default()
+                };
+                if let Ok(response) = rowser_networking::fetch(network, request).await {
+                    if response.is_success() {
+                        let _ = cmd_tx.send(Cmd::Internal(Internal::PageMessage {
+                            tab,
+                            message: Box::new(page::Message::MediaData {
+                                node,
+                                data: response.body.to_vec(),
+                            }),
+                        }));
+                    }
+                }
+                init_sent = true;
+            }
+        }
+        for segment in &segments {
+            let seg_url = resolve(segment);
+            if fetched.contains(&seg_url) {
+                continue;
+            }
+            fetched.insert(seg_url.clone());
+            let request = rowser_networking::FetchRequest {
+                url: seg_url,
+                resource_type: rowser_networking::ResourceKind::Media,
+                source_url: source_url.clone(),
+                top_site: None,
+                ..rowser_networking::FetchRequest::default()
+            };
+            if let Ok(response) = rowser_networking::fetch(network, request).await {
+                if response.is_success()
+                    && cmd_tx
+                        .send(Cmd::Internal(Internal::PageMessage {
+                            tab,
+                            message: Box::new(page::Message::MediaData {
+                                node,
+                                data: response.body.to_vec(),
+                            }),
+                        }))
+                        .is_err()
+                {
+                    return;
+                }
+            }
+        }
+        if ended {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(4000)).await;
+    }
+    let _ = cmd_tx.send(Cmd::Internal(Internal::PageMessage {
+        tab,
+        message: Box::new(page::Message::MediaEof { node }),
+    }));
 }
 
 fn send_page_direct(cmd_tx: std::sync::mpsc::Sender<Cmd>, tab: TabId, message: page::Message) {

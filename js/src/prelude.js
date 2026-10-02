@@ -112,9 +112,18 @@
     async text() { return __native_b64_decode(this._body); }
     async json() { return JSON.parse(await this.text()); }
     async arrayBuffer() {
-      const text = await this.text();
-      const buf = new ArrayBuffer(text.length);
-      new Uint8Array(buf).set(text.split('').map(c => c.charCodeAt(0)));
+      // Byte-exact path: the native decode maps every byte to a latin-1
+      // char (binary bodies are not valid UTF-8 and would be corrupted by
+      // the text() path).
+      const bin = __native_b64_decode_latin1(this._body);
+      if (bin === null || bin === undefined) {
+        return new ArrayBuffer(0);
+      }
+      const buf = new ArrayBuffer(bin.length);
+      const u8 = new Uint8Array(buf);
+      for (let i = 0; i < bin.length; i++) {
+        u8[i] = bin.charCodeAt(i);
+      }
       return buf;
     }
     clone() { return new Response(this.status, this.headers, this._body); }
@@ -223,16 +232,20 @@
   }
 
   class Document {
-    getElementById(id) { const h = __native_dom_getElementById(String(id)); return (h === null || h === undefined || h === 0) ? null : new Element(h); }
-    querySelector(sel) { const h = __native_dom_querySelector(String(sel)); return (h === null || h === undefined) ? null : new Element(h); }
+    getElementById(id) { const h = __native_dom_getElementById(String(id)); return (h === null || h === undefined || h === 0) ? null : wrapElement(h); }
+    querySelector(sel) { const h = __native_dom_querySelector(String(sel)); return (h === null || h === undefined) ? null : wrapElement(h); }
     querySelectorAll(sel) {
       const handles = JSON.parse(__native_dom_querySelectorAll(String(sel)) || '[]');
-      return handles.map(function (h) { return new Element(h); });
+      return handles.map(function (h) { return wrapElement(h); });
     }
     getElementsByTagName(tag) { return this.querySelectorAll(String(tag)); }
     getElementsByClassName(cls) { return this.querySelectorAll('.' + String(cls)); }
     getElementsByName() { return []; }
-    createElement(tag) { return new Element(__native_dom_createElement(String(tag))); }
+    createElement(tag) {
+      const h = __native_dom_createElement(String(tag));
+      const cls = htmlClasses[tagClass(String(tag).toLowerCase())] || Element;
+      return new cls(h);
+    }
     createTextNode(text) { return new Element(__native_dom_createTextNode(String(text))); }
     createDocumentFragment() { return new Element(__native_dom_createElement('fragment')); }
     get body() { const h = __native_dom_body(); return h === null ? null : new Element(h); }
@@ -259,7 +272,58 @@
   // ------------------------------------------------------------------ DOM classes
   // `class X extends HTMLElement` is ubiquitous; without the HTML* element
   // classes every modern framework's class registration throws.
+  let __htmlClassesRef = null;
   const HTMLElementBase = class HTMLElement extends Element {};
+
+  // HTMLMediaElement: state read from the engine-maintained mirror, control
+  // via native commands. Loaded by <video>/<audio> elements (parsed or
+  // createElement) and by querySelector results wrapped by tag.
+  const mediaMirrors = new Map();
+  class HTMLMediaElement extends HTMLElementBase {
+    _mirror() {
+      const json = __native_media_mirror(this._h);
+      if (json) { try { mediaMirrors.set(this._h, JSON.parse(json)); } catch (e) {} }
+      return mediaMirrors.get(this._h);
+    }
+    play() {
+      __native_media_play(this._h);
+      this._mirror().paused = false;
+      return Promise.resolve();
+    }
+    pause() {
+      __native_media_pause(this._h);
+      this._mirror().paused = true;
+    }
+    load() {}
+    canPlayType(t) {
+      const s = String(t).toLowerCase();
+      if (s.includes('avc1') || s.includes('avc3') || s.includes('h264')) return 'probably';
+      if (s.includes('mp4a') || s.includes('aac')) return 'probably';
+      if (s.includes('mp4') || s.includes('m4v')) return 'maybe';
+      return '';
+    }
+    get paused() { const m = this._mirror(); return m ? m.paused : true; }
+    get currentTime() { const m = this._mirror(); return m ? m.time : 0; }
+    set currentTime(t) { __native_media_seek(this._h, Number(t) || 0); }
+    get duration() { const m = this._mirror(); return m ? (m.duration || NaN) : NaN; }
+    get videoWidth() { const m = this._mirror(); return m ? m.width : 0; }
+    get videoHeight() { const m = this._mirror(); return m ? m.height : 0; }
+    get readyState() { const m = this._mirror(); return m ? m.readyState : 0; }
+    get error() { const m = this._mirror(); return m && m.error ? { message: m.error } : null; }
+    get volume() { return this._volume === undefined ? 1.0 : this._volume; }
+    set volume(v) { this._volume = Number(v); __native_media_set_volume(this._h, this._volume); }
+    get muted() { return !!this._muted; }
+    set muted(v) { this._muted = !!v; __native_media_set_muted(this._h, this._muted); }
+    get src() { return this.getAttribute('src') || ''; }
+    set src(v) {
+      this.setAttribute('src', String(v));
+      __native_media_set_src(this._h, String(v));
+    }
+    addTextTrack() { return { cues: [], addCue() {}, removeCue() {} }; }
+    get textTracks() { return []; }
+  }
+  // Media events are dispatched per node by the engine.
+  HTMLMediaElement.prototype.onended = null;
   const htmlClasses = {
     HTMLElement: HTMLElementBase,
     HTMLDivElement: class HTMLDivElement extends HTMLElementBase {},
@@ -277,8 +341,8 @@
     HTMLTemplateElement: class HTMLTemplateElement extends HTMLElementBase {
       get content() { return this; }
     },
-    HTMLVideoElement: class HTMLVideoElement extends HTMLElementBase {},
-    HTMLAudioElement: class HTMLAudioElement extends HTMLElementBase {},
+    HTMLVideoElement: class HTMLVideoElement extends HTMLMediaElement {},
+    HTMLAudioElement: class HTMLAudioElement extends HTMLMediaElement {},
     HTMLCanvasElement: class HTMLCanvasElement extends HTMLElementBase {},
     HTMLIFrameElement: class HTMLIFrameElement extends HTMLElementBase {},
     HTMLUnknownElement: class HTMLUnknownElement extends HTMLElementBase {},
@@ -286,6 +350,7 @@
     SVGElement: class SVGElement extends Element {},
   };
   for (const name of Object.keys(htmlClasses)) globalThis[name] = htmlClasses[name];
+  __htmlClassesRef = htmlClasses;
 
   // Event classes (constructors are feature-probed constantly).
   globalThis.Event = class Event {
@@ -499,7 +564,12 @@
     toString() {
       return (this.protocol ? this.protocol + '://' : '') + this.host + this.pathname + this.search + this.hash;
     }
-    static createObjectURL() { return ''; }
+    static createObjectURL(obj) {
+      if (obj && obj._id !== undefined && obj instanceof MediaSource) {
+        return 'rowser-mse:' + obj._id;
+      }
+      return '';
+    }
     static revokeObjectURL() {}
   };
   globalThis.URLSearchParams = class URLSearchParams {
@@ -586,6 +656,165 @@
     const docLs = document._ls && document._ls[type];
     if (docLs) { try { docLs(ev); } catch (e) { __native_console('error', 'DOMContentLoaded doc handler: ' + (e && e.message)); } }
   };
+
+  // ------------------------------------------------------------------ media events + MSE
+  // Maps a tag name to its registered htmlClasses key (video ->
+  // HTMLVideoElement).
+  function tagClass(tag) {
+    switch (tag) {
+      case 'video': return 'HTMLVideoElement';
+      case 'audio': return 'HTMLAudioElement';
+      case 'img': return 'HTMLImageElement';
+      case 'input': return 'HTMLInputElement';
+      case 'button': return 'HTMLButtonElement';
+      case 'form': return 'HTMLFormElement';
+      case 'script': return 'HTMLScriptElement';
+      case 'style': return 'HTMLStyleElement';
+      case 'link': return 'HTMLLinkElement';
+      case 'canvas': return 'HTMLCanvasElement';
+      case 'iframe': return 'HTMLIFrameElement';
+      case 'template': return 'HTMLTemplateElement';
+      default: return 'HTMLElement';
+    }
+  }
+  // htmlClasses is defined below; wrapElement is called after it exists.
+  function wrapElement(handle) {
+    const tag = __native_dom_tagName(handle);
+    const map = __htmlClassesRef || {};
+    const cls = map[tagClass(tag)] || Element;
+    return new cls(handle);
+  }
+
+  // Media element events: (node, type, detailJson).
+  globalThis.__onMediaEvent = function (handle, type, detailJson) {
+    const el = new Element(handle);
+    // Refresh the element's state mirror before handlers run.
+    if (el._mirror) { try { el._mirror(); } catch (e) {} }
+    let detail = {};
+    try { detail = JSON.parse(detailJson || '{}'); } catch (e) {}
+    const ev = new Event(type);
+    ev.target = el;
+    if (detail.time !== undefined) { ev.timeStamp = detail.time; }
+    const ls = el._ls && el._ls[type];
+    if (ls) { try { ls.call(el, ev); } catch (e) {} }
+    const onprop = el['on' + type];
+    if (typeof onprop === 'function') { try { onprop.call(el, ev); } catch (e) {} }
+  };
+
+  // MediaSource / SourceBuffer (MSE): bytes pushed by page JS are routed to
+  // the engine media pipeline through native commands.
+  const mediaSources = new Map();
+  const sourceBuffers = new Map();
+  let nextSbId = 1;
+  class SourceBuffer {
+    constructor(msId, mime) {
+      this._msId = msId;
+      this._id = nextSbId++;
+      this.mime = String(mime);
+      this.updating = false;
+      this.mode = 'segments';
+      this.timestampOffset = 0;
+      this.appendWindowStart = 0;
+      this.appendWindowEnd = Infinity;
+      this._ls = {};
+      sourceBuffers.set(this._id, this);
+      __native_mse_add_source_buffer(msId, this._id, this.mime);
+    }
+    // Accepts ArrayBuffer / TypedArray / ArrayBufferView; views are copied
+    // to an exact ArrayBuffer so the bridge sees precise bytes.
+    appendBuffer(data) {
+      let ab;
+      if (data instanceof ArrayBuffer) {
+        ab = data;
+      } else if (ArrayBuffer.isView(data)) {
+        ab = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
+      } else {
+        ab = new ArrayBuffer(0);
+      }
+      this.updating = true;
+      const sb = this;
+      __native_mse_append(this._id, ab);
+      // The engine processes the append synchronously on the page thread;
+      // settle `updating` on the next microtask (hls.js waits on this).
+      Promise.resolve().then(function () {
+        sb.updating = false;
+        sb._fire('update');
+        sb._fire('updateend');
+      });
+    }
+    abort() { this.updating = false; }
+    remove() {}
+    _fire(type) {
+      const ls = this._ls[type] || [];
+      for (const cb of ls) { try { cb.call(this, { type: type, target: this }); } catch (e) {} }
+    }
+    addEventListener(t, cb) { (this._ls[t] = this._ls[t] || []).push(cb); }
+    removeEventListener(t, cb) {
+      const l = this._ls[t] || [];
+      const i = l.indexOf(cb);
+      if (i >= 0) l.splice(i, 1);
+    }
+    get buffered() {
+      const ranges = this._bufferedRanges || [];
+      return {
+        length: ranges.length,
+        start(i) { return ranges[i] ? ranges[i][0] : 0; },
+        end(i) { return ranges[i] ? ranges[i][1] : 0; },
+      };
+    }
+  }
+  class MediaSource {
+    constructor() {
+      this._id = __native_mse_create();
+      this.sourceBuffers = [];
+      this.activeSourceBuffers = [];
+      this.readyState = 'closed';
+      this.duration = NaN;
+      this._ls = {};
+      mediaSources.set(this._id, this);
+    }
+    addSourceBuffer(mime) {
+      const sb = new SourceBuffer(this._id, mime);
+      this.sourceBuffers.push(sb);
+      this.activeSourceBuffers.push(sb);
+      return sb;
+    }
+    endOfStream() {
+      this.readyState = 'ended';
+      __native_mse_end_of_stream(this._id);
+    }
+    setLiveSeekableRange() {}
+    clearLiveSeekableRange() {}
+    addEventListener(t, cb) { (this._ls[t] = this._ls[t] || []).push(cb); }
+    removeEventListener(t, cb) {
+      const l = this._ls[t] || [];
+      const i = l.indexOf(cb);
+      if (i >= 0) l.splice(i, 1);
+    }
+    _fire(type) {
+      const ls = this._ls[type] || [];
+      for (const cb of ls) { try { cb.call(this, { type: type, target: this }); } catch (e) {} }
+    }
+    static isTypeSupported(t) {
+      const s = String(t).toLowerCase();
+      return s.includes('avc1') || s.includes('avc3') || s.includes('mp4a') || s.includes('aac');
+    }
+  }
+  globalThis.MediaSource = MediaSource;
+  globalThis.SourceBuffer = SourceBuffer;
+  globalThis.__onMediaSourceEvent = function (msId, sbId, type) {
+    if (sbId !== null && sbId !== undefined) {
+      const sb = sourceBuffers.get(sbId);
+      if (sb) { sb.updating = false; sb._fire(type); }
+      return;
+    }
+    const ms = mediaSources.get(msId);
+    if (!ms) return;
+    if (type === 'sourceopen') ms.readyState = 'open';
+    if (type === 'sourceclose') ms.readyState = 'closed';
+    ms._fire(type);
+  };
+  globalThis.__native_mse_end_of_stream = globalThis.__native_mse_end_of_stream || function () {};
 
   // ------------------------------------------------------------------ WebSocket
   const sockets = new Map();

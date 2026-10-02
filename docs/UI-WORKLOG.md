@@ -91,3 +91,39 @@ Every stage attested by frame-change; failures auto-retry the whole interaction.
 Functional, dramatically lighter (5.8× RAM), instant cold start, full real
 feature set — competitive as a lightweight privacy-first browser; JS-heavy page
 fidelity and software-rendering scroll CPU are the honest remaining gaps.
+
+---
+
+## Session 4 (2026-10-02): the media pipeline
+
+**Directive:** "a standard browser any user can use — search Google, browse,
+watch videos or live streams. Reconsider and decide; don't stop to ask."
+
+Decision: implement the media subsystem in our own engine (byte-stream
+pipeline + original ISOBMFF demuxer + pluggable codecs; full rationale in
+docs/MEDIA.md). No engine embedding, no direction change.
+
+Work log (all driven through the real app; sandbox was wiped mid-session —
+toolchain and repo re-provisioned from GitHub first):
+- Re-provisioned sandbox (rustup, repo clone), audited engine hook points.
+- Built `rowser-media`: isobmff.rs (~1.3k lines, progressive + fMP4, lanes,
+  bounds-checked), decode.rs (avcC→Annex-B, stride-aware YUV→RGBA),
+  audio.rs (symphonia AAC, cpal sink, ring buffer), pipeline.rs (worker,
+  wall clock, pending queues, backpressure). 7 fixture tests (committed
+  ffmpeg-generated clips) — iterated through 11 live-driven defects (see
+  VALIDATION.md §10) until 7/7 green.
+- Wired the engine: Media streaming loader (ranged chunks + HLS reader),
+  page-side media registry + MSE state, frame blit in the display list,
+  mirror + JS bindings (HTMLMediaElement, MediaSource/SourceBuffer,
+  createObjectURL, byte-exact fetch bodies, element wrapping by tag).
+- E2E in the real browser: `scripts/media-e2e.sh` → M1 direct playback,
+  M2 MSE playback, M3 navigation cleanup — PASS; Big Buck Bunny over
+  public HTTPS plays; YouTube skeleton + clean script run (player blocked
+  on WebComponents, documented).
+- Battery 29/29 (3 new media stages added to ci/ui-validate.sh); clippy
+  clean; fmt clean; benchmarks on baseline.
+- Environment notes for future sessions: ALSA headers via
+  `apt-get download libasound2-dev libasound2t64 + dpkg -x` + patched .pc
+  (no sudo here); xkbcommon/xcb runtime libs likewise under
+  /home/z/my-project/debs/extracted; `[profile.dev] debug=0` added after
+  disk exhaustion (9.9 GB sandbox cannot hold debuginfo builds).

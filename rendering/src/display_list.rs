@@ -62,6 +62,7 @@ pub fn build_display_list(
     styles: &StyleMap,
     layout: &LayoutResult,
     images: &ImageMap,
+    video_frames: &ImageMap,
 ) -> DisplayList {
     let mut list = DisplayList::default();
     let Some(root) = layout_root(dom) else {
@@ -75,7 +76,16 @@ pub fn build_display_list(
             .or_default()
             .push(Arc::new(run.clone()));
     }
-    walk(dom, styles, layout, images, root, &mut list, &runs);
+    walk(
+        dom,
+        styles,
+        layout,
+        images,
+        video_frames,
+        root,
+        &mut list,
+        &runs,
+    );
     list
 }
 
@@ -96,6 +106,7 @@ fn walk(
     styles: &StyleMap,
     layout: &LayoutResult,
     images: &ImageMap,
+    video_frames: &ImageMap,
     node: NodeId,
     list: &mut DisplayList,
     runs: &std::collections::HashMap<NodeId, Vec<Arc<rowser_layout::text::TextRun>>>,
@@ -132,6 +143,25 @@ fn walk(
         });
     }
 
+    // Media elements: blit the latest decoded video frame; before the first
+    // frame arrives, paint the standard letterbox black.
+    if let Some(element) = dom.element(node) {
+        let tag = &*element.name.local;
+        if tag == "video" || tag == "audio" {
+            if let Some(image) = video_frames.get(&node) {
+                list.commands.push(DrawCmd::Image {
+                    rect,
+                    image: Arc::clone(image),
+                });
+            } else if tag == "video" && rect.w > 1.0 && rect.h > 1.0 {
+                list.commands.push(DrawCmd::Rect {
+                    rect,
+                    color: rowser_parsing::cascade::Rgba::new_opaque(0, 0, 0),
+                });
+            }
+        }
+    }
+
     // Borders.
     let b = &style.borders;
     let has_border =
@@ -156,7 +186,7 @@ fn walk(
     // Children.
     for child in dom.children(node) {
         if dom.element(child).is_some() {
-            walk(dom, styles, layout, images, child, list, runs);
+            walk(dom, styles, layout, images, video_frames, child, list, runs);
         }
     }
 }

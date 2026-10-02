@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Rrowser media — direct source</title>
+<style>
+  body { background: #101418; color: #e6edf3; font: 15px/1.5 monospace; margin: 24px; }
+  video { display: block; margin: 16px 0; border: 2px solid #2ea043; }
+  pre { color: #7ee787; }
+</style>
+</head>
+<body>
+<h2>Direct &lt;video src&gt; playback (H.264 + AAC, progressive MP4)</h2>
+<video id="v" src="clock-mp4.mp4" autoplay muted loop width="320" height="240"></video>
+<pre id="log">waiting for events…</pre>
+<script>
+  var v = document.getElementById('v');
+  var log = document.getElementById('log');
+  var events = [];
+  function upd() {
+    var d = isFinite(v.duration) ? v.duration.toFixed(2) : String(v.duration);
+    log.textContent =
+      'videoWidth=' + v.videoWidth + ' videoHeight=' + v.videoHeight +
+      ' duration=' + d + ' currentTime=' + v.currentTime.toFixed(2) +
+      ' paused=' + v.paused + ' readyState=' + v.readyState +
+      ' events=' + events.join(',') +
+      ' canPlayType=' + v.canPlayType('video/mp4; codecs="avc1.42E01E"');
+  }
+  ['loadedmetadata', 'canplay', 'play', 'playing', 'timeupdate', 'pause', 'ended', 'error']
+    .forEach(function (t) {
+      v.addEventListener(t, function () {
+        events.push(t);
+        if (events.length > 6) events = events.slice(-6);
+      });
+    });
+  v.addEventListener('error', function () {
+    log.textContent = 'ERROR: ' + (v.error && v.error.message);
+  });
+  setInterval(upd, 150);
+</script>
+</body>
+</html>

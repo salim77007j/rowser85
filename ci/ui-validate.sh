@@ -257,6 +257,27 @@ small() {
   start_browser keep; sleep 2
   snap 22-window-768p 8
 }
+# ---------------------------------------------------------------- media ----
+# M1..M3: real video playback driven through the engine media pipeline.
+# The local fixture server serves the committed MP4 test clips.
+if [ "$PHASE" = "all" ] || [ "$PHASE" = "media" ]; then
+  echo "== phase: media ==" | tee -a "$REPORT"
+  stop_browser
+  reset_baseline
+  start_browser fresh
+  (nohup python3 -m http.server 8123 --directory "$(dirname "$0")/../validation/media" \
+     >/dev/null 2>&1 & echo $! > /home/z/my-project/validate-http.pid)
+  sleep 1
+  nav "http://localhost:8123/index.html"; sleep 4
+  snap m1-direct-video 10 nav "http://localhost:8123/index.html"
+  nav "http://localhost:8123/mse.html"; sleep 3
+  snap m2-mse-video 10 nav "http://localhost:8123/mse.html"
+  nav "rowser://newtab"; sleep 2
+  snap m3-after-media 8 nav "rowser://newtab"
+  [ -f /home/z/my-project/validate-http.pid ] && kill "$(cat /home/z/my-project/validate-http.pid)" 2>/dev/null
+  rm -f /home/z/my-project/validate-http.pid
+fi
+
 if [ "$PHASE" = "all" ] || [ "$PHASE" = "big" ];   then big;   fi
 if [ "$PHASE" = "all" ] || [ "$PHASE" = "small" ]; then small; fi
 

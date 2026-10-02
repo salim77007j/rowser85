@@ -23,7 +23,7 @@ jobs:
 
       - name: Install fonts (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y fonts-dejavu-core
+        run: sudo apt-get update && sudo apt-get install -y fonts-dejavu-core libasound2-dev pkg-config
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -63,7 +63,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install fonts
-        run: sudo apt-get update && sudo apt-get install -y fonts-dejavu-core
+        run: sudo apt-get update && sudo apt-get install -y fonts-dejavu-core libasound2-dev pkg-config
       - uses: dtolnay/rust-toolchain@nightly
         with:
           components: rust-src
@@ -101,7 +101,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install fonts
-        run: sudo apt-get update && sudo apt-get install -y fonts-dejavu-core
+        run: sudo apt-get update && sudo apt-get install -y fonts-dejavu-core libasound2-dev pkg-config
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Run pipeline benchmarks

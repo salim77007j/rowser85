@@ -131,6 +131,71 @@ pub enum JsCommand {
     },
     /// The DOM was mutated; re-style/layout/render after the script task.
     MarkDirty,
+    /// JS set `video.src` (direct URL, data URL, or a `rowser-mse:` object
+    /// URL referencing a MediaSource).
+    MediaSetSrc {
+        /// Element handle.
+        node: u64,
+        /// Source URL (may be `rowser-mse:N`).
+        url: String,
+    },
+    /// JS called `play()`.
+    MediaPlay {
+        /// Element handle.
+        node: u64,
+    },
+    /// JS called `pause()`.
+    MediaPause {
+        /// Element handle.
+        node: u64,
+    },
+    /// JS set `currentTime`.
+    MediaSeek {
+        /// Element handle.
+        node: u64,
+        /// Target time in seconds.
+        time: f64,
+    },
+    /// JS set `volume` (0.0-1.0).
+    MediaSetVolume {
+        /// Element handle.
+        node: u64,
+        /// Volume.
+        volume: f32,
+    },
+    /// JS set `muted`.
+    MediaSetMuted {
+        /// Element handle.
+        node: u64,
+        /// Muted.
+        muted: bool,
+    },
+    /// JS constructed `new MediaSource()`.
+    MediaCreateSource {
+        /// JS-side MediaSource id.
+        ms_id: u64,
+    },
+    /// JS called `MediaSource.addSourceBuffer(mime)`.
+    MediaAddSourceBuffer {
+        /// MediaSource id.
+        ms_id: u64,
+        /// MIME type (e.g. `video/mp4; codecs="avc1.640028"`).
+        mime: String,
+        /// JS-assigned SourceBuffer id.
+        sb_id: u64,
+    },
+    /// JS called `SourceBuffer.appendBuffer(bytes)`.
+    MediaAppendBuffer {
+        /// SourceBuffer id.
+        sb_id: u64,
+        /// Exact bytes from the ArrayBuffer.
+        data: Vec<u8>,
+    },
+    /// JS called `MediaSource.endOfStream()`.
+    MediaEndOfStream {
+        /// MediaSource id.
+        ms_id: u64,
+    },
     /// A worker context posted a message to its owning page (local routing;
     /// never forwarded to the engine).
     WorkerEgress {
@@ -187,7 +252,54 @@ pub enum EngineEvent {
         /// Event type.
         event_type: String,
     },
+    /// A media element event (loadedmetadata, canplay, timeupdate, ended,
+    /// error, play, pause). `detail` is a JSON payload (may be empty).
+    MediaEvent {
+        /// Element handle.
+        node: u64,
+        /// Event type.
+        event_type: String,
+        /// JSON detail (time/duration/error text).
+        detail: String,
+    },
+    /// A MediaSource/SourceBuffer event (sourceopen, updateend...).
+    MediaSourceEvent {
+        /// MediaSource id.
+        ms_id: u64,
+        /// SourceBuffer id (None for MediaSource-level events).
+        sb_id: Option<u64>,
+        /// Event type.
+        event_type: String,
+    },
 }
+
+/// Page-thread-maintained snapshot of a media element's state, read
+/// synchronously by JS property getters (the truth lives in the pipeline
+/// worker; events keep the mirror fresh).
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct MediaMirror {
+    /// Current presentation time (seconds).
+    pub time: f64,
+    /// Duration (seconds; 0 = unknown/live).
+    pub duration: f64,
+    /// Video width (0 = audio-only).
+    pub width: u32,
+    /// Video height.
+    pub height: u32,
+    /// True while paused.
+    pub paused: bool,
+    /// HTMLMediaElement readyState approximation (0..4).
+    pub ready_state: u8,
+    /// Last error text.
+    pub error: Option<String>,
+    /// Demuxed playback window end (seconds) — `buffered.end()` analogue.
+    pub buffered_end: f64,
+}
+
+/// Per-page media state mirror shared between the page thread (writer) and
+/// the JS natives (reader).
+pub type MediaMirrorMap =
+    std::rc::Rc<std::cell::RefCell<std::collections::HashMap<u64, MediaMirror>>>;
 
 /// The shared state between the runtime and the page thread.
 pub struct PageBridge {
@@ -209,6 +321,8 @@ pub struct PageBridge {
     pub spoof: SpoofProfile,
     /// Channel to the engine.
     pub outgoing: Option<Sender<JsCommand>>,
+    /// Media element state mirror (page thread keeps it fresh).
+    pub media_mirror: MediaMirrorMap,
 }
 
 /// Runtime configuration.
@@ -350,6 +464,28 @@ impl JsRuntime {
             EngineEvent::DomEvent { node, event_type } => {
                 format!("__onDomEvent({},{})", node, json_str(&event_type))
             }
+            EngineEvent::MediaEvent {
+                node,
+                event_type,
+                detail,
+            } => format!(
+                "__onMediaEvent({},{},{})",
+                node,
+                json_str(&event_type),
+                json_str(&detail)
+            ),
+            EngineEvent::MediaSourceEvent {
+                ms_id,
+                sb_id,
+                event_type,
+            } => format!(
+                "__onMediaSourceEvent({},{},{})",
+                ms_id,
+                sb_id
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "null".to_owned()),
+                json_str(&event_type)
+            ),
         };
         self.reset_watchdog();
         let _ = self.context.with(|ctx| ctx.eval::<(), _>(call.as_bytes()));
@@ -594,6 +730,136 @@ impl JsRuntime {
             // --- DOM ---
             dom_natives(&ctx, &globals, &bridge)?;
 
+            // --- media (HTMLMediaElement + MSE) ---
+            let b = Rc::clone(&bridge);
+            globals.set(
+                "__native_media_set_src",
+                Function::new(ctx.clone(), move |node: u64, url: String| {
+                    if let Some(out) = &b.outgoing {
+                        let _ = out.send(JsCommand::MediaSetSrc { node, url });
+                    }
+                })?,
+            )?;
+            let b = Rc::clone(&bridge);
+            globals.set(
+                "__native_media_play",
+                Function::new(ctx.clone(), move |node: u64| {
+                    if let Some(out) = &b.outgoing {
+                        let _ = out.send(JsCommand::MediaPlay { node });
+                    }
+                })?,
+            )?;
+            let b = Rc::clone(&bridge);
+            globals.set(
+                "__native_media_pause",
+                Function::new(ctx.clone(), move |node: u64| {
+                    if let Some(out) = &b.outgoing {
+                        let _ = out.send(JsCommand::MediaPause { node });
+                    }
+                })?,
+            )?;
+            let b = Rc::clone(&bridge);
+            globals.set(
+                "__native_media_seek",
+                Function::new(ctx.clone(), move |node: u64, time: f64| {
+                    if let Some(out) = &b.outgoing {
+                        let _ = out.send(JsCommand::MediaSeek { node, time });
+                    }
+                })?,
+            )?;
+            let b = Rc::clone(&bridge);
+            globals.set(
+                "__native_media_set_volume",
+                Function::new(ctx.clone(), move |node: u64, volume: f64| {
+                    if let Some(out) = &b.outgoing {
+                        let _ = out.send(JsCommand::MediaSetVolume {
+                            node,
+                            volume: volume as f32,
+                        });
+                    }
+                })?,
+            )?;
+            let b = Rc::clone(&bridge);
+            globals.set(
+                "__native_media_set_muted",
+                Function::new(ctx.clone(), move |node: u64, muted: bool| {
+                    if let Some(out) = &b.outgoing {
+                        let _ = out.send(JsCommand::MediaSetMuted { node, muted });
+                    }
+                })?,
+            )?;
+            let b = Rc::clone(&bridge);
+            globals.set(
+                "__native_media_mirror",
+                Function::new(ctx.clone(), move |node: u64| -> Option<String> {
+                    let mirror = b.media_mirror.borrow().get(&node).cloned()?;
+                    Some(serde_json::to_string(&mirror).unwrap_or_default())
+                })?,
+            )?;
+            let b = Rc::clone(&bridge);
+            globals.set(
+                "__native_mse_create",
+                Function::new(ctx.clone(), move || -> u64 {
+                    let id = next_id();
+                    if let Some(out) = &b.outgoing {
+                        let _ = out.send(JsCommand::MediaCreateSource { ms_id: id });
+                    }
+                    id
+                })?,
+            )?;
+            let b = Rc::clone(&bridge);
+            globals.set(
+                "__native_mse_add_source_buffer",
+                Function::new(ctx.clone(), move |ms_id: u64, sb_id: u64, mime: String| {
+                    if let Some(out) = &b.outgoing {
+                        let _ = out.send(JsCommand::MediaAddSourceBuffer { ms_id, sb_id, mime });
+                    }
+                })?,
+            )?;
+            let b = Rc::clone(&bridge);
+            globals.set(
+                "__native_mse_append",
+                Function::new(
+                    ctx.clone(),
+                    move |sb_id: u64, data: rquickjs::ArrayBuffer| {
+                        // SAFETY: the buffer is alive for the duration of
+                        // this native call; we copy out before returning.
+                        let bytes = data
+                            .as_raw()
+                            .map(|slice| unsafe { slice.as_ref() }.to_vec())
+                            .unwrap_or_default();
+                        if let Some(out) = &b.outgoing {
+                            let _ = out.send(JsCommand::MediaAppendBuffer { sb_id, data: bytes });
+                        }
+                    },
+                )?,
+            )?;
+            // Byte-exact base64 → ArrayBuffer (binary fetch bodies; the
+            // String-based b64 decode mangles non-UTF-8 bytes).
+            // Base64 → binary → latin-1 string: each char carries one byte
+            // (0-255) and survives the JS string round-trip exactly, unlike
+            // from_utf8_lossy which corrupts non-UTF-8 bodies.
+            globals.set(
+                "__native_b64_decode_latin1",
+                Function::new(ctx.clone(), |data: String| -> Option<String> {
+                    use base64::Engine;
+                    let bytes = base64::engine::general_purpose::STANDARD
+                        .decode(data.as_bytes())
+                        .ok()?;
+                    Some(bytes.iter().map(|&b| b as char).collect())
+                })?,
+            )?;
+
+            let b = Rc::clone(&bridge);
+            globals.set(
+                "__native_mse_end_of_stream",
+                Function::new(ctx.clone(), move |ms_id: u64| {
+                    if let Some(out) = &b.outgoing {
+                        let _ = out.send(JsCommand::MediaEndOfStream { ms_id });
+                    }
+                })?,
+            )?;
+
             // --- environment (anti-fingerprinted) ---
             let b = Rc::clone(&bridge);
             globals.set(
@@ -834,6 +1100,17 @@ fn dom_natives<'js>(
                     text: format!("click requested on node {node}"),
                 });
             }
+        })?,
+    )?;
+
+    let b = Rc::clone(bridge);
+    globals.set(
+        "__native_dom_tagName",
+        Function::new(ctx.clone(), move |node: u64| -> String {
+            let dom = b.dom.borrow();
+            dom.element(node as NodeId)
+                .map(|e| e.local_name().to_string())
+                .unwrap_or_default()
         })?,
     )?;
 
@@ -1109,6 +1386,7 @@ mod tests {
                 storage: None,
                 spoof: SpoofProfile::from_seed([42u8; 32]),
                 outgoing: Some(tx),
+                media_mirror: Rc::new(RefCell::new(std::collections::HashMap::new())),
             },
         )
         .unwrap();
@@ -1236,6 +1514,7 @@ mod tests {
                 storage: Some(Arc::new(store)),
                 spoof: SpoofProfile::from_seed([1u8; 32]),
                 outgoing: Some(tx),
+                media_mirror: Rc::new(RefCell::new(std::collections::HashMap::new())),
             },
         )
         .unwrap();

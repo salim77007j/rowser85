@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Rrowser media — MSE</title>
+<style>
+  body { background: #101418; color: #e6edf3; font: 15px/1.5 monospace; margin: 24px; }
+  video { display: block; margin: 16px 0; border: 2px solid #d29922; }
+  pre { color: #f2cc60; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<h2>MediaSource + SourceBuffer playback (fragmented MP4 via appendBuffer)</h2>
+<video id="v" muted loop width="320" height="240"></video>
+<pre id="log">init</pre>
+<script>
+  var v = document.getElementById('v');
+  var log = document.getElementById('log');
+  function set(t) { log.textContent = t; }
+
+  function run() {
+    if (!window.MediaSource || !window.URL || !URL.createObjectURL) {
+      set('FAIL: MediaSource missing'); return;
+    }
+    var ms = new MediaSource();
+    set('MediaSource created, url assigned');
+    v.src = URL.createObjectURL(ms);
+    ms.addEventListener('sourceopen', function () {
+      set('sourceopen — creating SourceBuffer');
+      var sb = ms.addSourceBuffer('video/mp4; codecs="avc1.42E01E, mp4a.40.2"');
+      fetch('clock-fmp4.mp4')
+        .then(function (r) { return r.arrayBuffer(); })
+        .then(function (buf) {
+          set('fetched ' + buf.byteLength + ' bytes — appending');
+          sb.addEventListener('updateend', function () {
+            set('appended — playing (duration=' + v.duration + ')');
+            v.play();
+            try { ms.endOfStream(); } catch (e) {}
+          });
+          sb.appendBuffer(buf);
+        })
+        .catch(function (e) { set('fetch failed: ' + e); });
+    });
+  }
+  run();
+</script>
+</body>
+</html>

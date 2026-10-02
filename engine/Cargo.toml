@@ -8,6 +8,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+rowser-media = { path = "../media" }
 rowser-dom = { path = "../dom" }
 rowser-parsing = { path = "../parsing" }
 rowser-layout = { path = "../layout" }

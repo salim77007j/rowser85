@@ -131,7 +131,15 @@ fn bench_display_list(c: &mut Criterion) {
         },
     );
     c.bench_function("display-list/2k-nodes", |b| {
-        b.iter(|| build_display_list(&doc.dom, &styles, &layout, &Default::default()))
+        b.iter(|| {
+            build_display_list(
+                &doc.dom,
+                &styles,
+                &layout,
+                &Default::default(),
+                &Default::default(),
+            )
+        })
     });
 }
 
@@ -151,7 +159,13 @@ fn bench_paint(c: &mut Criterion) {
             height: 800.0,
         },
     );
-    let list = build_display_list(&doc.dom, &styles, &layout, &Default::default());
+    let list = build_display_list(
+        &doc.dom,
+        &styles,
+        &layout,
+        &Default::default(),
+        &Default::default(),
+    );
     // Steady-state paint: warm painter (glyph mask caches alive, the
     // scrolling case) against a warm font system.
     let mut painter = Painter::new();
@@ -201,7 +215,13 @@ fn bench_full_pipeline(c: &mut Criterion) {
                         height: 800.0,
                     },
                 );
-                let list = build_display_list(&doc.dom, &styles, &layout, &Default::default());
+                let list = build_display_list(
+                    &doc.dom,
+                    &styles,
+                    &layout,
+                    &Default::default(),
+                    &Default::default(),
+                );
                 painter
                     .render(&list, RenderOptions::default(), &mut engine.font_system)
                     .expect("paint")

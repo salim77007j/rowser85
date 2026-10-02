@@ -655,10 +655,6 @@ fn convert_position(value: &Position) -> PositionMode {
 /// mobile stylesheet blocks (`td { height: inherit }`, `#hnmain { width: 100% }`
 /// — the full-viewport HN explosion).
 fn media_matches(query: &lightningcss::media_query::MediaList<'_>, ctx: &MediaContext) -> bool {
-    use lightningcss::media_query::{
-        MediaCondition, MediaFeature, MediaFeatureComparison, MediaFeatureName, MediaFeatureValue,
-        MediaQuery, MediaType, Operator, Qualifier,
-    };
     if query.media_queries.is_empty() {
         return true;
     }

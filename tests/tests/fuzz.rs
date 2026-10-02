@@ -66,7 +66,7 @@ proptest! {
         let mut engine = LayoutEngine::new();
         let (styles, layout) =
             engine.layout_document(&doc.dom, &[sheet], &media(), Viewport { width: 1280.0, height: 800.0 });
-        let list = build_display_list(&doc.dom, &styles, &layout, &Default::default());
+        let list = build_display_list(&doc.dom, &styles, &layout, &Default::default(), &Default::default());
         let mut painter = Painter::new();
         let frame = painter.render(&list, RenderOptions::default(), &mut engine.font_system);
         prop_assert!(frame.is_some());
