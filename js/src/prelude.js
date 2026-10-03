@@ -904,43 +904,129 @@
     if (!records.length) return;
     try { obs._cb(records, obs); } catch (e) { console.error(errString(e)); }
   };
-  globalThis.IntersectionObserver = class IntersectionObserver {
-    constructor(cb) { this._cb = cb; }
-    // Fire the callback asynchronously with isIntersecting: true — the
-    // lazy-load contract (sites observe thumbnails, then swap in the real
-    // src only once "visible"). Without real occlusion data everything
-    // counts as intersecting, which lights up lazy thumbnails everywhere.
-    observe(el) {
-      const cb = this._cb, obs = this;
-      setTimeout(function () {
-        try {
-          cb([{
-            target: el, isIntersecting: true, intersectionRatio: 1,
-            boundingClientRect: el.getBoundingClientRect ? el.getBoundingClientRect() : { top: 0, left: 0, width: 0, height: 0 },
-            rootBounds: null, time: Date.now(),
-          }], obs);
-        } catch (e) {}
-      }, 0);
+  // DOMRect (also used by IntersectionObserver entries).
+  globalThis.DOMRect = class DOMRect {
+    constructor(x, y, width, height) {
+      this.x = x || 0; this.y = y || 0;
+      this.width = width || 0; this.height = height || 0;
+      this.top = this.y; this.left = this.x;
+      this.right = this.x + this.width; this.bottom = this.y + this.height;
     }
-    unobserve() {}
-    disconnect() {}
-    takeRecords() { return []; }
   };
-  globalThis.ResizeObserver = class ResizeObserver {
-    constructor(cb) { this._cb = cb; }
-    // Fire once asynchronously with the element's current size — player
-    // UIs wait for this to build their control bars.
-    observe(el) {
-      const cb = this._cb;
-      setTimeout(function () {
-        try {
-          const r = el.getBoundingClientRect ? el.getBoundingClientRect() : { width: 0, height: 0 };
-          cb([{ target: el, contentRect: { x: 0, y: 0, width: r.width, height: r.height, top: 0, left: 0, right: r.width, bottom: r.height } }]);
-        } catch (e) {}
-      }, 0);
+  globalThis.DOMRectReadOnly = globalThis.DOMRect;
+
+  // ---- IntersectionObserver (real: the engine computes entries from the
+  // layout rects after every render; __onIntersect delivers batches) ----
+  const ioRegistry = new Map();
+  let ioNextId = 1;
+  function parseRootMargin(margin) {
+    const parts = String(margin || '0px').trim().split(/\s+/);
+    const px = function (p) {
+      p = String(p || '0px');
+      const n = parseFloat(p) || 0;
+      return p.endsWith('%') ? n : n; // px only (percent of root: later)
+    };
+    const t = px(parts[0]);
+    const r = parts.length > 1 ? px(parts[1]) : t;
+    const b = parts.length > 2 ? px(parts[2]) : t;
+    const l = parts.length > 3 ? px(parts[3]) : r;
+    return [t, r, b, l];
+  }
+  globalThis.IntersectionObserver = class IntersectionObserver {
+    constructor(cb, options) {
+      if (typeof cb !== 'function') throw new TypeError("IntersectionObserver callback must be a function");
+      this._cb = cb;
+      this._id = ioNextId++;
+      this._records = [];
+      const o = options || {};
+      this._root = (o.root && o.root._h !== undefined) ? o.root : null;
+      this._rootMargin = String(o.rootMargin || '0px');
+      let th = o.threshold;
+      if (th === undefined || th === null) th = [0];
+      if (!Array.isArray(th)) th = [Number(th) || 0];
+      this._thresholds = th.map(function (t) { return Math.max(0, Math.min(1, Number(t) || 0)); });
+      ioRegistry.set(this._id, this);
     }
-    unobserve() {}
-    disconnect() {}
+    get root() { return this._root; }
+    get rootMargin() { return this._rootMargin; }
+    get thresholds() { return this._thresholds; }
+    observe(target) {
+      if (!target || target._h === undefined) return;
+      __native_io_observe(
+        this._id,
+        target._h,
+        this._root ? this._root._h : 0,
+        JSON.stringify(parseRootMargin(this._rootMargin)),
+        JSON.stringify(this._thresholds)
+      );
+    }
+    unobserve(target) {
+      if (!target || target._h === undefined) return;
+      // Per-target removal: the engine drops the (id, target) pair.
+      try { __native_io_unobserve(this._id, target._h); } catch (e) {}
+    }
+    disconnect() {
+      ioRegistry.delete(this._id);
+      try { __native_io_disconnect(this._id); } catch (e) {}
+    }
+    takeRecords() { const r = this._records; this._records = []; return r; }
+  };
+  globalThis.__onIntersect = function (id, json) {
+    const obs = ioRegistry.get(id);
+    if (!obs || !obs._cb) return;
+    const raw = (typeof json === 'string') ? JSON.parse(json) : json;
+    const entries = raw.map(function (e) {
+      const entry = {
+        target: wrapElement(e.target),
+        time: e.time,
+        isIntersecting: !!e.isIntersecting,
+        intersectionRatio: e.intersectionRatio,
+        boundingClientRect: Object.assign(new DOMRect(), e.boundingClientRect),
+        rootBounds: e.rootBounds ? Object.assign(new DOMRect(), e.rootBounds) : null,
+        intersectionRect: Object.assign(new DOMRect(), e.intersectionRect),
+      };
+      obs._records.push(entry);
+      return entry;
+    });
+    if (!entries.length) return;
+    obs._records.length = 0; // takeRecords returns queue AFTER delivery per spec is empty
+    try { obs._cb(entries, obs); } catch (e) { console.error(errString(e)); }
+  };
+  // ---- ResizeObserver (real: engine fires on border-box change) ----
+  const roRegistry = new Map();
+  let roNextId = 1;
+  globalThis.ResizeObserver = class ResizeObserver {
+    constructor(cb) {
+      if (typeof cb !== 'function') throw new TypeError("ResizeObserver callback must be a function");
+      this._cb = cb;
+      this._id = roNextId++;
+      roRegistry.set(this._id, this);
+    }
+    observe(target) {
+      if (!target || target._h === undefined) return;
+      __native_ro_observe(this._id, target._h);
+    }
+    unobserve(target) {
+      if (!target || target._h === undefined) return;
+      try { __native_ro_unobserve(this._id, target._h); } catch (e) {}
+    }
+    disconnect() {
+      roRegistry.delete(this._id);
+      try { __native_ro_disconnect(this._id); } catch (e) {}
+    }
+  };
+  globalThis.__onResize = function (id, json) {
+    const obs = roRegistry.get(id);
+    if (!obs || !obs._cb) return;
+    const raw = (typeof json === 'string') ? JSON.parse(json) : json;
+    const entries = raw.map(function (e) {
+      return {
+        target: wrapElement(e.target),
+        contentRect: Object.assign(new DOMRect(), e.contentRect),
+      };
+    });
+    if (!entries.length) return;
+    try { obs._cb(entries, obs); } catch (e) { console.error(errString(e)); }
   };
   globalThis.PerformanceObserver = class PerformanceObserver {
     observe() {}

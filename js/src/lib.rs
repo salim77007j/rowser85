@@ -126,6 +126,46 @@ struct MoOptions {
     subtree: bool,
 }
 
+/// An IntersectionObserver registration (engine-evaluated after layout).
+#[derive(Debug, Clone)]
+pub struct IoRegistration {
+    /// JS-side observer id.
+    pub id: u64,
+    /// Observed target node.
+    pub target: NodeId,
+    /// Root node (None = viewport).
+    pub root: Option<NodeId>,
+    /// rootMargin in px: [top, right, bottom, left].
+    pub root_margin: [f32; 4],
+    /// Thresholds (default [0.0]).
+    pub thresholds: Vec<f32>,
+    /// Last-delivered ratio (-1 = never delivered).
+    pub last_ratio: f32,
+}
+
+/// A ResizeObserver registration.
+#[derive(Debug, Clone)]
+pub struct RoRegistration {
+    /// JS-side observer id.
+    pub id: u64,
+    /// Observed target node.
+    pub target: NodeId,
+    /// Last-delivered border-box rect (None = never delivered).
+    pub last_rect: Option<[f32; 4]>,
+}
+
+/// Intersection/ResizeObserver registrations shared with the engine.
+#[derive(Debug, Default)]
+pub struct ObserversState {
+    /// IntersectionObservers.
+    pub io: Vec<IoRegistration>,
+    /// ResizeObservers.
+    pub ro: Vec<RoRegistration>,
+}
+
+/// Shared handle to the observer state.
+pub type ObserversShared = Rc<RefCell<ObserversState>>;
+
 /// MutationObserver bookkeeping: pending records + registrations.
 #[derive(Debug, Default)]
 pub struct MoState {
@@ -397,6 +437,20 @@ pub enum EngineEvent {
         /// JSON message.
         message: String,
     },
+    /// IntersectionObserver entries computed by the engine after layout.
+    IntersectFired {
+        /// Observer id.
+        id: u64,
+        /// JSON array of entries.
+        json: String,
+    },
+    /// ResizeObserver entries computed by the engine after layout.
+    ResizeFired {
+        /// Observer id.
+        id: u64,
+        /// JSON array of entries.
+        json: String,
+    },
     /// A history traversal (back/forward) landed on a document: fire
     /// `popstate` on window with the entry's state.
     PopState {
@@ -514,6 +568,8 @@ pub struct PageBridge {
     pub mo: MoShared,
     /// History mirror for sync reads: (entry_count, current state JSON).
     pub history: Rc<RefCell<HistoryMirror>>,
+    /// Intersection/ResizeObserver registrations (engine drives delivery).
+    pub observers: ObserversShared,
 }
 
 /// Synchronous history state shared with the prelude.
@@ -682,6 +738,12 @@ impl JsRuntime {
             }
             EngineEvent::PopState { state } => {
                 format!("__onPopState({})", json_str(&state))
+            }
+            EngineEvent::IntersectFired { id, json } => {
+                format!("__onIntersect({id},{json})")
+            }
+            EngineEvent::ResizeFired { id, json } => {
+                format!("__onResize({id},{json})")
             }
             EngineEvent::LocationChanged { url } => {
                 format!("__onLocationChanged({})", json_str(&url))
@@ -1052,6 +1114,93 @@ impl JsRuntime {
                     if let Some(out) = &b.outgoing {
                         let _ = out.send(JsCommand::HistoryGo { delta });
                     }
+                })?,
+            )?;
+
+            // --- Intersection/ResizeObserver registration ---
+            let b = Rc::clone(&bridge);
+            globals.set(
+                "__native_io_observe",
+                Function::new(
+                    ctx.clone(),
+                    move |id: u64,
+                          target: u64,
+                          root: u64,
+                          margin_json: String,
+                          thresholds_json: String| {
+                        let margin: [f32; 4] =
+                            serde_json::from_str(&margin_json).unwrap_or([0.0; 4]);
+                        let thresholds: Vec<f32> =
+                            serde_json::from_str(&thresholds_json).unwrap_or_else(|_| vec![0.0]);
+                        let thresholds = if thresholds.is_empty() {
+                            vec![0.0]
+                        } else {
+                            thresholds
+                        };
+                        let mut obs = b.observers.borrow_mut();
+                        obs.io
+                            .retain(|o| !(o.id == id && o.target as u64 == target));
+                        obs.io.push(IoRegistration {
+                            id,
+                            target: target as NodeId,
+                            root: (root > 0).then_some(root as NodeId),
+                            root_margin: margin,
+                            thresholds,
+                            last_ratio: -1.0,
+                        });
+                        drop(obs);
+                        mark_dirty(&b);
+                    },
+                )?,
+            )?;
+            let b = Rc::clone(&bridge);
+            globals.set(
+                "__native_io_disconnect",
+                Function::new(ctx.clone(), move |id: u64| {
+                    b.observers.borrow_mut().io.retain(|o| o.id != id);
+                })?,
+            )?;
+            let b = Rc::clone(&bridge);
+            globals.set(
+                "__native_io_unobserve",
+                Function::new(ctx.clone(), move |id: u64, target: u64| {
+                    b.observers
+                        .borrow_mut()
+                        .io
+                        .retain(|o| !(o.id == id && o.target as u64 == target));
+                })?,
+            )?;
+            let b = Rc::clone(&bridge);
+            globals.set(
+                "__native_ro_observe",
+                Function::new(ctx.clone(), move |id: u64, target: u64| {
+                    let mut obs = b.observers.borrow_mut();
+                    obs.ro
+                        .retain(|o| !(o.id == id && o.target as u64 == target));
+                    obs.ro.push(RoRegistration {
+                        id,
+                        target: target as NodeId,
+                        last_rect: None,
+                    });
+                    drop(obs);
+                    mark_dirty(&b);
+                })?,
+            )?;
+            let b = Rc::clone(&bridge);
+            globals.set(
+                "__native_ro_unobserve",
+                Function::new(ctx.clone(), move |id: u64, target: u64| {
+                    b.observers
+                        .borrow_mut()
+                        .ro
+                        .retain(|o| !(o.id == id && o.target as u64 == target));
+                })?,
+            )?;
+            let b = Rc::clone(&bridge);
+            globals.set(
+                "__native_ro_disconnect",
+                Function::new(ctx.clone(), move |id: u64| {
+                    b.observers.borrow_mut().ro.retain(|o| o.id != id);
                 })?,
             )?;
 
@@ -2356,6 +2505,7 @@ mod tests {
                 viewport: Rc::new(RefCell::new((0.0, 0.0, 0.0))),
                 mo: MoShared::default(),
                 history: Default::default(),
+                observers: Default::default(),
             },
         )
         .unwrap();
@@ -2604,6 +2754,7 @@ mod tests {
                 viewport: Rc::new(RefCell::new((0.0, 0.0, 0.0))),
                 mo: MoShared::default(),
                 history: Default::default(),
+                observers: Default::default(),
             },
         )
         .unwrap();

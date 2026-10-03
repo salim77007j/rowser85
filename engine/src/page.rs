@@ -352,6 +352,8 @@ struct Page {
     mo_state: rowser_js::MoShared,
     /// History mirror shared with the JS runtime.
     history_mirror: rowser_js::HistoryMirrorShared,
+    /// Intersection/ResizeObserver registrations shared with the runtime.
+    observers_state: rowser_js::ObserversShared,
     /// Last-reported media activity (drives the suspension override).
     media_active: bool,
 }
@@ -405,6 +407,7 @@ impl Page {
             viewport_mirror: Rc::new(RefCell::new((0.0, 0.0, 0.0))),
             mo_state: rowser_js::MoShared::default(),
             history_mirror: rowser_js::HistoryMirrorShared::default(),
+            observers_state: rowser_js::ObserversShared::default(),
             media_active: false,
         }
     }
@@ -1661,6 +1664,170 @@ impl Page {
         // eventually wedged the UI thread (exponential event batching).
         self.dirty = false;
         self.repaint();
+        // Observers: layout rects are fresh — evaluate Intersection and
+        // Resize observers and deliver threshold crossings / size deltas.
+        self.deliver_observers();
+    }
+
+    /// Computes Intersection/Resize observer entries from the fresh layout
+    /// mirror and dispatches them into JS. IO fires on threshold crossings
+    /// (or first evaluation); RO fires on border-box changes.
+    fn deliver_observers(&mut self) {
+        if self.observers_state.borrow().io.is_empty()
+            && self.observers_state.borrow().ro.is_empty()
+        {
+            return;
+        }
+        let (scroll_y, vw, vh) = *self.viewport_mirror.borrow();
+        let rects = self.rect_mirror.borrow().clone();
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as f64)
+            .unwrap_or(0.0);
+        let mut io_batches: Vec<(u64, String)> = Vec::new();
+        {
+            let mut obs = self.observers_state.borrow_mut();
+            let mut pending: Vec<(u64, String)> = Vec::new();
+            for reg in obs.io.iter_mut() {
+                let Some(&target_rect) = rects.get(&(reg.target as u64)) else {
+                    continue;
+                };
+                // Root: the viewport (document space) or the root element's
+                // rect, expanded by rootMargin [top right bottom left].
+                let root_rect = match reg.root {
+                    Some(root) => rects
+                        .get(&(root as u64))
+                        .copied()
+                        .unwrap_or([0.0, 0.0, vw, vh]),
+                    None => [0.0, scroll_y, vw, vh],
+                };
+                let m = reg.root_margin;
+                let root_box = (
+                    root_rect[0] - m[3],
+                    root_rect[1] - m[0],
+                    root_rect[0] + root_rect[2] + m[1],
+                    root_rect[1] + root_rect[3] + m[2],
+                );
+                let tb = (
+                    target_rect[0],
+                    target_rect[1],
+                    target_rect[0] + target_rect[2],
+                    target_rect[1] + target_rect[3],
+                );
+                let ix0 = tb.0.max(root_box.0);
+                let iy0 = tb.1.max(root_box.1);
+                let ix1 = tb.2.min(root_box.2);
+                let iy1 = tb.3.min(root_box.3);
+                let inter_w = (ix1 - ix0).max(0.0);
+                let inter_h = (iy1 - iy0).max(0.0);
+                let target_area = (target_rect[2] * target_rect[3]).max(0.0);
+                let ratio = if target_area > 0.0 {
+                    ((inter_w * inter_h) / target_area).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                // Fire when: first evaluation, entering/leaving visibility,
+                // or crossing any threshold.
+                let last = reg.last_ratio;
+                let threshold_crossed = reg
+                    .thresholds
+                    .iter()
+                    .any(|t| (ratio >= *t) != ((last >= *t) || (last < 0.0 && *t == 0.0 && false)));
+                let visibility_flip = (ratio > 0.0) != (last > 0.0);
+                let first = last < 0.0;
+                if !first && !threshold_crossed && !visibility_flip {
+                    continue;
+                }
+                reg.last_ratio = ratio;
+                // Chrome's boundingClientRect is viewport-relative.
+                let entry = format!(
+                    r#"{{"target":{},"time":{:.3},"isIntersecting":{},"intersectionRatio":{:.4},"boundingClientRect":{{"x":{:.2},"y":{:.2},"width":{:.2},"height":{:.2},"top":{:.2},"right":{:.2},"bottom":{:.2},"left":{:.2}}},"rootBounds":{{"x":0,"y":0,"width":{:.2},"height":{:.2},"top":0,"right":{:.2},"bottom":{:.2},"left":0}},"intersectionRect":{{"x":{:.2},"y":{:.2},"width":{:.2},"height":{:.2},"top":{:.2},"right":{:.2},"bottom":{:.2},"left":{:.2}}}}}"#,
+                    reg.target as u64,
+                    now_ms,
+                    ratio > 0.0,
+                    ratio,
+                    target_rect[0],
+                    target_rect[1] - scroll_y,
+                    target_rect[2],
+                    target_rect[3],
+                    target_rect[1] - scroll_y,
+                    target_rect[0] + target_rect[2],
+                    target_rect[1] + target_rect[3] - scroll_y,
+                    target_rect[0],
+                    vw,
+                    vh,
+                    vw,
+                    vh,
+                    ix0,
+                    iy0 - scroll_y,
+                    inter_w,
+                    inter_h,
+                    iy0 - scroll_y,
+                    ix0 + inter_w,
+                    iy0 + inter_h - scroll_y,
+                    ix0
+                );
+                pending.push((reg.id, entry));
+            }
+            // Group entries per observer id.
+            for (id, entry) in pending {
+                if let Some(slot) = io_batches.iter_mut().find(|(bid, _)| *bid == id) {
+                    slot.1.push(',');
+                    slot.1.push_str(&entry);
+                } else {
+                    io_batches.push((id, format!("[{entry}]")));
+                }
+            }
+        }
+        // ResizeObserver: fire on border-box change (incl. first eval).
+        let mut ro_batches: Vec<(u64, String)> = Vec::new();
+        {
+            let mut obs = self.observers_state.borrow_mut();
+            for reg in obs.ro.iter_mut() {
+                let Some(&rect) = rects.get(&(reg.target as u64)) else {
+                    continue;
+                };
+                let changed = match reg.last_rect {
+                    None => true,
+                    Some(last) => {
+                        (last[0] - rect[0]).abs() > 0.5
+                            || (last[1] - rect[1]).abs() > 0.5
+                            || (last[2] - rect[2]).abs() > 0.5
+                            || (last[3] - rect[3]).abs() > 0.5
+                    }
+                };
+                if !changed {
+                    continue;
+                }
+                reg.last_rect = Some(rect);
+                let entry = format!(
+                    r#"{{"target":{},"contentRect":{{"x":{:.2},"y":{:.2},"width":{:.2},"height":{:.2},"top":{:.2},"right":{:.2},"bottom":{:.2},"left":{:.2}}}}}"#,
+                    reg.target as u64,
+                    rect[0],
+                    rect[1] - scroll_y,
+                    rect[2],
+                    rect[3],
+                    rect[1] - scroll_y,
+                    rect[0] + rect[2],
+                    rect[1] + rect[3] - scroll_y,
+                    rect[0]
+                );
+                if let Some(slot) = ro_batches.iter_mut().find(|(bid, _)| *bid == reg.id) {
+                    slot.1.push(',');
+                    slot.1.push_str(&entry);
+                } else {
+                    ro_batches.push((reg.id, format!("[{entry}]")));
+                }
+            }
+        }
+        if let Some(js) = &self.js {
+            for (id, json) in io_batches {
+                js.dispatch(JsEngineEvent::IntersectFired { id, json });
+            }
+            for (id, json) in ro_batches {
+                js.dispatch(JsEngineEvent::ResizeFired { id, json });
+            }
+        }
     }
 
     fn repaint(&mut self) {
@@ -1777,6 +1944,7 @@ impl Page {
                 viewport: Rc::clone(&self.viewport_mirror),
                 mo: Rc::clone(&self.mo_state),
                 history: Rc::clone(&self.history_mirror),
+                observers: Rc::clone(&self.observers_state),
             };
             *self.viewport_mirror.borrow_mut() =
                 (self.scroll_y, self.viewport.width, self.viewport.height);
@@ -1870,6 +2038,7 @@ impl Page {
             viewport: Rc::new(RefCell::new((0.0, 0.0, 0.0))),
             mo: rowser_js::MoShared::default(),
             history: Default::default(),
+            observers: Default::default(),
         };
         if let Ok(runtime) = JsRuntime::new(JsConfig::default(), bridge) {
             runtime

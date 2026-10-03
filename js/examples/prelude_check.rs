@@ -25,6 +25,7 @@ fn main() {
         viewport,
         mo: Default::default(),
         history: Default::default(),
+        observers: Default::default(),
     };
     let t0 = Instant::now();
     println!("creating runtime (evals prelude)…");

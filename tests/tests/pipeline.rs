@@ -341,3 +341,68 @@ async fn history_pushstate_popstate_roundtrip() {
     }
     browser.shutdown();
 }
+
+const OBSERVERS_HTML: &str = r#"<!DOCTYPE html><html><head><title>Observers</title></head><body>
+<div id="target" style="width:100px;height:100px;background:#0a0">X</div>
+<script>
+  const el = document.getElementById('target');
+  const io = new IntersectionObserver(function (entries) {
+    console.log('IO:' + entries[0].isIntersecting + ':' + Math.round(entries[0].boundingClientRect.width));
+  }, { threshold: [0.5] });
+  io.observe(el);
+  const ro = new ResizeObserver(function (entries) {
+    console.log('RO:' + Math.round(entries[0].contentRect.width) + 'x' + Math.round(entries[0].contentRect.height));
+  });
+  ro.observe(el);
+</script>
+</body></html>"#;
+
+/// Intersection/Resize observers: engine computes entries from real layout
+/// rects after the post-script re-render and delivers them into JS.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn observers_fire_with_real_geometry() {
+    let mut routes: HashMap<String, (u16, String, Vec<u8>)> = HashMap::new();
+    routes.insert(
+        "/".to_owned(),
+        (
+            200,
+            "text/html".to_owned(),
+            OBSERVERS_HTML.as_bytes().to_vec(),
+        ),
+    );
+    let mut server = LocalServer::start(routes);
+    let url = server.url();
+    server.serve();
+
+    let browser = BrowserApi::start(test_config("observers")).expect("engine start");
+    let tab = browser.new_tab(Some(url));
+    let mut events = browser.events();
+
+    let seconds = if std::env::var("TSAN_OPTIONS").is_ok() || std::env::var("ASAN_OPTIONS").is_ok()
+    {
+        120
+    } else {
+        20
+    };
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(seconds);
+    let mut saw_io = false;
+    let mut saw_ro = false;
+    while !(saw_io && saw_ro) {
+        let event = tokio::time::timeout_at(deadline, events.recv())
+            .await
+            .expect("timeout waiting for observer events")
+            .expect("event channel alive");
+        if let EngineEvent::ConsoleMessage { text, .. } = event {
+            if text.starts_with("IO:") {
+                assert!(text.contains("true"), "isIntersecting: {text}");
+                assert!(text.contains("100"), "rect width: {text}");
+                saw_io = true;
+            }
+            if text.starts_with("RO:") {
+                assert!(text.contains("100x100"), "contentRect: {text}");
+                saw_ro = true;
+            }
+        }
+    }
+    browser.shutdown();
+}
