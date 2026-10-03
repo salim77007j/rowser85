@@ -303,6 +303,8 @@ pub struct BrowserApp {
     removed_bookmark: bool,
     /// Scratch: bookmark added this frame.
     added_bookmark: bool,
+    /// URL from argv[1], navigated on the first frame (once).
+    startup_url: Option<String>,
 }
 
 /// Background print outcomes (worker threads → UI).
@@ -335,8 +337,15 @@ pub enum PrintOutcome {
 }
 
 impl BrowserApp {
-    /// Builds the app on top of a booted shell.
-    pub fn new(shell: rowser_shell::Shell, cc: &eframe::CreationContext<'_>) -> BrowserApp {
+    /// Builds the app on top of a booted shell. `startup_url` (the argv[1]
+    /// convention every desktop browser supports) opens in a new tab on
+    /// the first frame — also how the capture rig navigates without
+    /// synthetic typing.
+    pub fn new(
+        shell: rowser_shell::Shell,
+        cc: &eframe::CreationContext<'_>,
+        startup_url: Option<String>,
+    ) -> BrowserApp {
         let settings = shell.store().settings.clone();
         let theme = Theme::new(settings.theme, &settings.accent);
         theme.apply(&cc.egui_ctx);
@@ -401,6 +410,7 @@ impl BrowserApp {
             chrome: Chrome::default(),
             removed_bookmark: false,
             added_bookmark: false,
+            startup_url,
         }
     }
 
@@ -1137,6 +1147,12 @@ impl eframe::App for BrowserApp {
         let trace = std::env::var("ROWSER_UI_TRACE").is_ok();
         if trace {
             eprintln!("[frame] start");
+        }
+        // argv[1] URL: navigate once, on the very first frame.
+        if let Some(url) = self.startup_url.take() {
+            if !url.is_empty() {
+                self.new_tab(Some(url));
+            }
         }
         if std::env::var("ROWSER_UI_DEBUG").is_ok() {
             for ev in ctx.input(|i| i.events.clone()) {

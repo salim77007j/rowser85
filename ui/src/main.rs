@@ -46,7 +46,10 @@ fn main() -> eframe::Result<()> {
             // Engine events must wake the UI: install the repaint hook now.
             let ctx = cc.egui_ctx.clone();
             shell.set_waker(Box::new(move || ctx.request_repaint()));
-            Ok(Box::new(app::BrowserApp::new(shell, cc)))
+            // argv[1]: optional URL opened in a tab on the first frame —
+            // the `rowser https://example.com` convention.
+            let startup_url = std::env::args().nth(1).filter(|u| !u.is_empty());
+            Ok(Box::new(app::BrowserApp::new(shell, cc, startup_url)))
         }),
     )
 }

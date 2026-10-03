@@ -343,6 +343,14 @@ struct Page {
     suspended: bool,
     dirty: bool,
     rendered_dom_version: u64,
+    /// Consecutive dirty re-renders without a quiet period (sustained
+    /// JS-driven mutation loops: rAF animations, observer reactions).
+    dirty_streak: u32,
+    /// Duration of the most recent full render; slow pages pace their
+    /// re-renders instead of wedging the machine (see idle()).
+    last_render_cost: std::time::Duration,
+    /// Earliest time the next slow-page render may run (pacing floor).
+    render_not_before: Option<std::time::Instant>,
     last_memory_report: std::time::Instant,
     navigating: bool,
     /// Session history (entries carry the pushState state blob).
@@ -425,6 +433,9 @@ impl Page {
             suspended: false,
             dirty: false,
             rendered_dom_version: 0,
+            dirty_streak: 0,
+            last_render_cost: std::time::Duration::ZERO,
+            render_not_before: None,
             last_memory_report: std::time::Instant::now(),
             navigating: false,
             history: Vec::new(),
@@ -2669,8 +2680,40 @@ impl Page {
             self.subresources_complete();
         }
         if self.dirty && !self.suspended && !self.navigating && self.dom.is_some() {
-            self.dirty = false;
-            self.render_pipeline();
+            // Sustained-dirty pacing: pages whose every rAF/observer
+            // reaction dirties the DOM re-render forever (marketing
+            // animations). Chrome composites those at 60 FPS with
+            // incremental layout; our full re-render costs seconds on
+            // JS-heavy pages, and render→observer→mutate→render ground
+            // the whole machine (1.6 GB RSS, starved UI). Pace slow pages
+            // to at most one render per cost-scaled interval (1s floor,
+            // 4s cap) — degraded animation, alive browser.
+            let slow = self.last_render_cost > std::time::Duration::from_millis(800);
+            if slow
+                && self.dirty_streak > 4
+                && self
+                    .render_not_before
+                    .is_some_and(|t| std::time::Instant::now() < t)
+            {
+                // Not yet: leave dirty set, retry on a later idle tick.
+            } else {
+                self.dirty = false;
+                self.dirty_streak += 1;
+                let t0 = std::time::Instant::now();
+                self.render_pipeline();
+                self.last_render_cost = t0.elapsed();
+                if self.last_render_cost > std::time::Duration::from_millis(800) {
+                    let gap = (self.last_render_cost / 2).clamp(
+                        std::time::Duration::from_secs(1),
+                        std::time::Duration::from_secs(4),
+                    );
+                    self.render_not_before = Some(std::time::Instant::now() + gap);
+                }
+            }
+        } else if !self.dirty {
+            // Quiet period: a genuinely idle page resets the streak so the
+            // FIRST new interaction renders immediately.
+            self.dirty_streak = 0;
         }
         if self.last_memory_report.elapsed() > Duration::from_secs(5) {
             self.last_memory_report = std::time::Instant::now();
