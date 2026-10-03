@@ -228,7 +228,12 @@ pub(crate) fn run(state: Arc<PageState>, rx: Receiver<Message>) {
         // Block briefly on engine messages; the timeout lets us do idle work
         // (dirty re-renders, memory reports). With rAF callbacks pending the
         // timeout shrinks to one 60 FPS frame slot so the frame clock runs.
-        let frame_pace = !page.pending_raf.is_empty()
+        let focused = page
+            .state
+            .focused
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let frame_pace = focused
+            && !page.pending_raf.is_empty()
             && page
                 .last_raf
                 .map(|t| t.elapsed() >= Duration::from_millis(12))
@@ -1962,6 +1967,15 @@ impl Page {
         if self.pending_raf.is_empty() {
             return;
         }
+        // Chrome pauses the frame clock in background tabs; the callbacks
+        // stay queued and run when the tab regains focus.
+        if !self
+            .state
+            .focused
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return;
+        }
         let ids = std::mem::take(&mut self.pending_raf);
         self.last_raf = Some(std::time::Instant::now());
         if let Some(js) = &self.js {
@@ -1969,7 +1983,10 @@ impl Page {
                 js.dispatch(JsEngineEvent::RafFired(id));
             }
         }
-        self.mark_if_dirty();
+        // NOTE: no mark_if_dirty here. JS callbacks that mutate the DOM
+        // send MarkDirty through their natives; re-rendering on every
+        // frame turned 60 FPS rAF pages into 60 FPS full re-layouts
+        // (GitHub's RSS grew to 1.6 GB in seconds).
     }
 
     fn run_scripts(&mut self) {

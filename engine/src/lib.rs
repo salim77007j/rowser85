@@ -374,6 +374,8 @@ struct PageHandle {
     tx: std::sync::mpsc::Sender<page::Message>,
     thread: Option<JoinHandle<()>>,
     focused: bool,
+    /// Shared focus flag mirrored into the page thread.
+    focused_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
     backgrounded_since: Option<std::time::Instant>,
     /// True while any media element in the tab is playing (suspension
     /// override — the audio-playing rule every browser applies).
@@ -438,6 +440,10 @@ pub(crate) struct PageState {
     pub event_tx: tokio::sync::broadcast::Sender<EngineEvent>,
     /// Snapshot writer.
     pub snapshot_tx: page::SnapshotWriter,
+    /// Focus flag shared with the page thread: rAF only runs while focused
+    /// (Chrome pauses the frame clock in background tabs — a page full of
+    /// rAF loops otherwise starves every other tab on the machine).
+    pub focused: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Engine {
@@ -690,6 +696,9 @@ fn handle_user(state: &EngineLoop, command: Command) -> bool {
             for (id, handle) in tabs.iter_mut() {
                 if *id == tab {
                     handle.focused = true;
+                    handle
+                        .focused_flag
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
                     handle.backgrounded_since = None;
                     if handle.suspended {
                         handle.suspended = false;
@@ -698,6 +707,9 @@ fn handle_user(state: &EngineLoop, command: Command) -> bool {
                     }
                 } else if handle.focused {
                     handle.focused = false;
+                    handle
+                        .focused_flag
+                        .store(false, std::sync::atomic::Ordering::Relaxed);
                     handle.backgrounded_since = Some(std::time::Instant::now());
                 }
             }
@@ -781,11 +793,13 @@ fn create_tab(state: &EngineLoop, requested: TabId, url: Option<String>) {
     let (page_tx, page_rx) = std::sync::mpsc::channel::<page::Message>();
     // All tabs share the session profile (identity consistency, see start).
     let spoof = state.spoof.clone();
+    let is_first = state.tabs.lock().unwrap().is_empty();
 
     {
         let mut snapshots = state.snapshots.lock().unwrap();
         snapshots.entry(tab).or_default();
     }
+    let focused_flag = Arc::new(std::sync::atomic::AtomicBool::new(is_first));
     let page_state = Arc::new(PageState {
         tab,
         engine_tx: state.cmd_tx.clone(),
@@ -798,6 +812,7 @@ fn create_tab(state: &EngineLoop, requested: TabId, url: Option<String>) {
             tab,
             snapshots: Arc::clone(&state.snapshots),
         },
+        focused: Arc::clone(&focused_flag),
     });
 
     let thread = std::thread::Builder::new()
@@ -815,6 +830,7 @@ fn create_tab(state: &EngineLoop, requested: TabId, url: Option<String>) {
         PageHandle {
             tx: page_tx,
             thread: Some(thread),
+            focused_flag,
             // The first tab is born focused (the UI's active tab); later
             // tabs wait for an explicit Focus command from the UI.
             focused: is_first,
