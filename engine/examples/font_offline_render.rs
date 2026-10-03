@@ -110,7 +110,7 @@ fn main() {
             let mut x0: i32 = i32::MAX;
             let mut x1: i32 = i32::MIN;
             let mut n: usize = 0;
-            let mut flush = |line_y: Option<i32>, x0: i32, x1: i32, n: usize| {
+            let flush = |line_y: Option<i32>, x0: i32, x1: i32, n: usize| {
                 if let Some(y) = line_y {
                     println!(
                         "  run node={} line@y={} x {}..{} ({} glyphs)",

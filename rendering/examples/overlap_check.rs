@@ -63,7 +63,7 @@ fn main() {
         x1: f32,
         y1: f32,
         sample: String,
-        node: rowser_dom::NodeId,
+        _node: rowser_dom::NodeId,
         owner: String,
     }
     let mut boxes: Vec<Box_> = Vec::new();
@@ -97,7 +97,7 @@ fn main() {
                 x1: maxx,
                 y1: maxy,
                 sample: format!("{}g @({:.0},{:.0})", run.glyphs.len(), minx, miny),
-                node: run.node,
+                _node: run.node,
                 owner,
             });
         }

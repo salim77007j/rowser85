@@ -102,20 +102,15 @@ mod wiki_real_tests {
         {
             let chain = |mut n: rowser_dom::NodeId| -> Vec<String> {
                 let mut out = Vec::new();
-                loop {
-                    match dom.flat_parent_element(n) {
-                        Some(p) => {
-                            let name = dom
-                                .element(p)
-                                .map(|e| e.name.local.to_string())
-                                .unwrap_or_default();
-                            let cls = dom.get_attr(p, "class").unwrap_or_default().to_string();
-                            let cls = cls.split_whitespace().next().unwrap_or("").to_string();
-                            out.push(format!("{name}.{cls}"));
-                            n = p;
-                        }
-                        None => break,
-                    }
+                while let Some(p) = dom.flat_parent_element(n) {
+                    let name = dom
+                        .element(p)
+                        .map(|e| e.name.local.to_string())
+                        .unwrap_or_default();
+                    let cls = dom.get_attr(p, "class").unwrap_or_default().to_string();
+                    let cls = cls.split_whitespace().next().unwrap_or("").to_string();
+                    out.push(format!("{name}.{cls}"));
+                    n = p;
                     if out.len() > 12 {
                         break;
                     }

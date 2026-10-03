@@ -234,9 +234,11 @@ mod tests {
             &Default::default(),
         );
         let mut painter = Painter::new();
-        let mut options = RenderOptions::default();
-        options.viewport_width = 400;
-        options.viewport_height = 300;
+        let options = RenderOptions {
+            viewport_width: 400,
+            viewport_height: 300,
+            ..Default::default()
+        };
         let frame = painter
             .render(&list, options, &mut engine.font_system)
             .expect("frame");
@@ -288,9 +290,11 @@ mod tests {
             &Default::default(),
         );
         let mut painter = Painter::new();
-        let mut options = RenderOptions::default();
-        options.viewport_width = 200;
-        options.viewport_height = 150;
+        let options = RenderOptions {
+            viewport_width: 200,
+            viewport_height: 150,
+            ..Default::default()
+        };
         let frame = painter
             .render(&list, options, &mut engine.font_system)
             .expect("frame");

@@ -1306,15 +1306,6 @@ mod tests {
     use rowser_parsing::css::{parse_stylesheet, MediaContext};
     use rowser_parsing::html::parse_html;
 
-    /// Finds the first element with `tag` under the layout root.
-    fn find_tag(dom: &Dom, tag: &str) -> Option<NodeId> {
-        dom.subtree_elements(dom.document()).find(|n| {
-            dom.element(*n)
-                .map(|e| &*e.name.local == tag)
-                .unwrap_or(false)
-        })
-    }
-
     /// CSS 2.1 §9.5: a left float sticks to the containing block's left
     /// content edge; subsequent line content flows beside it, not under it.
     #[test]

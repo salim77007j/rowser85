@@ -22,7 +22,7 @@ mod grid_sheet_tests {
         let sheet = parse_stylesheet(css, &MediaContext::default());
         let styles = rowser_parsing::cascade::compute_styles(
             &doc.dom,
-            &[sheet.clone()],
+            std::slice::from_ref(&sheet),
             &MediaContext::default(),
         );
         for node in doc.dom.subtree_elements(doc.dom.document()) {

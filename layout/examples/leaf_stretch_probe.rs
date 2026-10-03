@@ -7,18 +7,12 @@ use taffy::{AvailableSpace, LayoutInput, LayoutOutput, RunMode, SizingMode, Styl
 fn main() {
     for (label, overflow_hidden) in [("overflow:Hidden", true), ("overflow:Visible", false)] {
         let mut tree: TaffyTree<()> = TaffyTree::new();
-        let ov = || taffy::geometry::Point {
-            x: if overflow_hidden {
-                taffy::Overflow::Hidden
-            } else {
-                taffy::Overflow::Visible
-            },
-            y: if overflow_hidden {
-                taffy::Overflow::Hidden
-            } else {
-                taffy::Overflow::Visible
-            },
+        let value = if overflow_hidden {
+            taffy::Overflow::Hidden
+        } else {
+            taffy::Overflow::Visible
         };
+        let ov = move || taffy::geometry::Point { x: value, y: value };
         let leaf_style = Style {
             display: Display::Block,
             overflow: ov(),
@@ -57,11 +51,10 @@ fn main() {
                 let _ = SizingMode::InherentSize;
                 // pretend the text is 699.4 wide, 28 tall, one line
                 let w = width.unwrap_or(699.4);
-                let h = if width.is_some() { 28.0 } else { 28.0 };
                 LayoutOutput {
                     size: Size {
                         width: w.min(699.4),
-                        height: h,
+                        height: 28.0,
                     },
                     scrollable_overflow_rect: taffy::geometry::Rect::ZERO,
                     baselines: Baselines::NONE,
