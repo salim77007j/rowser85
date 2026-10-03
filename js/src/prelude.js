@@ -1326,7 +1326,23 @@
     constructor(input, base) {
       let str = String(input);
       if (base !== undefined && !/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(str)) {
-        str = String(base).replace(/\/[^/]*$/, '') + (str.startsWith('/') ? '' : '/') + str;
+        // Resolve a relative reference against the base URL.
+        const b = String(base);
+        const schemeEnd = b.indexOf('://');
+        if (schemeEnd >= 0) {
+          const afterScheme = b.slice(schemeEnd + 3);
+          const slash = afterScheme.indexOf('/');
+          const prefix = b.slice(0, schemeEnd + 3) + (slash < 0 ? afterScheme : afterScheme.slice(0, slash));
+          const bpath = slash < 0 ? '/' : afterScheme.slice(slash);
+          if (str.startsWith('/')) {
+            str = prefix + str;
+          } else {
+            const dir = bpath.slice(0, bpath.lastIndexOf('/') + 1);
+            str = prefix + dir + str;
+          }
+        } else if (str.startsWith('/')) {
+          str = b.replace(/\/?$/, '') + str;
+        }
       }
       const m = /^([a-zA-Z][a-zA-Z0-9+.-]*:\/\/)?([^/?#]*)?([^?#]*)(\?[^#]*)?(#.*)?$/.exec(str);
       this.protocol = (m[1] || '').replace('://', '').toLowerCase();
@@ -1342,6 +1358,9 @@
         get: () => this.toString(),
         set: (v) => { __native_navigate(String(v)); },
       });
+    }
+    get origin() {
+      return (this.protocol ? this.protocol + '://' : '') + this.host;
     }
     toString() {
       return (this.protocol ? this.protocol + '://' : '') + this.host + this.pathname + this.search + this.hash;
@@ -1421,6 +1440,33 @@
   globalThis.dispatchEvent = function (ev) {
     (winListeners[ev && ev.type] || []).forEach(function (cb) { try { cb(ev); } catch (e) {} });
     return true;
+  };
+
+  // History events from the engine.
+  function fireWindowEvent(type, props) {
+    const ev = Object.assign(new Event(type), props || {});
+    (winListeners[type] || []).slice().forEach(function (cb) {
+      try { cb(ev); } catch (e) { console.error(type + ' handler: ' + errString(e)); }
+    });
+    const inline = globalThis['on' + type];
+    if (typeof inline === 'function') { try { inline(ev); } catch (e) { console.error(errString(e)); } }
+  }
+  globalThis.__onPopState = function (stateJson) {
+    let state = null;
+    try { state = stateJson ? JSON.parse(stateJson) : null; } catch (e) {}
+    fireWindowEvent('popstate', { state });
+  };
+  globalThis.__onLocationChanged = function (url) {
+    if (globalThis.__resetHistoryLocal) globalThis.__resetHistoryLocal();
+    const oldURL = env.location;
+    const oldHash = locationParts(oldURL).hash;
+    env.location = String(url || env.location);
+    if (locationParts(env.location).hash !== oldHash) {
+      fireWindowEvent('hashchange', {
+        oldURL: oldURL,
+        newURL: String(url),
+      });
+    }
   };
 
   // Element-level listener fan-out with wrapper identity: listeners live
@@ -1747,31 +1793,99 @@
   };
   globalThis.devicePixelRatio = 1;
   // `location` is settable: assigning href (or calling assign/replace)
-  // navigates the tab via the engine.
-  globalThis.location = {
+  // navigates the tab via the engine. The parts are DERIVED from the live
+  // URL each read (pushState keeps them fresh without a reload).
+  function locationParts(u) {
+    try {
+      const p = new URL(u);
+      return {
+        href: p.href,
+        origin: p.origin,
+        protocol: p.protocol,
+        host: p.host,
+        hostname: p.hostname,
+        port: p.port,
+        pathname: p.pathname,
+        search: p.search || '',
+        hash: p.hash || '',
+      };
+    } catch (e) {
+      return {
+        href: u, origin: env.origin, protocol: env.protocol, host: env.host,
+        hostname: env.host, port: '', pathname: env.pathname, search: '', hash: '',
+      };
+    }
+  }
+  const location = {
     get href() { return env.location; },
     set href(url) { __native_navigate(String(url)); },
-    origin: env.origin,
-    protocol: env.protocol,
-    host: env.host,
-    hostname: env.host,
-    pathname: env.pathname,
-    get search() { return ''; },
-    get hash() { return ''; },
+    get origin() { return locationParts(env.location).origin; },
+    get protocol() { return locationParts(env.location).protocol; },
+    get host() { return locationParts(env.location).host; },
+    get hostname() { return locationParts(env.location).hostname; },
+    get port() { return locationParts(env.location).port; },
+    get pathname() { return locationParts(env.location).pathname; },
+    get search() { return locationParts(env.location).search; },
+    get hash() { return locationParts(env.location).hash; },
     assign(url) { __native_navigate(String(url)); },
     replace(url) { __native_navigate(String(url)); },
     reload() { __native_navigate(String(env.location)); },
     toString() { return env.location; },
   };
-  globalThis.origin = env.origin;
+  globalThis.location = location;
+  // History API: entries + state live in the engine (same mirror the
+  // address bar uses). pushState/replaceState update location without a
+  // navigation; back/forward/go re-navigate and pop popstate.
+  // Chrome updates history.length synchronously on pushState; the engine
+  // confirms a turn later. Track a local offset that is invalidated on
+  // every engine-driven location change.
+  let histLenLocal = null;
+  globalThis.__resetHistoryLocal = function () { histLenLocal = null; };
   globalThis.history = {
-    length: 1,
-    back() {},
-    forward() {},
-    go() {},
-    pushState() {},
-    replaceState() {},
+    get length() {
+      try {
+        if (histLenLocal !== null) return histLenLocal;
+        return __native_history_length();
+      } catch (e) { return 1; }
+    },
+    get state() {
+      try { const s = __native_history_state(); return s ? JSON.parse(s) : null; } catch (e) { return null; }
+    },
+    get scrollRestoration() { return 'auto'; },
+    set scrollRestoration(v) {},
+    back() { try { __native_history_go(-1); } catch (e) {} },
+    forward() { try { __native_history_go(1); } catch (e) {} },
+    go(d) { try { __native_history_go(Number(d) || 0); } catch (e) {} },
+    pushState(state, title, url) {
+      optimisticLocation(url);
+      try {
+        if (histLenLocal === null) histLenLocal = __native_history_length();
+        histLenLocal += 1;
+      } catch (e) {}
+      try { __native_history_push(jsonOrNull(state), url == null ? '' : String(url)); } catch (e) {}
+    },
+    replaceState(state, title, url) {
+      optimisticLocation(url);
+      try { __native_history_replace(jsonOrNull(state), url == null ? '' : String(url)); } catch (e) {}
+    },
   };
+  function jsonOrNull(v) {
+    try { return v === undefined ? 'null' : JSON.stringify(v); } catch (e) { return 'null'; }
+  }
+  // pushState/replaceState update `location` synchronously in Chrome; the
+  // engine confirms asynchronously (same event-loop turn). Apply the URL
+  // optimistically so scripts that read location.pathname right after the
+  // call see the new value.
+  function optimisticLocation(url) {
+    if (url == null || url === '') return;
+    try {
+      const resolved = new URL(String(url), env.location);
+      // Cross-origin pushState is ignored by the engine (Chrome throws).
+      if (resolved.origin === locationParts(env.location).origin) {
+        env.location = resolved.href;
+      }
+    } catch (e) {}
+  }
 
   // ------------------------------------------------------------------ misc
   globalThis.btoa = function (s) { return __native_b64_encode(String(s)); };
@@ -1810,4 +1924,3 @@
   globalThis.matchMedia = function (q) {
     return { matches: false, media: String(q), addEventListener() {}, removeEventListener() {} };
   };
-})();

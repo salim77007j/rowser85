@@ -1105,9 +1105,12 @@ fn send_page(
 
 fn handle_page_command(state: &EngineLoop, tab: TabId, command: JsCommand) {
     match command {
-        // Navigation is handled by the page thread itself (history + reload
-        // semantics); forward it back down.
-        JsCommand::Navigate { .. } => {
+        // Navigation and history semantics are page-thread concerns;
+        // forward them back down.
+        JsCommand::Navigate { .. }
+        | JsCommand::HistoryPush { .. }
+        | JsCommand::HistoryReplace { .. }
+        | JsCommand::HistoryGo { .. } => {
             send_page(&state.tabs, tab, |tx| {
                 tx.send(page::Message::JsCommand(command.clone()))
             });

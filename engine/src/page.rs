@@ -257,6 +257,25 @@ pub(crate) fn run(state: Arc<PageState>, rx: Receiver<Message>) {
     page.shutdown_report();
 }
 
+/// One session-history entry: URL + serialized pushState state.
+#[derive(Debug, Clone, Default)]
+struct HistoryEntry {
+    url: String,
+    state: String,
+}
+
+/// True when two URLs share scheme+host+port (pushState same-origin rule).
+fn origins_match(a: &str, b: &str) -> bool {
+    let origin_of = |u: &str| {
+        url::Url::parse(u)
+            .ok()
+            .map(|p| p.origin().ascii_serialization())
+            .unwrap_or_default()
+    };
+    let (oa, ob) = (origin_of(a), origin_of(b));
+    !oa.is_empty() && oa == ob
+}
+
 struct Page {
     state: Arc<PageState>,
     engine_tx: Sender<Cmd>,
@@ -295,10 +314,12 @@ struct Page {
     rendered_dom_version: u64,
     last_memory_report: std::time::Instant,
     navigating: bool,
-    /// Session history (visited URLs, oldest first).
-    history: Vec<String>,
+    /// Session history (entries carry the pushState state blob).
+    history: Vec<HistoryEntry>,
     /// Current position in the session history.
     history_pos: usize,
+    /// A history traversal is in flight: fire popstate once scripts run.
+    popstate_pending: bool,
     /// Find-in-page match rectangles (document coordinates).
     find_matches: Vec<rowser_rendering::Rect>,
     /// Index of the active find match.
@@ -329,6 +350,8 @@ struct Page {
     viewport_mirror: rowser_js::ViewportMirror,
     /// MutationObserver state shared with the JS runtime.
     mo_state: rowser_js::MoShared,
+    /// History mirror shared with the JS runtime.
+    history_mirror: rowser_js::HistoryMirrorShared,
     /// Last-reported media activity (drives the suspension override).
     media_active: bool,
 }
@@ -367,6 +390,7 @@ impl Page {
             navigating: false,
             history: Vec::new(),
             history_pos: 0,
+            popstate_pending: false,
             find_matches: Vec::new(),
             active_match: None,
             find_query: String::new(),
@@ -380,6 +404,7 @@ impl Page {
             rect_mirror: Rc::new(RefCell::new(HashMap::new())),
             viewport_mirror: Rc::new(RefCell::new((0.0, 0.0, 0.0))),
             mo_state: rowser_js::MoShared::default(),
+            history_mirror: rowser_js::HistoryMirrorShared::default(),
             media_active: false,
         }
     }
@@ -569,6 +594,9 @@ impl Page {
                 tracing::debug!(target: "rowser::engine", "tab {} JS navigation → {absolute}", self.state.tab);
                 self.navigate(absolute);
             }
+            JsCommand::HistoryPush { state, url } => self.history_push(state, url),
+            JsCommand::HistoryReplace { state, url } => self.history_replace(state, url),
+            JsCommand::HistoryGo { delta } => self.go_history(delta),
             other => {
                 // Timers, fetches, websockets, console, worker spawns are
                 // engine-side.
@@ -580,21 +608,101 @@ impl Page {
         }
     }
 
+    /// `history.pushState(state, title, url)` — same-document entry: no
+    /// navigation, but the address bar, `location`, and the entry list
+    /// all move. The runtime is kept (SPA state survives).
+    fn history_push(&mut self, state: String, url: String) {
+        let resolved = if url.is_empty() {
+            self.url.clone()
+        } else {
+            url::Url::parse(&self.url)
+                .and_then(|base| base.join(&url))
+                .map(|joined| joined.to_string())
+                .unwrap_or(url)
+        };
+        // Only same-origin, same-path-family URLs are honored like Chrome
+        // (cross-origin pushState throws there; we keep the engine simple
+        // and just ignore such URLs, keeping the current one).
+        let same_origin = [(&resolved, &self.url)]
+            .iter()
+            .all(|(a, b)| origins_match(a, b));
+        let new_url = if same_origin {
+            resolved
+        } else {
+            self.url.clone()
+        };
+        self.history.truncate(self.history_pos + 1);
+        self.history.push(HistoryEntry {
+            url: new_url.clone(),
+            state,
+        });
+        self.history_pos = self.history.len() - 1;
+        self.url = new_url.clone();
+        self.sync_history_mirror();
+        self.snapshot(|snapshot| snapshot.url = new_url.clone());
+        if let Some(js) = &self.js {
+            js.dispatch(JsEngineEvent::LocationChanged { url: new_url });
+        }
+    }
+
+    /// `history.replaceState(state, title, url)`.
+    fn history_replace(&mut self, state: String, url: String) {
+        let resolved = if url.is_empty() {
+            self.url.clone()
+        } else {
+            url::Url::parse(&self.url)
+                .and_then(|base| base.join(&url))
+                .map(|joined| joined.to_string())
+                .unwrap_or(url)
+        };
+        let same_origin = origins_match(&resolved, &self.url);
+        let new_url = if same_origin {
+            resolved
+        } else {
+            self.url.clone()
+        };
+        if let Some(entry) = self.history.get_mut(self.history_pos) {
+            entry.url = new_url.clone();
+            entry.state = state;
+        } else {
+            self.history.push(HistoryEntry {
+                url: new_url.clone(),
+                state,
+            });
+        }
+        self.url = new_url.clone();
+        self.sync_history_mirror();
+        self.snapshot(|snapshot| snapshot.url = new_url.clone());
+        if let Some(js) = &self.js {
+            js.dispatch(JsEngineEvent::LocationChanged { url: new_url });
+        }
+    }
+
     fn navigate(&mut self, url: String) {
         self.start_navigation(url, true);
     }
 
     /// Starts a navigation, optionally pushing it onto the session history.
-    fn start_navigation(&mut self, url: String, push_history: bool) {
+    fn start_navigation(&mut self, mut url: String, push_history: bool) {
+        // Normalize through the url crate: root paths gain their trailing
+        // slash, default ports drop, percent-encoding canonicalizes —
+        // `location.href` then matches Chrome byte-for-byte.
+        if let Ok(normalized) = url::Url::parse(&url) {
+            url = normalized.to_string();
+        }
         tracing::debug!(target: "rowser::engine", "tab {} navigating to {url}", self.state.tab);
         self.navigating = true;
         self.reset_page();
         self.url = url.clone();
         if push_history && !url.is_empty() {
             self.history.truncate(self.history_pos);
-            self.history.push(url.clone());
+            self.history.push(HistoryEntry {
+                url: url.clone(),
+                state: "null".to_owned(),
+            });
             self.history_pos = self.history.len() - 1;
         }
+        self.sync_history_mirror();
         let (back, forward) = self.history_state();
         self.snapshot(|snapshot| {
             snapshot.url = url.clone();
@@ -625,8 +733,21 @@ impl Page {
             return;
         }
         self.history_pos = target as usize;
-        let url = self.history[target as usize].clone();
+        let url = self.history[target as usize].url.clone();
+        self.popstate_pending = true;
         self.start_navigation(url, false);
+    }
+
+    /// Publishes (length, current state) to the JS-visible history mirror.
+    fn sync_history_mirror(&self) {
+        *self.history_mirror.borrow_mut() = rowser_js::HistoryMirror {
+            len: self.history.len() as u32,
+            state: self
+                .history
+                .get(self.history_pos)
+                .map(|e| e.state.clone())
+                .unwrap_or_else(|| "null".to_owned()),
+        };
     }
 
     /// Reloads the current document (history position unchanged).
@@ -1357,6 +1478,19 @@ impl Page {
                 "lifecycle-events.js",
             );
         }
+        // History traversal (back/forward): popstate fires after the new
+        // document's scripts have booted (SPA routers rely on this).
+        if self.popstate_pending {
+            self.popstate_pending = false;
+            let state = self
+                .history
+                .get(self.history_pos)
+                .map(|e| e.state.clone())
+                .unwrap_or_else(|| "null".to_owned());
+            if let Some(js) = &self.js {
+                js.dispatch(JsEngineEvent::PopState { state });
+            }
+        }
         tracing::debug!(target: "rowser::engine", "tab {} scripts done → PageLoaded", self.state.tab);
         self.navigating = false;
         let title = self
@@ -1642,6 +1776,7 @@ impl Page {
                 rects: Rc::clone(&self.rect_mirror),
                 viewport: Rc::clone(&self.viewport_mirror),
                 mo: Rc::clone(&self.mo_state),
+                history: Rc::clone(&self.history_mirror),
             };
             *self.viewport_mirror.borrow_mut() =
                 (self.scroll_y, self.viewport.width, self.viewport.height);
@@ -1734,6 +1869,7 @@ impl Page {
             rects: Rc::new(RefCell::new(HashMap::new())),
             viewport: Rc::new(RefCell::new((0.0, 0.0, 0.0))),
             mo: rowser_js::MoShared::default(),
+            history: Default::default(),
         };
         if let Ok(runtime) = JsRuntime::new(JsConfig::default(), bridge) {
             runtime

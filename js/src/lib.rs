@@ -262,6 +262,25 @@ pub enum JsCommand {
         /// Absolute or page-relative URL.
         url: String,
     },
+    /// `history.pushState(state, title, url)` — same-document history entry.
+    HistoryPush {
+        /// JSON-encoded state object.
+        state: String,
+        /// URL (absolute or page-relative; may be empty).
+        url: String,
+    },
+    /// `history.replaceState(state, title, url)`.
+    HistoryReplace {
+        /// JSON-encoded state object.
+        state: String,
+        /// URL (may be empty = keep current).
+        url: String,
+    },
+    /// `history.back/forward/go(delta)`.
+    HistoryGo {
+        /// Relative movement in the joint session history.
+        delta: i64,
+    },
     /// The DOM was mutated; re-style/layout/render after the script task.
     MarkDirty,
     /// JS set `video.src` (direct URL, data URL, or a `rowser-mse:` object
@@ -378,6 +397,18 @@ pub enum EngineEvent {
         /// JSON message.
         message: String,
     },
+    /// A history traversal (back/forward) landed on a document: fire
+    /// `popstate` on window with the entry's state.
+    PopState {
+        /// JSON-encoded state (may be `null`).
+        state: String,
+    },
+    /// The document URL changed without navigation (pushState/replaceState):
+    /// update `location`, fire `hashchange` when the fragment changed.
+    LocationChanged {
+        /// New absolute URL.
+        url: String,
+    },
     /// A UI event (click, etc.) on a DOM node.
     DomEvent {
         /// Node handle.
@@ -481,7 +512,21 @@ pub struct PageBridge {
     pub viewport: ViewportMirror,
     /// MutationObserver records + registrations.
     pub mo: MoShared,
+    /// History mirror for sync reads: (entry_count, current state JSON).
+    pub history: Rc<RefCell<HistoryMirror>>,
 }
+
+/// Synchronous history state shared with the prelude.
+#[derive(Debug, Clone, Default)]
+pub struct HistoryMirror {
+    /// `history.length`.
+    pub len: u32,
+    /// `history.state` as JSON (defaults to `null`).
+    pub state: String,
+}
+
+/// Shared handle to the history mirror.
+pub type HistoryMirrorShared = Rc<RefCell<HistoryMirror>>;
 
 /// Runtime configuration.
 #[derive(Debug, Clone)]
@@ -634,6 +679,12 @@ impl JsRuntime {
             }
             EngineEvent::DomEvent { node, event_type } => {
                 format!("__onDomEvent({},{})", node, json_str(&event_type))
+            }
+            EngineEvent::PopState { state } => {
+                format!("__onPopState({})", json_str(&state))
+            }
+            EngineEvent::LocationChanged { url } => {
+                format!("__onLocationChanged({})", json_str(&url))
             }
             EngineEvent::MediaEvent {
                 node,
@@ -943,6 +994,47 @@ impl JsRuntime {
                 Function::new(ctx.clone(), move |url: String| {
                     if let Some(out) = &b.outgoing {
                         let _ = out.send(JsCommand::Navigate { url });
+                    }
+                })?,
+            )?;
+
+            // --- history API ---
+            let b = Rc::clone(&bridge);
+            globals.set(
+                "__native_history_length",
+                Function::new(ctx.clone(), move || -> u32 { b.history.borrow().len })?,
+            )?;
+            let b = Rc::clone(&bridge);
+            globals.set(
+                "__native_history_state",
+                Function::new(ctx.clone(), move || -> String {
+                    b.history.borrow().state.clone()
+                })?,
+            )?;
+            let b = Rc::clone(&bridge);
+            globals.set(
+                "__native_history_push",
+                Function::new(ctx.clone(), move |state: String, url: String| {
+                    if let Some(out) = &b.outgoing {
+                        let _ = out.send(JsCommand::HistoryPush { state, url });
+                    }
+                })?,
+            )?;
+            let b = Rc::clone(&bridge);
+            globals.set(
+                "__native_history_replace",
+                Function::new(ctx.clone(), move |state: String, url: String| {
+                    if let Some(out) = &b.outgoing {
+                        let _ = out.send(JsCommand::HistoryReplace { state, url });
+                    }
+                })?,
+            )?;
+            let b = Rc::clone(&bridge);
+            globals.set(
+                "__native_history_go",
+                Function::new(ctx.clone(), move |delta: i64| {
+                    if let Some(out) = &b.outgoing {
+                        let _ = out.send(JsCommand::HistoryGo { delta });
                     }
                 })?,
             )?;
@@ -2247,6 +2339,7 @@ mod tests {
                 rects: Rc::new(RefCell::new(std::collections::HashMap::new())),
                 viewport: Rc::new(RefCell::new((0.0, 0.0, 0.0))),
                 mo: MoShared::default(),
+                history: Default::default(),
             },
         )
         .unwrap();
@@ -2262,6 +2355,20 @@ mod tests {
             runtime.eval("JSON.stringify({a: 1})", "test.js").unwrap(),
             "{\"a\":1}"
         );
+    }
+
+    #[test]
+    fn history_pushstate_updates_location_optimistically() {
+        let (runtime, _dom) = runtime_with_dom(b"<html><body></body></html>");
+        let out = runtime
+            .eval(
+                r#"history.pushState({ p: 2 }, '', '/p2');
+                location.pathname + '|' + location.href + '|' + (history.state === null)"#,
+                "test.js",
+            )
+            .unwrap();
+        assert!(out.contains("/p2|"), "pathname after push: {out}");
+        assert!(out.contains("http"), "href: {out}");
     }
 
     #[test]
@@ -2460,6 +2567,7 @@ mod tests {
                 rects: Rc::new(RefCell::new(std::collections::HashMap::new())),
                 viewport: Rc::new(RefCell::new((0.0, 0.0, 0.0))),
                 mo: MoShared::default(),
+                history: Default::default(),
             },
         )
         .unwrap();

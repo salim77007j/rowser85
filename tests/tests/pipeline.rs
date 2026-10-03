@@ -260,3 +260,84 @@ async fn tab_lifecycle_and_suspension() {
     tokio::time::sleep(Duration::from_millis(200)).await;
     let _ = Arc::new(0u8); // keep Arc import alive for future helpers
 }
+
+const HISTORY_A: &str = r#"<!DOCTYPE html><html><head><title>History A</title></head><body>
+<h1>Page A</h1>
+<script>
+if (localStorage.getItem('hist-done')) {
+  console.log('BACK-LANDED:' + location.pathname);
+  setTimeout(function () { history.forward(); }, 200);
+} else {
+  localStorage.setItem('hist-done', '1');
+  const preHref = location.href;
+  history.pushState({ page: 2 }, '', '/p2');
+  console.log('PUSH:' + location.pathname + ':' + history.length + ':' + preHref + ':' + location.href);
+  setTimeout(function () { history.back(); }, 250);
+}
+</script>
+</body></html>"#;
+
+const HISTORY_B: &str = r#"<!DOCTYPE html><html><head><title>History B</title></head><body>
+<h1>Page B</h1>
+<script>
+window.addEventListener('popstate', function (e) {
+  console.log('POP:' + JSON.stringify(e.state));
+});
+</script>
+</body></html>"#;
+
+/// History API: pushState updates location + length; back() re-navigates;
+/// forward() lands on the pushed entry and pops `popstate` with the stored
+/// state — the SPA-router contract.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn history_pushstate_popstate_roundtrip() {
+    let mut routes: HashMap<String, (u16, String, Vec<u8>)> = HashMap::new();
+    routes.insert(
+        "/".to_owned(),
+        (200, "text/html".to_owned(), HISTORY_A.as_bytes().to_vec()),
+    );
+    routes.insert(
+        "/p2".to_owned(),
+        (200, "text/html".to_owned(), HISTORY_B.as_bytes().to_vec()),
+    );
+    let mut server = LocalServer::start(routes);
+    let url = server.url();
+    server.serve();
+
+    let browser = BrowserApi::start(test_config("history")).expect("engine start");
+    let tab = browser.new_tab(Some(url.clone()));
+    let mut events = browser.events();
+
+    let seconds = if std::env::var("TSAN_OPTIONS").is_ok() || std::env::var("ASAN_OPTIONS").is_ok()
+    {
+        120
+    } else {
+        20
+    };
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(seconds);
+    let mut saw_push = false;
+    let mut saw_back = false;
+    let mut saw_pop = false;
+    while !(saw_push && saw_back && saw_pop) {
+        let event = tokio::time::timeout_at(deadline, events.recv())
+            .await
+            .expect("timeout waiting for history events")
+            .expect("event channel alive");
+        if let EngineEvent::ConsoleMessage { text, .. } = event {
+            if text.starts_with("PUSH:") {
+                assert!(text.contains("/p2"), "push location: {text}");
+                assert!(text.contains(":2"), "history.length: {text}");
+                saw_push = true;
+            }
+            if text.starts_with("BACK-LANDED:") {
+                assert!(text.contains('/'), "back landed: {text}");
+                saw_back = true;
+            }
+            if text.starts_with("POP:") {
+                assert!(text.contains("page"), "popstate state: {text}");
+                saw_pop = true;
+            }
+        }
+    }
+    browser.shutdown();
+}
