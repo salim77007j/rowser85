@@ -151,6 +151,11 @@ impl LayoutEngine {
             return LayoutResult::default();
         };
 
+        // Table grid structure (colspan/rowspan placements) for every
+        // table in the document — computed once, consumed by build_box as
+        // cells and tables get their taffy grid styles.
+        let tables = TableGrids::collect(dom, root);
+
         let taffy_root = build_box(
             dom,
             styles,
@@ -160,19 +165,49 @@ impl LayoutEngine {
             &mut taffy_to_dom,
             intrinsic,
             &[],
+            &tables,
         );
         let Some(taffy_root) = taffy_root else {
             return LayoutResult::default();
         };
 
-        // Root sizing: taffy_style already maps the author width (auto →
-        // stretch, which for the layout root means viewport width MINUS the
-        // root's own margins). Previously width was forced to viewport.width
-        // here, which ignored body margins entirely (content at x=0,
-        // full-width blocks). The margin OFFSET itself is applied in
-        // `extract` (taffy positions the root border box at the layout
-        // origin, not at its margin edge).
-        let root_style = taffy_style(styles.get(root).unwrap_or(&ComputedStyle::default()));
+        // Root margins (resolved): the extract walk seeds at the margin edge
+        // (taffy positions the root border box at the layout origin, not at
+        // its margin edge), and the root WIDTH is set definitively below.
+        let root_margin = styles
+            .get(root)
+            .map(|cs| {
+                let m = &cs.margins;
+                let px = |v: &rowser_parsing::cascade::LengthOrAuto| match v {
+                    rowser_parsing::cascade::LengthOrAuto::Length(l) => {
+                        l.resolve(cs.font_size)
+                    }
+                    rowser_parsing::cascade::LengthOrAuto::Auto => 0.0,
+                };
+                (px(&m.left), px(&m.top), px(&m.right), px(&m.bottom))
+            })
+            .unwrap_or((0.0, 0.0, 0.0, 0.0));
+
+        // Root sizing: a DEFINITE width (viewport minus the root's own
+        // margins) so that percent-width children resolve against it —
+        // with an auto width, taffy's intrinsic sizing pass measures the
+        // subtree under MaxContent, where percent widths degenerate to
+        // content size (a `width:100%` div rendered 8px wide). The old
+        // code forced viewport.width and ignored body margins entirely
+        // (content at x=0); this keeps the margin semantics while staying
+        // definite. An explicit author width (px/em) wins.
+        let mut root_style = taffy_style(styles.get(root).unwrap_or(&ComputedStyle::default()));
+        let root_has_author_width = styles.get(root).is_some_and(|cs| {
+            !matches!(cs.width, rowser_parsing::cascade::LengthOrAuto::Auto)
+        });
+        if !root_has_author_width {
+            root_style.size = TaffySize {
+                width: Dimension::length(
+                    (viewport.width - root_margin.0 - root_margin.2).max(0.0),
+                ),
+                height: Dimension::AUTO,
+            };
+        }
         tree.set_style(taffy_root, root_style).ok();
 
         let available = TaffySize {
@@ -190,19 +225,6 @@ impl LayoutEngine {
         // taffy reports root-relative locations, so seed the walk with the
         // margin offset (mirrors CSS: the body content box is inset by its
         // margins within the html canvas).
-        let root_margin = styles
-            .get(root)
-            .map(|cs| {
-                let m = &cs.margins;
-                let px = |v: &rowser_parsing::cascade::LengthOrAuto| match v {
-                    rowser_parsing::cascade::LengthOrAuto::Length(l) => {
-                        l.resolve(cs.font_size)
-                    }
-                    rowser_parsing::cascade::LengthOrAuto::Auto => 0.0,
-                };
-                (px(&m.left), px(&m.top))
-            })
-            .unwrap_or((0.0, 0.0));
         let mut result = LayoutResult::default();
         let abs = (root_margin.0, root_margin.1);
         extract(
@@ -217,6 +239,151 @@ impl LayoutEngine {
         );
         result
     }
+}
+
+/// One cell's placement in a table grid, computed by the CSS 2.1 §17.4.1
+/// occupancy algorithm.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TableCellPlacement {
+    /// Zero-based row of the cell's top-left corner.
+    pub row: u16,
+    /// Zero-based column of the cell's top-left corner.
+    pub col: u16,
+    /// Row span (>= 1).
+    pub rowspan: u16,
+    /// Column span (>= 1).
+    pub colspan: u16,
+}
+
+/// Precomputed grid structure for every `<table>` under the layout root:
+/// cell placements (with colspan/rowspan) and per-table column counts.
+/// The UA stylesheet maps `table` to `display: grid` and rows/sections to
+/// `display: contents`, so these placements drive the grid engine's
+/// track-spanning item placement — that is how colspan/rowspan render.
+#[derive(Debug, Default)]
+pub struct TableGrids {
+    cells: HashMap<NodeId, TableCellPlacement>,
+    cols: HashMap<NodeId, usize>,
+}
+
+impl TableGrids {
+    /// Walks every `<table>` under `root` (light tree) and computes the
+    /// occupancy grid per table.
+    pub fn collect(dom: &Dom, root: NodeId) -> Self {
+        let mut grids = TableGrids::default();
+        for node in dom.descendants(root) {
+            if dom
+                .element(node)
+                .is_some_and(|e| &*e.name.local == "table")
+            {
+                let (cells, cols) = table_grid(dom, node);
+                grids.cells.extend(cells);
+                grids.cols.insert(node, cols);
+            }
+        }
+        grids
+    }
+}
+
+/// Computes one table's occupancy grid (CSS 2.1 §17.4.1, simplified):
+/// cells are placed left-to-right in each row into the first slot not
+/// occupied by a previous (possibly row-spanning) cell; `colspan`/
+/// `rowspan` attributes drive the span. A `<caption>` occupies row 1
+/// spanning every column (Chrome renders it above the table body).
+fn table_grid(dom: &Dom, table: NodeId) -> (HashMap<NodeId, TableCellPlacement>, usize) {
+    let mut cells: HashMap<NodeId, TableCellPlacement> = HashMap::new();
+    let mut occupied: std::collections::HashSet<(u16, u16)> = std::collections::HashSet::new();
+    let mut max_col: usize = 0;
+
+    // Rows: direct <tr> children plus <tr> children of section groups
+    // (tbody/thead/tfoot). Nested tables live inside cells, never at row
+    // depth, so the walk does not recurse.
+    let mut rows: Vec<NodeId> = Vec::new();
+    let mut caption: Option<NodeId> = None;
+    for child in dom.flat_children(table) {
+        if let Some(el) = dom.element(child) {
+            match &*el.name.local {
+                "tr" => rows.push(child),
+                "tbody" | "thead" | "tfoot" => {
+                    for sub in dom.flat_children(child) {
+                        if dom
+                            .element(sub)
+                            .is_some_and(|e| &*e.name.local == "tr")
+                        {
+                            rows.push(sub);
+                        }
+                    }
+                }
+                "caption" => caption = Some(child),
+                _ => {}
+            }
+        }
+    }
+    let row_offset: u16 = if caption.is_some() { 1 } else { 0 };
+
+    let span_attr = |node: NodeId, name: &str| -> u16 {
+        dom.get_attr(node, name)
+            .and_then(|v| v.trim().parse::<i64>().ok())
+            .map(|v| v.clamp(1, 100) as u16)
+            .unwrap_or(1)
+    };
+
+    for (row_index, tr) in rows.iter().enumerate() {
+        let row: u16 = row_index as u16;
+        let mut col: u16 = 0;
+        for cell in dom.flat_children(*tr) {
+            let is_cell = dom
+                .element(cell)
+                .is_some_and(|e| matches!(&*e.name.local, "td" | "th"));
+            if !is_cell {
+                continue;
+            }
+            let colspan = span_attr(cell, "colspan");
+            let rowspan = span_attr(cell, "rowspan");
+            // First slot (from the row cursor) where the whole span fits.
+            while col < 10_000 {
+                let fits = (row..row + rowspan).all(|r| {
+                    (col..col + colspan).all(|c| !occupied.contains(&(r, c)))
+                });
+                if fits {
+                    break;
+                }
+                col += 1;
+            }
+            if col >= 10_000 {
+                break;
+            }
+            cells.insert(
+                cell,
+                TableCellPlacement {
+                    row: row + row_offset,
+                    col,
+                    rowspan,
+                    colspan,
+                },
+            );
+            for r in row..row + rowspan {
+                for c in col..col + colspan {
+                    occupied.insert((r, c));
+                }
+            }
+            max_col = max_col.max((col + colspan) as usize);
+            col += colspan;
+        }
+    }
+
+    if let Some(caption) = caption {
+        cells.insert(
+            caption,
+            TableCellPlacement {
+                row: 0,
+                col: 0,
+                rowspan: 1,
+                colspan: max_col.max(1) as u16,
+            },
+        );
+    }
+    (cells, max_col)
 }
 
 fn find_layout_root(dom: &Dom) -> Option<NodeId> {
@@ -241,7 +408,7 @@ fn taffy_style(cs: &ComputedStyle) -> Style {
             LengthOrAuto::Length(Length::Rem(n)) => {
                 LengthPercentageAuto::length(n * rowser_parsing::cascade::ROOT_FONT_SIZE)
             }
-            LengthOrAuto::Length(Length::Percent(n)) => LengthPercentageAuto::percent(n / 100.0),
+            LengthOrAuto::Length(Length::Percent(n)) => LengthPercentageAuto::percent(n),
         }
     };
     let dim = |l: rowser_parsing::cascade::LengthOrAuto| -> Dimension {
@@ -516,7 +683,7 @@ fn length_pct(l: rowser_parsing::cascade::LengthOrAuto, font_size: f32) -> Lengt
         LengthOrAuto::Length(Length::Rem(n)) => {
             LengthPercentage::length(n * rowser_parsing::cascade::ROOT_FONT_SIZE)
         }
-        LengthOrAuto::Length(Length::Percent(n)) => LengthPercentage::percent(n / 100.0),
+        LengthOrAuto::Length(Length::Percent(n)) => LengthPercentage::percent(n),
     }
 }
 
@@ -533,6 +700,7 @@ fn build_box(
     taffy_to_dom: &mut HashMap<TaffyNode, NodeId>,
     intrinsic: &HashMap<NodeId, (f32, f32)>,
     parent_areas: &[rowser_parsing::cascade::NamedAreaRaw],
+    tables: &TableGrids,
 ) -> Option<TaffyNode> {
     let style = styles.get(node)?;
     if style.display == DisplayMode::None {
@@ -556,50 +724,83 @@ fn build_box(
         taffy_to_dom,
         intrinsic,
         &own_areas,
+        tables,
         &mut children,
         &mut text,
         &mut spans,
         &ctx,
     );
 
-    // Text leaf: a taffy leaf carrying the flattened text.
-    if !text.is_empty() || children.is_empty() {
-        close_inline_text(&mut text, &mut spans);
-        let leaf = TextLeaf {
-            node,
-            text,
-            spans,
-            defaults,
-            cache: None,
-        };
-        // The leaf is an ANONYMOUS block-level box for the element's inline
-        // content — NOT a second copy of the owning element's box. Carrying
-        // the owner's margins/paddings/insets/sizes on the leaf DOUBLE-applied
-        // them (paragraph margins doubled; percent widths squared). The owner
-        // box above already contributes all of those; the leaf starts from a
-        // clean style instead.
-        //
-        // `overflow: hidden` (a taffy-internal layout hint, never painted)
-        // makes the leaf an independent formatting context: taffy's block
-        // algorithm then places it through the float-aware BFC slot
-        // machinery, so inline content measurably narrows against floats
-        // (line-box shortening at leaf granularity) — CSS 2.1 §9.5's
-        // wrapping behaviour.
-        let leaf_style = Style {
-            display: TaffyDisplay::Block,
-            overflow: taffy::geometry::Point {
-                x: TaffyOverflow::Hidden,
-                y: TaffyOverflow::Hidden,
-            },
-            align_self: Some(AlignSelf::START),
-            ..Style::default()
-        };
-        if let Ok(leaf_node) = tree.new_leaf_with_context(leaf_style, leaf) {
-            children.push(leaf_node);
-        }
-    }
+    // Text leaf: a taffy leaf carrying the flattened text. Every element
+    // gets one (empty text for childless boxes): a childless taffy node
+    // without context is measured as HIDDEN (0x0) — the leaf is what
+    // keeps the box in the block layout path.
+    let force_leaf = children.is_empty();
+    flush_text_leaf(
+        tree,
+        node,
+        &mut text,
+        &mut spans,
+        &defaults,
+        &mut children,
+        force_leaf,
+    );
 
     let mut style = taffy_style(styles.get(node)?);
+    // Table grid mapping (CSS 2.1 §17): the UA stylesheet turns <table>
+    // into display:grid and rows/sections into display:contents, so the
+    // precomputed cell placements (colspan/rowspan included) become
+    // explicit line placements on each cell. The table gets one track
+    // per column — auto tracks (content-sized, like auto table layout)
+    // or minmax(auto, 1fr) when the width is definite so extra space
+    // distributes across columns like Chrome's auto algorithm.
+    if let Some(&placement) = tables.cells.get(&node) {
+        style.grid_row = Line {
+            start: GridPlacement::from_line_index(placement.row as i16 + 1),
+            end: GridPlacement::from_line_index(
+                placement.row as i16 + 1 + placement.rowspan as i16,
+            ),
+        };
+        style.grid_column = Line {
+            start: GridPlacement::from_line_index(placement.col as i16 + 1),
+            end: GridPlacement::from_line_index(
+                placement.col as i16 + 1 + placement.colspan as i16,
+            ),
+        };
+    }
+    if dom
+        .element(node)
+        .is_some_and(|e| &*e.name.local == "table")
+        && style.display == TaffyDisplay::Grid
+    {
+        if let Some(&cols) = tables.cols.get(&node) {
+            let definite_width = styles.get(node).is_some_and(|cs| {
+                !matches!(
+                    cs.width,
+                    rowser_parsing::cascade::LengthOrAuto::Auto
+                )
+            });
+            style.grid_template_columns = (0..cols)
+                .map(|_| {
+                    if definite_width {
+                        GridTemplateComponent::Single(minmax(
+                            track_auto(),
+                            fr(1.0),
+                        ))
+                    } else {
+                        GridTemplateComponent::Single(minmax(
+                            track_auto(),
+                            track_auto(),
+                        ))
+                    }
+                })
+                .collect();
+            // Rows stay implicit (auto tracks): the count follows the
+            // placed cells, including rowspan continuation rows.
+            style.grid_template_rows = Vec::new();
+            style.grid_auto_rows = vec![minmax(track_auto(), track_auto())];
+        }
+    }
     // Named grid-area placement: `grid-area: name` on this node resolves
     // against the PARENT's template areas into explicit line placements
     // (taffy lines are 1-based; our areas are 0-based half-open).
@@ -675,10 +876,67 @@ fn build_box(
     Some(taffy_node)
 }
 
+/// Closes the accumulated inline text into an anonymous text-leaf node
+/// and appends it to `children`. Called at the end of a box's collection
+/// AND whenever a block-level child interrupts the inline run (see
+/// `collect_children`): without the mid-run flush, all text fragments of a
+/// mixed inline/block container glued into ONE trailing leaf placed after
+/// the block boxes — `<td>Nested table:<table>…</table></td>` rendered the
+/// label BELOW the nested table, and `Rail<br>spans<br>three<br>rows`
+/// concatenated into a single line.
+fn flush_text_leaf(
+    tree: &mut TaffyTree<TextLeaf>,
+    owner: NodeId,
+    text: &mut String,
+    spans: &mut Vec<(std::ops::Range<usize>, SpanStyle)>,
+    defaults: &SpanStyle,
+    children: &mut Vec<TaffyNode>,
+    force: bool,
+) {
+    if text.is_empty() && !force {
+        return;
+    }
+    close_inline_text(text, spans);
+    let leaf = TextLeaf {
+        node: owner,
+        text: std::mem::take(text),
+        spans: std::mem::take(spans),
+        defaults: defaults.clone(),
+        cache: None,
+    };
+    // The leaf is an ANONYMOUS block-level box for the element's inline
+    // content — NOT a second copy of the owning element's box. Carrying
+    // the owner's margins/paddings/insets/sizes on the leaf DOUBLE-applied
+    // them (paragraph margins doubled; percent widths squared). The owner
+    // box above already contributes all of those; the leaf starts from a
+    // clean style instead.
+    //
+    // `overflow: hidden` (a taffy-internal layout hint, never painted)
+    // makes the leaf an independent formatting context: taffy's block
+    // algorithm then places it through the float-aware BFC slot
+    // machinery, so inline content measurably narrows against floats
+    // (line-box shortening at leaf granularity) — CSS 2.1 §9.5's
+    // wrapping behaviour.
+    let leaf_style = Style {
+        display: TaffyDisplay::Block,
+        overflow: taffy::geometry::Point {
+            x: TaffyOverflow::Hidden,
+            y: TaffyOverflow::Hidden,
+        },
+        align_self: Some(AlignSelf::START),
+        ..Style::default()
+    };
+    if let Ok(leaf_node) = tree.new_leaf_with_context(leaf_style, leaf) {
+        children.push(leaf_node);
+    }
+}
+
 /// Iterates `node`'s children, splicing boxes and inline text into the
 /// parent's accumulation. `display: contents` children are transparent:
 /// their OWN children are collected here as if direct children (inherited
-/// span styles still flow through them).
+/// span styles still flow through them). Block-level children FLUSH the
+/// inline text accumulated so far into its own leaf first (CSS 2.1
+/// anonymous block boxes around runs of inline content).
 #[allow(clippy::too_many_arguments)]
 fn collect_children(
     dom: &Dom,
@@ -689,6 +947,7 @@ fn collect_children(
     taffy_to_dom: &mut HashMap<TaffyNode, NodeId>,
     intrinsic: &HashMap<NodeId, (f32, f32)>,
     parent_areas: &[rowser_parsing::cascade::NamedAreaRaw],
+    tables: &TableGrids,
     children: &mut Vec<TaffyNode>,
     text: &mut String,
     spans: &mut Vec<(std::ops::Range<usize>, SpanStyle)>,
@@ -712,6 +971,14 @@ fn collect_children(
                         // text — that would drop the block boxes entirely.
                         // Promote it to a box; recursion handles nesting.
                         if has_block_descendant(dom, styles, child) {
+                            // Anonymous block box boundary: the inline run
+                            // collected so far closes HERE (CSS 2.1
+                            // §9.2.1), not after the block children.
+                            if !text.is_empty() {
+                                flush_text_leaf(
+                                    tree, node, text, spans, &ctx.clone(), children, false,
+                                );
+                            }
                             if let Some(t) = build_box(
                                 dom,
                                 styles,
@@ -721,6 +988,7 @@ fn collect_children(
                                 taffy_to_dom,
                                 intrinsic,
                                 parent_areas,
+                                tables,
                             ) {
                                 children.push(t);
                             }
@@ -751,6 +1019,7 @@ fn collect_children(
                             taffy_to_dom,
                             intrinsic,
                             parent_areas,
+                            tables,
                             children,
                             text,
                             spans,
@@ -758,6 +1027,17 @@ fn collect_children(
                         );
                     }
                     _ => {
+                        // Block-level child: flush the inline run first
+                        // (anonymous block boxes around inline content —
+                        // CSS 2.1 §9.2.1). Without this, text before a
+                        // block (e.g. "Nested table:" before a nested
+                        // <table>, or lines around <br>) glued into one
+                        // leaf appended AFTER the block boxes.
+                        if !text.is_empty() {
+                            flush_text_leaf(
+                                tree, node, text, spans, &ctx.clone(), children, false,
+                            );
+                        }
                         if let Some(t) = build_box(
                             dom,
                             styles,
@@ -767,6 +1047,7 @@ fn collect_children(
                             taffy_to_dom,
                             intrinsic,
                             parent_areas,
+                            tables,
                         ) {
                             children.push(t);
                         }
@@ -1270,6 +1551,238 @@ mod tests {
         assert!((r.y - 50.0).abs() < 1.0, "x at row 2: {r:?}");
         assert!((r.w - 160.0).abs() < 2.0, "x spans 2 cols (160px): {r:?}");
         assert!((r.h - 100.0).abs() < 2.0, "x spans 2 rows (100px): {r:?}");
+    }
+
+    /// table width="100%" (presentational) → definite grid width → the
+    /// tracks flex to fill the containing block.
+    #[test]
+    fn table_width_percent_stretches_full_width() {
+        let html = br#"<html><body style="margin:0"><table width="100%" id="full">
+        <tr><td id="c1">a</td><td id="c2">b</td></tr>
+        </table></body></html>"#;
+        let doc = parse_html(html);
+        let sheet = parse_stylesheet("", &MediaContext::default());
+        let mut engine = LayoutEngine::new();
+        let (_, layout) = engine.layout_document(
+            &doc.dom,
+            &[sheet],
+            &MediaContext::default(),
+            Viewport { width: 800.0, height: 600.0 },
+            &Default::default(),
+        );
+        let node_id = |id: &str| -> NodeId {
+            for node in doc.dom.subtree_elements(doc.dom.document()) {
+                if doc.dom.get_attr(node, "id") == Some(id) {
+                    return node;
+                }
+            }
+            panic!("no node for {id}")
+        };
+        let table = *layout.rects.get(&node_id("full")).expect("table rect");
+        assert!(
+            (table.w - 800.0).abs() < 8.0,
+            "full-width table: {table:?}"
+        );
+        let c2 = *layout.rects.get(&node_id("c2")).expect("c2 rect");
+        assert!(c2.x >= 399.0, "second column in the right half: {c2:?}");
+    }
+
+    /// `<br>` is a block-level boundary (UA): text around it splits into
+    /// separate lines stacked vertically, and text BEFORE a block child
+    /// (nested table) stays ABOVE it — previously all fragments glued into
+    /// one trailing leaf placed after the block boxes.
+    #[test]
+    fn br_splits_lines_and_text_precedes_block_children() {
+        let html = br#"<html><body><div style="width:200px">
+        <div id="multi">A<br>B<br>C</div>
+        <div id="mixed">Label:<table><tr><td id="inner">cell</td></tr></table></div>
+        </div></body></html>"#;
+        let doc = parse_html(html);
+        let sheet = parse_stylesheet("", &MediaContext::default());
+        let mut engine = LayoutEngine::new();
+        let (_, layout) = engine.layout_document(
+            &doc.dom,
+            &[sheet],
+            &MediaContext::default(),
+            Viewport { width: 800.0, height: 600.0 },
+            &Default::default(),
+        );
+        let rect = |id: &str| -> Rect {
+            for node in doc.dom.subtree_elements(doc.dom.document()) {
+                if doc.dom.get_attr(node, "id") == Some(id) {
+                    if let Some(r) = layout.rects.get(&node) {
+                        return *r;
+                    }
+                }
+            }
+            panic!("no rect for {id}")
+        };
+        // Node ids for the containers.
+        let node_id = |id: &str| -> NodeId {
+            for node in doc.dom.subtree_elements(doc.dom.document()) {
+                if doc.dom.get_attr(node, "id") == Some(id) {
+                    return node;
+                }
+            }
+            panic!("no node for {id}")
+        };
+        let (multi, mixed) = (node_id("multi"), node_id("mixed"));
+        // The br container holds three separate single-line leaves with
+        // increasing baselines.
+        let ys: Vec<f32> = layout
+            .text
+            .iter()
+            .filter(|run| run.node == multi)
+            .map(|run| run.glyphs.first().map(|g| g.y as f32).unwrap_or(-1.0))
+            .collect();
+        assert_eq!(ys.len(), 3, "three br-separated lines: {ys:?}");
+        assert!(ys[1] > ys[0] + 5.0 && ys[2] > ys[1] + 5.0, "br lines stack: {ys:?}");
+        // Text before the block child stays ABOVE the nested table cell.
+        let label_y = layout
+            .text
+            .iter()
+            .filter(|run| run.node == mixed)
+            .map(|run| run.glyphs.first().map(|g| g.y as f32).unwrap_or(-1.0))
+            .next()
+            .expect("label leaf");
+        let inner = rect("inner");
+        assert!(
+            label_y < inner.y + inner.h,
+            "label above nested table: label_y={label_y} inner={inner:?}"
+        );
+    }
+
+    /// CSS 2.1 §17: colspan=2 spans two columns; the next cell lands in
+    /// column 3, not overlapping the span.
+    #[test]
+    fn table_colspan_places_cells_in_columns() {
+        let html = br#"<html><body><table>
+        <tr><td colspan="2" id="wide">A</td><td id="b">B</td></tr>
+        <tr><td id="x1">XX</td><td id="x2">YY</td><td id="b2">B</td></tr>
+        </table></body></html>"#;
+        let doc = parse_html(html);
+        let sheet = parse_stylesheet("", &MediaContext::default());
+        let mut engine = LayoutEngine::new();
+        let (_, layout) = engine.layout_document(
+            &doc.dom,
+            &[sheet],
+            &MediaContext::default(),
+            Viewport { width: 800.0, height: 600.0 },
+            &Default::default(),
+        );
+        let rect = |id: &str| -> Rect {
+            for node in doc.dom.subtree_elements(doc.dom.document()) {
+                if doc.dom.get_attr(node, "id") == Some(id) {
+                    if let Some(r) = layout.rects.get(&node) {
+                        return *r;
+                    }
+                }
+            }
+            panic!("no rect for {id}");
+        };
+        let wide = rect("wide");
+        let b = rect("b");
+        let x1 = rect("x1");
+        let x2 = rect("x2");
+        assert!(b.x >= wide.x + wide.w - 1.0, "B starts after the colspan span: wide={wide:?} b={b:?}");
+        // The span covers the sum of the two single-cell columns (which
+        // carry their own content constraints from row 2).
+        assert!(
+            (wide.w - (x1.w + x2.w)).abs() < 3.0,
+            "colspan width = col1 + col2: wide={wide:?} x1={x1:?} x2={x2:?}"
+        );
+        assert!(
+            (x2.x - (x1.x + x1.w)).abs() < 2.0,
+            "columns are adjacent: x1={x1:?} x2={x2:?}"
+        );
+    }
+
+    /// rowspan=2: the spanning cell is exactly two rows tall; the cell
+    /// below-left in the NEXT row starts below the span, not inside it.
+    #[test]
+    fn table_rowspan_spans_two_rows() {
+        let html = br#"<html><body><table>
+        <tr><td rowspan="2" id="tall">T</td><td id="r1">1</td></tr>
+        <tr><td id="r2">2</td></tr>
+        </table></body></html>"#;
+        let doc = parse_html(html);
+        let sheet = parse_stylesheet("", &MediaContext::default());
+        let mut engine = LayoutEngine::new();
+        let (_, layout) = engine.layout_document(
+            &doc.dom,
+            &[sheet],
+            &MediaContext::default(),
+            Viewport { width: 800.0, height: 600.0 },
+            &Default::default(),
+        );
+        let rect = |id: &str| -> Rect {
+            for node in doc.dom.subtree_elements(doc.dom.document()) {
+                if doc.dom.get_attr(node, "id") == Some(id) {
+                    if let Some(r) = layout.rects.get(&node) {
+                        return *r;
+                    }
+                }
+            }
+            panic!("no rect for {id}");
+        };
+        let tall = rect("tall");
+        let r1 = rect("r1");
+        let r2 = rect("r2");
+        // The spanning cell is beside r1 (same row)...
+        assert!((tall.y - r1.y).abs() < 1.0, "tall aligns with row 1: tall={tall:?} r1={r1:?}");
+        // ...and covers row 2's band vertically.
+        assert!(
+            tall.y + tall.h >= r2.y + r2.h - 2.0,
+            "tall spans both rows: tall={tall:?} r2={r2:?}"
+        );
+        assert!(
+            tall.h > r1.h * 1.5,
+            "rowspan cell taller than a single row: tall={tall:?} r1={r1:?}"
+        );
+    }
+
+    /// A classic 3-column layout row: colspan across the header, rowspan
+    /// down the left rail, per CSS 2.1 §17.4.1 the following cells flow
+    /// around the occupied slots.
+    #[test]
+    fn table_span_matrix_matches_occupancy() {
+        let html = br#"<html><body><table>
+        <tr><td colspan="3" id="h">H</td></tr>
+        <tr><td rowspan="2" id="l">L</td><td id="a">a</td><td id="b">b</td></tr>
+        <tr><td id="c">c</td><td id="d">d</td></tr>
+        </table></body></html>"#;
+        let doc = parse_html(html);
+        let sheet = parse_stylesheet("", &MediaContext::default());
+        let mut engine = LayoutEngine::new();
+        let (_, layout) = engine.layout_document(
+            &doc.dom,
+            &[sheet],
+            &MediaContext::default(),
+            Viewport { width: 800.0, height: 600.0 },
+            &Default::default(),
+        );
+        let rect = |id: &str| -> Rect {
+            for node in doc.dom.subtree_elements(doc.dom.document()) {
+                if doc.dom.get_attr(node, "id") == Some(id) {
+                    if let Some(r) = layout.rects.get(&node) {
+                        return *r;
+                    }
+                }
+            }
+            panic!("no rect for {id}");
+        };
+        let (h, l, a, b, c, d) = (
+            rect("h"), rect("l"), rect("a"), rect("b"), rect("c"), rect("d"),
+        );
+        // Header spans the full three-column width.
+        assert!(h.w >= a.w + b.w + 2.0 * (a.x - l.x) - 4.0 || h.w > 2.0 * a.w, "header spans: h={h:?}");
+        // Row 2: rail + a + b side by side, a right of l.
+        assert!(a.x > l.x + l.w - 2.0, "a right of rail: l={l:?} a={a:?}");
+        assert!((b.x - (a.x + a.w)).abs() < 3.0, "b follows a: a={a:?} b={b:?}");
+        // Row 3 (below the rowspan): c and d shifted into the rail's
+        // column band only if the rail no longer occupies it.
+        assert!((c.y - (l.y + l.h)).abs() < 40.0, "c below the rowspan: l={l:?} c={c:?}");
+        assert!((d.x - (c.x + c.w)).abs() < 3.0, "d follows c: c={c:?} d={d:?}");
     }
 
     /// `grid-auto-rows` sizes implicit rows.

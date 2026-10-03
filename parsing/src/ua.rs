@@ -39,21 +39,23 @@ big { font-size: 1.17em; }
 a { color: #0000ee; text-decoration: underline; }
 sup { font-size: 0.83em; vertical-align: super; }
 sub { font-size: 0.83em; vertical-align: sub; }
-table { display: block; }
+/* Tables map onto the grid engine (CSS 2.1 §17 structure): the table is a
+ * grid with one track per column, rows/cells are placed explicitly by the
+ * §17.4.1 occupancy algorithm (layout/src/lib.rs), which is what carries
+ * colspan/rowspan. Section groups and rows are display:contents so the
+ * cells participate directly in the table grid; the caption occupies the
+ * first grid row spanning all columns. */
+table { display: grid; }
 /* Legacy layout wrappers: HN and countless classic pages nest their entire
  * layout inside <center> (or <font>). Inline-flattening such wrappers drops
  * their block descendants from the box tree entirely. */
 center { display: block; text-align: center; }
 font { display: inline; }
-tbody, thead, tfoot { display: block; }
-/* Real table layout is not implemented; flex rows give table-based sites
- * (HN, countless legacy pages) visible cell boxes: backgrounds, borders,
- * padding and side-by-side cells. Cells are content-sized (no stretch) to
- * avoid full-viewport fill artifacts. Author sheets can override. */
-tr { display: flex; flex-direction: row; align-items: flex-start; }
-td, th { display: block; flex: 0 0 auto; }
+tbody, thead, tfoot { display: contents; }
+tr { display: contents; }
+td, th { display: block; }
 col, colgroup { display: none; }
-caption { display: block; }
+caption { display: block; text-align: center; }
 img, video, canvas, svg, iframe, embed, object { display: block; }
 input, textarea, select, button { display: block; }
 br { display: block; }

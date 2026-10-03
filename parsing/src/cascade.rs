@@ -1407,11 +1407,14 @@ fn parse_color_attr(value: &str) -> Option<Rgba> {
 }
 
 /// Parses a presentational `width`/`height` attribute ("220", "100%").
+/// Percentages are normalized to a FRACTION (0-1), matching the CSS parser
+/// (`Length::Percent` is fraction-scaled everywhere: taffy mapping,
+/// font-size/line-height percentage maths, grid track bounds).
 fn parse_dimension_attr(value: &str) -> Option<LengthOrAuto> {
     let value = value.trim();
     if let Some(percent) = value.strip_suffix('%') {
         let n: f32 = percent.trim().parse().ok()?;
-        return Some(LengthOrAuto::Length(Length::Percent(n)));
+        return Some(LengthOrAuto::Length(Length::Percent(n / 100.0)));
     }
     let n: f32 = value.parse().ok()?;
     if (0.0..100_000.0).contains(&n) {
