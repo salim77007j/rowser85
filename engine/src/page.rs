@@ -327,6 +327,8 @@ struct Page {
     rect_mirror: rowser_js::RectMirrorMap,
     /// (scroll_y, viewport_width, viewport_height) shared with JS natives.
     viewport_mirror: rowser_js::ViewportMirror,
+    /// MutationObserver state shared with the JS runtime.
+    mo_state: rowser_js::MoShared,
     /// Last-reported media activity (drives the suspension override).
     media_active: bool,
 }
@@ -377,6 +379,7 @@ impl Page {
             media_mirror: Rc::new(RefCell::new(HashMap::new())),
             rect_mirror: Rc::new(RefCell::new(HashMap::new())),
             viewport_mirror: Rc::new(RefCell::new((0.0, 0.0, 0.0))),
+            mo_state: rowser_js::MoShared::default(),
             media_active: false,
         }
     }
@@ -1638,6 +1641,7 @@ impl Page {
                 media_mirror: Rc::clone(&self.media_mirror),
                 rects: Rc::clone(&self.rect_mirror),
                 viewport: Rc::clone(&self.viewport_mirror),
+                mo: Rc::clone(&self.mo_state),
             };
             *self.viewport_mirror.borrow_mut() =
                 (self.scroll_y, self.viewport.width, self.viewport.height);
@@ -1729,6 +1733,7 @@ impl Page {
             media_mirror: Rc::new(RefCell::new(HashMap::new())),
             rects: Rc::new(RefCell::new(HashMap::new())),
             viewport: Rc::new(RefCell::new((0.0, 0.0, 0.0))),
+            mo: rowser_js::MoShared::default(),
         };
         if let Ok(runtime) = JsRuntime::new(JsConfig::default(), bridge) {
             runtime

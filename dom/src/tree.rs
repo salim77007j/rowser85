@@ -476,7 +476,7 @@ impl Dom {
         self.slots[parent as usize].last_child = Some(child);
     }
 
-    fn is_text(&self, id: NodeId) -> bool {
+    pub fn is_text(&self, id: NodeId) -> bool {
         matches!(self.kind(id), NodeKind::Text(_))
     }
 

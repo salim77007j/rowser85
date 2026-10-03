@@ -23,6 +23,7 @@ fn main() {
         media_mirror: std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashMap::new())),
         rects,
         viewport,
+        mo: Default::default(),
     };
     let t0 = Instant::now();
     println!("creating runtime (evals prelude)…");

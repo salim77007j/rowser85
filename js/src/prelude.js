@@ -810,11 +810,99 @@
     polyfillWrapFlushCallback(cb) { if (typeof cb === 'function') { try { cb(); } catch (e) {} } },
     polyfillIfNeeded() { return true; },
   };
+  // ---- MutationObserver (real: records captured in Rust at mutation
+  // time, delivered at the end of each script turn via __onMutations) ----
+  const moRegistry = new Map();
+  let moNextId = 1;
+  function moDetached(d) {
+    // A node removed before delivery: materialize a detached pseudo-element
+    // from the descriptor captured at mutation time (Chrome keeps removed
+    // nodes alive; our arena recycles the handle).
+    const stub = {
+      nodeType: d.nodeType || 1,
+      tagName: d.tag || '',
+      nodeName: d.tag || '',
+      id: d.id || '',
+      className: d.cls || '',
+      isConnected: false,
+      parentNode: null,
+      parentElement: null,
+      childNodes: [],
+      children: [],
+      getAttribute(n) {
+        if (n === 'id') return d.id || null;
+        if (n === 'class') return d.cls || null;
+        return null;
+      },
+      hasAttribute(n) { return this.getAttribute(n) !== null; },
+      getBoundingClientRect() { return { top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0, x: 0, y: 0 }; },
+      querySelector() { return null; },
+      querySelectorAll() { return []; },
+      get textContent() { return ''; },
+      get innerHTML() { return ''; },
+      get outerHTML() { return ''; },
+      contains() { return false; },
+      matches() { return false; },
+      closest() { return null; },
+    };
+    return stub;
+  }
   globalThis.MutationObserver = class MutationObserver {
-    constructor(cb) { this._cb = cb; }
-    observe() {}
-    disconnect() {}
+    constructor(cb) {
+      if (typeof cb !== 'function') throw new TypeError("MutationObserver callback must be a function");
+      this._cb = cb;
+      this._id = moNextId++;
+      moRegistry.set(this._id, this);
+    }
+    observe(target, options) {
+      if (!target || target._h === undefined) throw new TypeError("MutationObserver.observe: target must be a Node");
+      const o = options || {};
+      if (!o.childList && !o.attributes && !o.characterData) {
+        throw new TypeError("MutationObserver.observe: one of childList, attributes, characterData must be true");
+      }
+      const want = {
+        childList: !!o.childList,
+        attributes: !!o.attributes,
+        characterData: !!o.characterData,
+        subtree: !!o.subtree,
+        attributeOldValue: !!o.attributeOldValue,
+        characterDataOldValue: !!o.characterDataOldValue,
+      };
+      this._want = want;
+      __native_mo_observe(this._id, target._h, JSON.stringify(want));
+    }
+    disconnect() {
+      moRegistry.delete(this._id);
+      try { __native_mo_disconnect(this._id); } catch (e) {}
+    }
     takeRecords() { return []; }
+  };
+  globalThis.__onMutations = function (id, json) {
+    const obs = moRegistry.get(id);
+    if (!obs || !obs._cb) return;
+    const raw = (typeof json === 'string') ? JSON.parse(json) : json;
+    const records = raw.map(function (r) {
+      const want = obs._want || {};
+      const rec = {
+        type: r.type,
+        target: wrapElement(r.target),
+        addedNodes: (r.added || []).map(function (h) { return wrapElement(h); }),
+        removedNodes: (r.removed || []).map(moDetached),
+        previousSibling: (r.prev !== null && r.prev !== undefined) ? wrapElement(r.prev) : null,
+        nextSibling: (r.next !== null && r.next !== undefined) ? wrapElement(r.next) : null,
+        attributeName: null,
+        oldValue: null,
+      };
+      if (r.type === 'attributes') {
+        rec.attributeName = r.name;
+        rec.oldValue = want.attributeOldValue ? (r.old || null) : null;
+      } else if (r.type === 'characterData') {
+        rec.oldValue = want.characterDataOldValue ? (r.old || null) : null;
+      }
+      return rec;
+    });
+    if (!records.length) return;
+    try { obs._cb(records, obs); } catch (e) { console.error(errString(e)); }
   };
   globalThis.IntersectionObserver = class IntersectionObserver {
     constructor(cb) { this._cb = cb; }

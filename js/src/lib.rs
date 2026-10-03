@@ -52,6 +52,139 @@ use rowser_privacy::fingerprint::SpoofProfile;
 use rowser_storage::Storage;
 use rquickjs::{Context, Function, Runtime};
 
+/// A pending DOM mutation, raw form (WHATWG MutationObserver, DOM §4.3).
+///
+/// Captured at mutation time inside the native bridges; delivered to JS as
+/// JSON batches after the script turn (spec: observer callbacks run at the
+/// microtask checkpoint — our checkpoint is end-of-`eval`/`dispatch`).
+#[derive(Debug, Clone, Default)]
+pub struct RawMutation {
+    /// 0 = childList, 1 = attributes, 2 = characterData.
+    pub kind: u8,
+    /// Node the mutation occurred on (parent for childList).
+    pub target: NodeId,
+    /// childList: added node handles (still live at delivery).
+    pub added: Vec<u64>,
+    /// childList: removed nodes — captured descriptors, because the arena
+    /// may recycle those handles before delivery.
+    pub removed: Vec<RemovedNode>,
+    /// childList: sibling handles around the change point (after mutation).
+    pub prev: Option<u64>,
+    pub next: Option<u64>,
+    /// attributes: attribute name.
+    pub name: String,
+    /// attributes/characterData: previous value.
+    pub old: String,
+}
+
+/// Descriptor of a node removed from the tree, captured at mutation time.
+/// The JS side materializes a detached pseudo-Element from this, so
+/// `record.removedNodes[i].tagName` etc. keep working like Chrome even
+/// though the arena slot is gone.
+#[derive(Debug, Clone, Default)]
+pub struct RemovedNode {
+    /// Former node handle.
+    pub h: u64,
+    /// 1 = element (upper-cased tag), 3 = text.
+    pub node_type: u8,
+    /// Element tag name (upper-case) or `#text`.
+    pub tag: String,
+    /// Former `id` attribute (if any).
+    pub id: String,
+    /// Former `class` attribute (if any).
+    pub cls: String,
+}
+
+/// A registered MutationObserver (`observe()` state).
+#[derive(Debug, Clone)]
+pub struct MoRegistration {
+    /// JS-side observer id.
+    pub id: u64,
+    /// Observed target node.
+    pub target: NodeId,
+    /// `childList` option.
+    pub child_list: bool,
+    /// `attributes` option.
+    pub attributes: bool,
+    /// `characterData` option.
+    pub character_data: bool,
+    /// `subtree` option.
+    pub subtree: bool,
+}
+
+/// `observe()` options as sent by the prelude (JSON).
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MoOptions {
+    #[serde(default)]
+    child_list: bool,
+    #[serde(default)]
+    attributes: bool,
+    #[serde(default)]
+    character_data: bool,
+    #[serde(default)]
+    subtree: bool,
+}
+
+/// MutationObserver bookkeeping: pending records + registrations.
+#[derive(Debug, Default)]
+pub struct MoState {
+    /// Records queued since the last delivery.
+    pub records: Vec<RawMutation>,
+    /// Active registrations (last `observe()` wins per observer id).
+    pub observers: Vec<MoRegistration>,
+}
+
+/// Shared handle to the MutationObserver state.
+pub type MoShared = Rc<RefCell<MoState>>;
+
+/// Captures a removed-node descriptor (call while `dom` is still borrowed
+/// and the node is still valid).
+fn describe_removed(dom: &Dom, h: NodeId) -> RemovedNode {
+    let mut out = RemovedNode {
+        h: h as u64,
+        ..Default::default()
+    };
+    if let Some(el) = dom.element(h) {
+        out.node_type = 1;
+        out.tag = el.name.local.to_uppercase();
+        out.id = dom.get_attr(h, "id").unwrap_or_default().to_owned();
+        out.cls = dom.get_attr(h, "class").unwrap_or_default().to_owned();
+    } else if dom.is_text(h) {
+        out.node_type = 3;
+        out.tag = "#text".to_owned();
+    } else {
+        out.node_type = 8;
+        out.tag = "#comment".to_owned();
+    }
+    out
+}
+
+/// Queues a childList record (call after the mutation, dom borrowed).
+fn record_child_list(
+    mo: &MoShared,
+    dom: &Dom,
+    target: NodeId,
+    added: Vec<u64>,
+    removed: Vec<RemovedNode>,
+    anchor: Option<NodeId>,
+) {
+    let (prev, next) = match anchor {
+        // Siblings around the anchor slot (after mutation).
+        Some(a) => (dom.prev_sibling(a), dom.next_sibling(a)),
+        None => (None, None),
+    };
+    mo.borrow_mut().records.push(RawMutation {
+        kind: 0,
+        target,
+        added,
+        removed,
+        prev: prev.map(|n| n as u64),
+        next: next.map(|n| n as u64),
+        ..Default::default()
+    });
+}
+
 /// Commands the runtime sends to the owning engine (timers, fetches, ...).
 #[derive(Debug, Clone)]
 pub enum JsCommand {
@@ -346,6 +479,8 @@ pub struct PageBridge {
     pub rects: RectMirrorMap,
     /// `(scroll_y, viewport_width, viewport_height)`.
     pub viewport: ViewportMirror,
+    /// MutationObserver records + registrations.
+    pub mo: MoShared,
 }
 
 /// Runtime configuration.
@@ -381,6 +516,11 @@ pub struct JsRuntime {
     config: JsConfig,
     /// Live timers registered by JS (count only; bodies live in JS).
     timer_count: Rc<Cell<u64>>,
+    /// MutationObserver state (records + registrations), shared with the
+    /// mutating DOM natives.
+    mo: MoShared,
+    /// The page DOM, for MutationObserver subtree filtering at delivery.
+    dom: Rc<RefCell<Dom>>,
 }
 
 /// Errors surfaced to the engine.
@@ -422,12 +562,16 @@ impl JsRuntime {
         }
 
         let context = Context::full(&runtime).map_err(|e| JsError::Runtime(e.to_string()))?;
+        let mo = Rc::clone(&bridge.mo);
+        let dom = Rc::clone(&bridge.dom);
         let js = JsRuntime {
             runtime,
             context,
             watchdog_start,
             config,
             timer_count: Rc::new(Cell::new(0)),
+            mo,
+            dom,
         };
         js.install_natives(bridge)?;
         js.context.with(|ctx| {
@@ -456,6 +600,7 @@ impl JsRuntime {
         });
         self.clear_watchdog();
         self.pump_jobs();
+        self.deliver_mutations();
         result.map_err(|(e, detail)| {
             JsError::Eval(match detail {
                 Some(detail) if !detail.is_empty() => detail,
@@ -526,6 +671,85 @@ impl JsRuntime {
         }
         self.clear_watchdog();
         self.pump_jobs();
+        self.deliver_mutations();
+    }
+
+    /// Delivers pending MutationObserver records to JS. Runs at the
+    /// microtask checkpoint of every script turn (`eval`, `dispatch`) and
+    /// after the promise pump — matching the spec's "queue a microtask to
+    /// notify observers" behaviour closely enough for framework hydration
+    /// (React/Vue/Vue hydration, Wikipedia's vector.js enhancements).
+    ///
+    /// Callbacks may mutate again; bounded rounds (20) keep a storm from
+    /// wedging the page thread — leftover records carry to the next
+    /// checkpoint.
+    fn deliver_mutations(&self) {
+        for _round in 0..20 {
+            let batches = self.collect_mo_batches();
+            if batches.is_empty() {
+                break;
+            }
+            for (id, json) in batches {
+                let call = format!("__onMutations({id},{json})");
+                self.reset_watchdog();
+                let outcome = self.context.with(|ctx| ctx.eval::<(), _>(call.as_bytes()));
+                if let Err(err) = outcome {
+                    let detail = self
+                        .context
+                        .with(|ctx| exception_detail(&ctx).unwrap_or_else(|| format!("{err:?}")));
+                    if std::env::var("ROWSER_JS_TRACE").is_ok() {
+                        eprintln!("[js] mutation dispatch error: {detail}");
+                    }
+                }
+                self.clear_watchdog();
+                self.pump_jobs();
+            }
+        }
+    }
+
+    /// Takes the pending records and groups them per registered observer
+    /// (filtered by target/subtree/options). Empty result = nothing to do.
+    fn collect_mo_batches(&self) -> Vec<(u64, String)> {
+        let records = std::mem::take(&mut self.mo.borrow_mut().records);
+        if records.is_empty() {
+            return Vec::new();
+        }
+        let observers = self.mo.borrow().observers.clone();
+        if observers.is_empty() {
+            return Vec::new();
+        }
+        // Subtree resolution needs the DOM (ancestor walk).
+        let mut batches: Vec<(u64, String)> = Vec::new();
+        let dom = self.dom.borrow();
+        for obs in &observers {
+            let mut json = String::from("[");
+            let mut any = false;
+            for r in &records {
+                let in_scope = r.target == obs.target
+                    || (obs.subtree && in_subtree(&dom, obs.target, r.target));
+                if !in_scope {
+                    continue;
+                }
+                let kind_ok = match r.kind {
+                    0 => obs.child_list,
+                    1 => obs.attributes,
+                    _ => obs.character_data,
+                };
+                if !kind_ok {
+                    continue;
+                }
+                if any {
+                    json.push(',');
+                }
+                json.push_str(&mo_record_json(r));
+                any = true;
+            }
+            if any {
+                json.push(']');
+                batches.push((obs.id, json));
+            }
+        }
+        batches
     }
 
     /// Pumps promise jobs until the queue is empty — BOUNDED. A page whose
@@ -650,6 +874,34 @@ impl JsRuntime {
                         "{{\"scrollY\":{},\"width\":{},\"height\":{}}}",
                         v.0, v.1, v.2
                     )
+                })?,
+            )?;
+
+            // --- MutationObserver registration ---
+            let b = Rc::clone(&bridge);
+            globals.set(
+                "__native_mo_observe",
+                Function::new(ctx.clone(), move |id: u64, target: u64, options: String| {
+                    let opts: MoOptions = serde_json::from_str(&options).unwrap_or_default();
+                    let mut mo = b.mo.borrow_mut();
+                    // Last observe() per id wins (spec: replace the
+                    // previous registration for that observer).
+                    mo.observers.retain(|o| o.id != id);
+                    mo.observers.push(MoRegistration {
+                        id,
+                        target: target as NodeId,
+                        child_list: opts.child_list,
+                        attributes: opts.attributes,
+                        character_data: opts.character_data,
+                        subtree: opts.subtree,
+                    });
+                })?,
+            )?;
+            let b = Rc::clone(&bridge);
+            globals.set(
+                "__native_mo_disconnect",
+                Function::new(ctx.clone(), move |id: u64| {
+                    b.mo.borrow_mut().observers.retain(|o| o.id != id);
                 })?,
             )?;
 
@@ -958,6 +1210,64 @@ impl JsRuntime {
     }
 }
 
+/// True when `node` is `ancestor` or a descendant of it.
+fn in_subtree(dom: &Dom, ancestor: NodeId, node: NodeId) -> bool {
+    let mut cur = Some(node);
+    while let Some(c) = cur {
+        if c == ancestor {
+            return true;
+        }
+        cur = dom.parent(c);
+    }
+    false
+}
+
+/// Serializes one raw mutation record as a JSON object for the prelude.
+fn mo_record_json(r: &RawMutation) -> String {
+    let opt = |v: Option<u64>| match v {
+        Some(v) => v.to_string(),
+        None => "null".to_owned(),
+    };
+    match r.kind {
+        0 => {
+            let added: Vec<String> = r.added.iter().map(|h| h.to_string()).collect();
+            let removed: Vec<String> = r
+                .removed
+                .iter()
+                .map(|d| {
+                    format!(
+                        r#"{{"h":{},"nodeType":{},"tag":{},"id":{},"cls":{}}}"#,
+                        d.h,
+                        d.node_type,
+                        json_str(&d.tag),
+                        json_str(&d.id),
+                        json_str(&d.cls)
+                    )
+                })
+                .collect();
+            format!(
+                r#"{{"type":"childList","target":{},"added":[{}],"removed":[{}],"prev":{},"next":{}}}"#,
+                r.target,
+                added.join(","),
+                removed.join(","),
+                opt(r.prev),
+                opt(r.next)
+            )
+        }
+        1 => format!(
+            r#"{{"type":"attributes","target":{},"name":{},"old":{}}}"#,
+            r.target,
+            json_str(&r.name),
+            json_str(&r.old)
+        ),
+        _ => format!(
+            r#"{{"type":"characterData","target":{},"old":{}}}"#,
+            r.target,
+            json_str(&r.old)
+        ),
+    }
+}
+
 fn dom_natives<'js>(
     ctx: &rquickjs::Ctx<'js>,
     globals: &rquickjs::Object<'js>,
@@ -1022,7 +1332,30 @@ fn dom_natives<'js>(
             let (parent, child) = (parent as NodeId, child as NodeId);
             let mut dom = b.dom.borrow_mut();
             if dom.is_valid(parent) && dom.is_valid(child) {
+                // MutationObserver: a moved node reports removal from its
+                // old parent first (DOM spec: append = remove + insert).
+                if let Some(old_parent) = dom.parent(child) {
+                    let desc = describe_removed(&dom, child);
+                    let prev = dom.prev_sibling(child).map(|n| n as u64);
+                    let next = dom.next_sibling(child).map(|n| n as u64);
+                    b.mo.borrow_mut().records.push(RawMutation {
+                        kind: 0,
+                        target: old_parent,
+                        removed: vec![desc],
+                        prev,
+                        next,
+                        ..Default::default()
+                    });
+                }
                 dom.append(parent, child);
+                record_child_list(
+                    &b.mo,
+                    &dom,
+                    parent,
+                    vec![child as u64],
+                    Vec::new(),
+                    Some(child),
+                );
                 mark_dirty(&b);
                 child as u64
             } else {
@@ -1038,7 +1371,18 @@ fn dom_natives<'js>(
             let (parent, child) = (parent as NodeId, child as NodeId);
             let mut dom = b.dom.borrow_mut();
             if dom.is_valid(parent) && dom.is_valid(child) {
+                let desc = describe_removed(&dom, child);
+                let prev = dom.prev_sibling(child).map(|n| n as u64);
+                let next = dom.next_sibling(child).map(|n| n as u64);
                 dom.detach(child);
+                b.mo.borrow_mut().records.push(RawMutation {
+                    kind: 0,
+                    target: parent,
+                    removed: vec![desc],
+                    prev,
+                    next,
+                    ..Default::default()
+                });
                 mark_dirty(&b);
             }
         })?,
@@ -1063,7 +1407,18 @@ fn dom_natives<'js>(
             ctx.clone(),
             move |node: u64, name: String, value: String| {
                 let mut dom = b.dom.borrow_mut();
+                let old = dom
+                    .get_attr(node as NodeId, &name)
+                    .unwrap_or_default()
+                    .to_owned();
                 dom.set_attr(node as NodeId, &name, &value);
+                b.mo.borrow_mut().records.push(RawMutation {
+                    kind: 1,
+                    target: node as NodeId,
+                    name,
+                    old,
+                    ..Default::default()
+                });
                 mark_dirty(&b);
             },
         )?,
@@ -1074,7 +1429,18 @@ fn dom_natives<'js>(
         "__native_dom_removeAttr",
         Function::new(ctx.clone(), move |node: u64, name: String| {
             let mut dom = b.dom.borrow_mut();
+            let old = dom
+                .get_attr(node as NodeId, &name)
+                .unwrap_or_default()
+                .to_owned();
             dom.remove_attr(node as NodeId, &name);
+            b.mo.borrow_mut().records.push(RawMutation {
+                kind: 1,
+                target: node as NodeId,
+                name,
+                old,
+                ..Default::default()
+            });
             mark_dirty(&b);
         })?,
     )?;
@@ -1098,13 +1464,30 @@ fn dom_natives<'js>(
                 if dom.element(node).is_some() {
                     // Replace all children with a single text node.
                     let children: Vec<NodeId> = dom.children(node).collect();
+                    let mut removed_desc = Vec::with_capacity(children.len());
                     for child in children {
+                        removed_desc.push(describe_removed(&dom, child));
                         dom.remove_subtree(child);
                     }
                     let text_node = dom.create_text(text);
                     dom.append(node, text_node);
+                    record_child_list(
+                        &b.mo,
+                        &dom,
+                        node,
+                        vec![text_node as u64],
+                        removed_desc,
+                        Some(text_node),
+                    );
                 } else {
+                    let old = dom.text_content(node);
                     dom.set_text(node, &text);
+                    b.mo.borrow_mut().records.push(RawMutation {
+                        kind: 2,
+                        target: node,
+                        old,
+                        ..Default::default()
+                    });
                 }
                 mark_dirty(&b);
             }
@@ -1298,7 +1681,28 @@ fn dom_natives<'js>(
                 let reference = (reference > 0).then_some(reference as NodeId);
                 let mut dom = b.dom.borrow_mut();
                 if dom.is_valid(parent) && dom.is_valid(child) {
+                    if let Some(old_parent) = dom.parent(child) {
+                        let desc = describe_removed(&dom, child);
+                        let prev = dom.prev_sibling(child).map(|n| n as u64);
+                        let next = dom.next_sibling(child).map(|n| n as u64);
+                        b.mo.borrow_mut().records.push(RawMutation {
+                            kind: 0,
+                            target: old_parent,
+                            removed: vec![desc],
+                            prev,
+                            next,
+                            ..Default::default()
+                        });
+                    }
                     dom.insert_before(parent, child, reference);
+                    record_child_list(
+                        &b.mo,
+                        &dom,
+                        parent,
+                        vec![child as u64],
+                        Vec::new(),
+                        Some(child),
+                    );
                     mark_dirty(&b);
                     child as u64
                 } else {
@@ -1377,7 +1781,9 @@ fn dom_natives<'js>(
                 return "[]".to_owned();
             }
             let mut freed: Vec<u64> = Vec::new();
+            let mut removed_desc: Vec<RemovedNode> = Vec::new();
             for child in dom.child_handles(node) {
+                removed_desc.push(describe_removed(&dom, child));
                 collect_freed(&dom, child, &mut freed);
                 dom.remove_subtree(child);
             }
@@ -1392,9 +1798,15 @@ fn dom_natives<'js>(
                     })
                     .unwrap_or_else(|| frag_dom.document())
             };
+            let mut added: Vec<u64> = Vec::new();
             for child in fragment.dom.child_handles(body) {
                 let imported = dom.import_subtree(&fragment.dom, child);
                 dom.append(node, imported);
+                added.push(imported as u64);
+            }
+            if !removed_desc.is_empty() || !added.is_empty() {
+                let anchor = dom.children(node).next();
+                record_child_list(&b.mo, &dom, node, added, removed_desc, anchor);
             }
             mark_dirty(&b);
             serde_json::to_string(&freed).unwrap_or_else(|_| "[]".to_owned())
@@ -1559,14 +1971,31 @@ fn dom_natives<'js>(
             if dom.is_valid(node) {
                 if dom.element(node).is_some() {
                     let children: Vec<NodeId> = dom.children(node).collect();
+                    let mut removed_desc = Vec::with_capacity(children.len());
                     for child in children {
+                        removed_desc.push(describe_removed(&dom, child));
                         collect_freed(&dom, child, &mut freed);
                         dom.remove_subtree(child);
                     }
                     let text_node = dom.create_text(text);
                     dom.append(node, text_node);
+                    record_child_list(
+                        &b.mo,
+                        &dom,
+                        node,
+                        vec![text_node as u64],
+                        removed_desc,
+                        Some(text_node),
+                    );
                 } else {
+                    let old = dom.text_content(node);
                     dom.set_text(node, &text);
+                    b.mo.borrow_mut().records.push(RawMutation {
+                        kind: 2,
+                        target: node,
+                        old,
+                        ..Default::default()
+                    });
                 }
                 mark_dirty(&b);
             }
@@ -1817,6 +2246,7 @@ mod tests {
                 media_mirror: Rc::new(RefCell::new(std::collections::HashMap::new())),
                 rects: Rc::new(RefCell::new(std::collections::HashMap::new())),
                 viewport: Rc::new(RefCell::new((0.0, 0.0, 0.0))),
+                mo: MoShared::default(),
             },
         )
         .unwrap();
@@ -1832,6 +2262,88 @@ mod tests {
             runtime.eval("JSON.stringify({a: 1})", "test.js").unwrap(),
             "{\"a\":1}"
         );
+    }
+
+    #[test]
+    fn mutation_observer_child_list_and_attributes() {
+        let (runtime, _dom) = runtime_with_dom(b"<html><body><div id='box'></div></body></html>");
+        runtime
+            .eval(
+                r#"globalThis.seen = [];
+                const target = document.getElementById('box');
+                const mo = new MutationObserver(function (records, obs) {
+                    for (const r of records) seen.push(r.type + ':' + (r.attributeName || (r.addedNodes ? r.addedNodes.length + '+' + (r.removedNodes ? r.removedNodes.length : 0) : '')));
+                });
+                mo.observe(target, { childList: true, attributes: true, subtree: true });
+                const span = document.createElement('span');
+                target.appendChild(span);
+                target.setAttribute('data-k', 'v');
+                'registered'"#,
+                "test.js",
+            )
+            .unwrap();
+        // Records delivered at the end-of-eval checkpoint.
+        let seen = runtime.eval("seen.join('|')", "check.js").unwrap();
+        assert_eq!(seen, "childList:1+0|attributes:data-k", "records: {seen}");
+    }
+
+    #[test]
+    fn mutation_observer_subtree_and_disconnect() {
+        let (runtime, _dom) =
+            runtime_with_dom(b"<html><body><div id='root'><p id='inner'>x</p></div></body></html>");
+        runtime
+            .eval(
+                r#"globalThis.count = 0;
+                const root = document.getElementById('root');
+                const inner = document.getElementById('inner');
+                const mo = new MutationObserver(function () { count++; });
+                mo.observe(root, { childList: true, subtree: true });
+                inner.setAttribute('data-a', '1');   // attributes on subtree: not observed
+                const b = document.createElement('b');
+                inner.appendChild(b);                 // childList in subtree: observed
+                'go'"#,
+                "test.js",
+            )
+            .unwrap();
+        // Only the childList record (subtree) fired; the attribute record
+        // was not requested (attributes:false).
+        let count = runtime.eval("count", "check.js").unwrap();
+        assert_eq!(count, "1", "subtree deliveries: {count}");
+        runtime
+            .eval(
+                "const mo2 = new MutationObserver(function(){count+=10;});
+                 mo2.observe(root, {childList:true, subtree:true});
+                 mo2.disconnect();
+                 root.appendChild(document.createElement('i'));",
+                "test.js",
+            )
+            .unwrap();
+        let count = runtime.eval("count", "check.js").unwrap();
+        assert_eq!(count, "2", "disconnected observer must not fire: {count}");
+    }
+
+    #[test]
+    fn mutation_observer_callback_mutations_redeliver() {
+        let (runtime, _dom) = runtime_with_dom(b"<html><body><ul id='list'></ul></body></html>");
+        runtime
+            .eval(
+                r#"let rounds = 0;
+                const list = document.getElementById('list');
+                const mo = new MutationObserver(function () {
+                    rounds++;
+                    if (list.children.length < 3) list.appendChild(document.createElement('li'));
+                });
+                mo.observe(list, { childList: true });
+                list.appendChild(document.createElement('li'));
+                'seeded'"#,
+                "test.js",
+            )
+            .unwrap();
+        // The callback mutates again; the checkpoint loop must redeliver.
+        let n = runtime.eval("list.children.length", "check.js").unwrap();
+        assert_eq!(n, "3", "cascade reached 3 li: {n}");
+        let r = runtime.eval("rounds", "check.js").unwrap();
+        assert_eq!(r, "3", "callback rounds: {r}");
     }
 
     #[test]
@@ -1947,6 +2459,7 @@ mod tests {
                 media_mirror: Rc::new(RefCell::new(std::collections::HashMap::new())),
                 rects: Rc::new(RefCell::new(std::collections::HashMap::new())),
                 viewport: Rc::new(RefCell::new((0.0, 0.0, 0.0))),
+                mo: MoShared::default(),
             },
         )
         .unwrap();
