@@ -28,6 +28,7 @@ use lightningcss::values::color::{CssColor, LABColor, RGBA};
 use lightningcss::values::length::{
     Length as LcLength, LengthPercentage, LengthPercentageOrAuto, LengthValue,
 };
+use lightningcss::rules::font_face::{FontFaceProperty, Source, FontFaceRule as FontFaceRuleDef};
 use rowser_dom::{parse_selector_list, SelectorList};
 
 use crate::cascade::{
@@ -59,6 +60,18 @@ pub struct StyleRuleEntry {
 pub struct ParsedStylesheet {
     /// Style rules in source order.
     pub rules: Vec<StyleRuleEntry>,
+    /// `@font-face` rules in source order.
+    pub font_faces: Vec<FontFaceRaw>,
+}
+
+/// One `@font-face` rule, flattened: the CSS family name plus the url()
+/// sources in declaration order (browser tries them in order).
+#[derive(Debug, Clone)]
+pub struct FontFaceRaw {
+    /// CSS family name this face is registered under.
+    pub family: String,
+    /// url(...) sources (local() sources are skipped).
+    pub sources: Vec<String>,
 }
 
 /// Viewport description used to evaluate `@media` rules.
@@ -142,6 +155,7 @@ fn collect_rules(
             CssRule::LayerBlock(layer) => {
                 collect_rules(&layer.rules.0, media, out, order);
             }
+            CssRule::FontFace(font_face) => collect_font_face(font_face, out),
             _ => {}
         }
     }
@@ -213,6 +227,55 @@ fn collect_style_rule(rule: &StyleRule<'_>, out: &mut ParsedStylesheet, order: &
         order: *order,
     });
     *order += 1;
+}
+
+/// Flattens one `@font-face` rule: CSS family name + url() sources.
+fn collect_font_face(rule: &FontFaceRuleDef<'_>, out: &mut ParsedStylesheet) {
+    let mut family: Option<String> = None;
+    let mut sources: Vec<String> = Vec::new();
+    for property in &rule.properties {
+        match property {
+            FontFaceProperty::FontFamily(family_name) => {
+                // Single family name (generic keywords make no sense in
+                // @font-face but tolerate them).
+                let name = family_name
+                    .to_css_string(PrinterOptions::default())
+                    .unwrap_or_default()
+                    .trim_matches('"')
+                    .trim()
+                    .to_owned();
+                if !name.is_empty() {
+                    family = Some(name);
+                }
+            }
+            FontFaceProperty::Source(list) => {
+                for source in list {
+                    if let Source::Url(url_source) = source {
+                        // Serialized as `url("...")` — reduce to the bare URL.
+                        let text = url_source
+                            .url
+                            .to_css_string(PrinterOptions::default())
+                            .unwrap_or_default();
+                        let text = text.trim();
+                        let inner = text
+                            .strip_prefix("url(")
+                            .and_then(|rest| rest.strip_suffix(')'))
+                            .unwrap_or(text);
+                        let inner = inner.trim().trim_matches('"').trim_matches('\'').trim();
+                        if !inner.is_empty() && !inner.starts_with("data:;base64,") {
+                            sources.push(inner.to_owned());
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    if let Some(family) = family {
+        if !sources.is_empty() {
+            out.font_faces.push(FontFaceRaw { family, sources });
+        }
+    }
 }
 
 /// Inline `style="..."` attribute parsing.

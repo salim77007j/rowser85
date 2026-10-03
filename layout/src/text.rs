@@ -1,6 +1,7 @@
 //! Text shaping: flattening inline content into rich spans and shaping them
 //! with cosmic-text (rustybuzz + fontdb + swash).
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use cosmic_text::fontdb;
@@ -301,6 +302,21 @@ const FAMILY_ALIASES: &[(&str, &str)] = &[
 /// Final-resort families tried after the author stack is exhausted.
 const FALLBACK_CHAIN: &[&str] = &["Liberation Sans", "DejaVu Sans", "Noto Sans SC"];
 
+/// Runtime web-font aliases: CSS @font-face family → the registered
+/// fontdb family name of the loaded face(s). Populated by the engine when
+/// @font-face sources finish loading (see engine::font_face).
+static WEB_FONTS: std::sync::OnceLock<std::sync::RwLock<HashMap<String, String>>> =
+    std::sync::OnceLock::new();
+
+/// Registers a loaded @font-face: `css_family` (as written in the rule) maps
+/// to `real_family` (the name inside the font file).
+pub fn register_web_font(css_family: &str, real_family: &str) {
+    let lock = WEB_FONTS.get_or_init(|| std::sync::RwLock::new(HashMap::new()));
+    if let Ok(mut map) = lock.write() {
+        map.insert(css_family.to_ascii_lowercase(), real_family.to_owned());
+    }
+}
+
 /// True when the font system has a face for `name`.
 fn family_installed(name: &str, font_system: &mut FontSystem) -> bool {
     let query = fontdb::Query {
@@ -315,11 +331,47 @@ fn family_installed(name: &str, font_system: &mut FontSystem) -> bool {
 /// back to a concrete default when nothing matches. Mirrors CSS font
 /// matching (family-by-family, in order) instead of betting on entry #1.
 fn resolve_font_stack(stack: &[String], font_system: &mut FontSystem) -> String {
+    // Loaded @font-face families take precedence over identically-named
+    // system fonts (CSS font matching: author faces shadow local ones).
+    if let Some(lock) = WEB_FONTS.get() {
+        if let Ok(map) = lock.read() {
+            for family in stack {
+                if let Some(real) = map.get(&family.to_ascii_lowercase()) {
+                    if family_installed(real, font_system) {
+                        return real.clone();
+                    }
+                }
+            }
+        }
+    }
     for family in stack {
         match family.as_str() {
-            "serif" | "sans-serif" | "monospace" | "cursive" | "fantasy" => {
-                // Generic keywords: let cosmic-text resolve them (it has its
-                // own generic defaults + per-glyph fallback).
+            "sans-serif" => {
+                // Generic keywords resolve through fontconfig in Chrome,
+                // which aliases sans-serif to the Arial-metric face
+                // (Liberation Sans here) — visibly narrower than
+                // cosmic-text's built-in default (DejaVu Sans). Prefer the
+                // fontconfig-compatible face when installed; the keyword
+                // stays as the last resort.
+                for candidate in ["Liberation Sans", "DejaVu Sans"] {
+                    if family_installed(candidate, font_system) {
+                        return candidate.to_owned();
+                    }
+                }
+                return family.clone();
+            }
+            "serif" => {
+                for candidate in ["Liberation Serif", "DejaVu Serif"] {
+                    if family_installed(candidate, font_system) {
+                        return candidate.to_owned();
+                    }
+                }
+                return family.clone();
+            }
+            "monospace" | "cursive" | "fantasy" => {
+                // cosmic-text's monospace default matches Chrome's on this
+                // system (verified: identical row extents); keep its
+                // per-glyph fallback machinery for these keywords.
                 return family.clone();
             }
             _ => {}

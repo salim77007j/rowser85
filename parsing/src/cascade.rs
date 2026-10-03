@@ -793,6 +793,17 @@ pub fn compute_styles(dom: &Dom, author: &[ParsedStylesheet], media: &MediaConte
     for sheet in author {
         all_entries.extend(sheet.rules.iter().cloned());
     }
+    // Global source-order renumber. Each sheet's parse restarts its order
+    // counter at 0, so the UA sheet's rule #N and an author sheet's rule #N
+    // carried the SAME order — on equal specificity the stable sort kept
+    // whichever came first in `matched`, letting UA rules beat identical
+    // author rules (author `body{margin:24px}` lost to UA `body{margin:8px}`;
+    // author `h1{font-size:26px}` lost to UA `h1{font-size:2em}`).
+    // Renumbering in collection order (UA first, then sheets in document
+    // order) restores CSS cascade semantics: later rules win ties.
+    for (i, entry) in all_entries.iter_mut().enumerate() {
+        entry.order = i as u32;
+    }
     let rules = RuleSet::build(all_entries);
 
     let mut map = StyleMap::default();
@@ -1538,6 +1549,29 @@ mod custom_property_tests {
     /// consumed through var() in descendant rules. Previously the whole
     /// vendor sheet dropped on first error and var() declarations were
     /// silently discarded — pages rendered unstyled.
+    /// UA-vs-author tie-breaking: every sheet's parse restarts its order
+    /// counter at 0, so the UA sheet's rule #N and an author sheet's rule #N
+    /// tied on (specificity, order) — and UA rules WON, silently discarding
+    /// author `body{margin:24px}` (UA 8px) and `h1{font-size:26px}` (UA 2em)
+    /// while class rules (higher specificity) survived. Regression test.
+    #[test]
+    fn author_tag_rules_beat_ua_on_ties() {
+        let html = br#"<html><body><h1>T</h1><div class="r">x</div></body></html>"#;
+        let css = "body { margin: 24px; } h1 { font-size: 26px; margin: 0 0 18px 0; } .r { margin: 14px 0; }";
+        let doc = parse_html(html);
+        let sheet = parse_stylesheet(css, &MediaContext::default());
+        let map = compute_styles(&doc.dom, &[sheet], &MediaContext::default());
+        let body = map.get(first_tag(&doc, "body")).expect("body style");
+        match body.margins.top {
+            LengthOrAuto::Length(Length::Px(px)) => {
+                assert!((px - 24.0).abs() < 0.1, "body margin-top {px} (UA 8px won)");
+            }
+            other => panic!("body margin-top not a length: {other:?}"),
+        }
+        let h1 = map.get(first_tag(&doc, "h1")).expect("h1 style");
+        assert!((h1.font_size - 26.0).abs() < 0.1, "h1 font-size {} (UA 2em won)", h1.font_size);
+    }
+
     #[test]
     fn var_substitution_and_inheritance() {
         let html = br#"<html><body><p class="a">x</p><p class="b">y</p></body></html>"#;

@@ -165,12 +165,14 @@ impl LayoutEngine {
             return LayoutResult::default();
         };
 
-        // Root fills the viewport width.
-        let mut root_style = taffy_style(styles.get(root).unwrap_or(&ComputedStyle::default()));
-        root_style.size = TaffySize {
-            width: Dimension::length(viewport.width),
-            height: Dimension::AUTO,
-        };
+        // Root sizing: taffy_style already maps the author width (auto →
+        // stretch, which for the layout root means viewport width MINUS the
+        // root's own margins). Previously width was forced to viewport.width
+        // here, which ignored body margins entirely (content at x=0,
+        // full-width blocks). The margin OFFSET itself is applied in
+        // `extract` (taffy positions the root border box at the layout
+        // origin, not at its margin edge).
+        let root_style = taffy_style(styles.get(root).unwrap_or(&ComputedStyle::default()));
         tree.set_style(taffy_root, root_style).ok();
 
         let available = TaffySize {
@@ -184,9 +186,25 @@ impl LayoutEngine {
         })
         .ok();
 
-        // Extract results.
+        // Extract results. The root (body) border box sits at its margins:
+        // taffy reports root-relative locations, so seed the walk with the
+        // margin offset (mirrors CSS: the body content box is inset by its
+        // margins within the html canvas).
+        let root_margin = styles
+            .get(root)
+            .map(|cs| {
+                let m = &cs.margins;
+                let px = |v: &rowser_parsing::cascade::LengthOrAuto| match v {
+                    rowser_parsing::cascade::LengthOrAuto::Length(l) => {
+                        l.resolve(cs.font_size)
+                    }
+                    rowser_parsing::cascade::LengthOrAuto::Auto => 0.0,
+                };
+                (px(&m.left), px(&m.top))
+            })
+            .unwrap_or((0.0, 0.0));
         let mut result = LayoutResult::default();
-        let abs = (0.0f32, 0.0f32);
+        let abs = (root_margin.0, root_margin.1);
         extract(
             dom,
             &tree,
@@ -921,9 +939,19 @@ fn measure_leaf(
         .sum::<f32>()
         .max(0.0);
     let total_w = lines.iter().map(|l| l.w).fold(0.0f32, f32::max).max(0.0);
+    // Taffy uses the measure output's size as the node's FINAL size: no
+    // stretch pass runs afterwards for childless nodes. Returning the
+    // content width (`total_w`) when a definite width was passed (the
+    // stretched block width, or a float-narrowed BFC slot width) shrank
+    // every text leaf to its max-content width — then the extract pass
+    // re-shaped at that undersized width and the last word wrapped onto
+    // a second line (a 699.4px line measured into a 699.0px box). Report
+    // the definite width when there is one; content width only when the
+    // available space is indefinite (intrinsic sizing passes).
+    let out_w = width.filter(|w| *w > total_w).unwrap_or(total_w);
     LayoutOutput {
         size: TaffySize {
-            width: total_w,
+            width: out_w,
             height: total_h,
         },
         scrollable_overflow_rect: taffy::geometry::Rect::ZERO,
@@ -1048,7 +1076,9 @@ mod tests {
             .filter_map(|n| layout.rects.get(&n).copied())
             .collect();
         let float = divs[1]; // first inner div = the float
-        assert!((float.x - 0.0).abs() < 1.0, "float at left edge: {float:?}");
+        // The float's containing block chain starts at the body content
+        // edge (UA 8px margin), matching Chrome.
+        assert!((float.x - 8.0).abs() < 1.0, "float at left edge: {float:?}");
         assert!((float.w - 200.0).abs() < 1.0, "float width: {float:?}");
         // The block box may span the full width (CSS: blocks overlap floats),
         // but the LINE CONTENT — the shaped glyphs — must clear the float
@@ -1385,8 +1415,15 @@ mod tests {
             })
             .unwrap();
         let body_rect = layout.rects.get(&body).cloned().unwrap();
+        // Chrome semantics: body carries the UA 8px margin, so the border
+        // box is inset 8px and spans viewport - 16.
         assert!(
-            (body_rect.w - 800.0).abs() < 1.0,
+            (body_rect.x - 8.0).abs() < 1.0,
+            "body x {}",
+            body_rect.x
+        );
+        assert!(
+            (body_rect.w - 784.0).abs() < 1.0,
             "body width {}",
             body_rect.w
         );

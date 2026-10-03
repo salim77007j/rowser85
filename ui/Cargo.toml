@@ -13,7 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 rowser-shell = { path = "../integration" }
-tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "tracing-log"] }
 rowser-api = { path = "../api" }
 rowser-engine = { path = "../engine" }
 anyhow = "1.0.104"

@@ -170,6 +170,8 @@ pub enum SubresourceKind {
     Image,
     /// Audio/video source (streamed to the media pipeline, never buffered).
     Media,
+    /// Web font (@font-face src url()).
+    Font,
 }
 
 impl SubresourceKind {
@@ -181,6 +183,7 @@ impl SubresourceKind {
             SubresourceKind::Script => rowser_networking::ResourceKind::Script,
             SubresourceKind::Image => rowser_networking::ResourceKind::Image,
             SubresourceKind::Media => rowser_networking::ResourceKind::Media,
+            SubresourceKind::Font => rowser_networking::ResourceKind::Font,
         }
     }
 }
@@ -276,6 +279,14 @@ struct Page {
     url: String,
     pending: HashMap<String, SubresourceKind>,
     css_texts: Vec<String>,
+    /// Base URL of each link-fetched stylesheet (parallel to css_texts) —
+    /// resolves @font-face src URLs.
+    css_bases: Vec<String>,
+    /// Web-font URLs already registered (loaded or permanently failed).
+    fonts_done: std::collections::HashSet<String>,
+    /// Font URL → CSS family (populated when the fetch is issued, consumed
+    /// when the bytes arrive).
+    font_url_family: HashMap<String, String>,
     scripts: Vec<(Option<String>, String, NodeId)>,
     viewport: Viewport,
     scroll_y: f32,
@@ -341,6 +352,9 @@ impl Page {
             url: String::new(),
             pending: HashMap::new(),
             css_texts: Vec::new(),
+            css_bases: Vec::new(),
+            fonts_done: std::collections::HashSet::new(),
+            font_url_family: HashMap::new(),
             scripts: Vec::new(),
             viewport: Viewport::default(),
             scroll_y: 0.0,
@@ -927,6 +941,9 @@ impl Page {
     }
 
     fn reset_page(&mut self) {
+        self.css_bases.clear();
+        self.fonts_done.clear();
+        self.font_url_family.clear();
         self.find_matches.clear();
         self.active_match = None;
         self.find_query.clear();
@@ -947,6 +964,9 @@ impl Page {
         self.display_list = None;
         self.images.clear();
         self.css_texts.clear();
+        self.css_bases.clear();
+        self.fonts_done.clear();
+        self.font_url_family.clear();
         self.scripts.clear();
         self.executed_scripts.clear();
         self.pending.clear();
@@ -974,6 +994,87 @@ impl Page {
                 tab: self.state.tab,
                 requests: fetch_requests,
             }));
+    }
+
+    /// The CSS family a pending font URL was requested for.
+    fn pending_font_family(&self, url: &str) -> Option<String> {
+        self.font_url_family.get(url).cloned()
+    }
+
+    /// Issues fetches for every unloaded @font-face source in the parsed
+    /// sheets. Called from render_pipeline once per (css set); a font URL
+    /// is requested at most once per document (fonts_done).
+    fn request_web_fonts(&mut self, sheets: &[ParsedStylesheet], css_base_of_sheet: &[String]) {
+        let mut requests: Vec<(String, SubresourceKind)> = Vec::new();
+        let doc_url = self.url.clone();
+        for (index, sheet) in sheets.iter().enumerate() {
+            if sheet.font_faces.is_empty() {
+                continue;
+            }
+            let base = css_base_of_sheet
+                .get(index)
+                .cloned()
+                .unwrap_or_else(|| doc_url.clone());
+            for face in &sheet.font_faces {
+                for source in &face.sources {
+                    let resolved = self.resolve_url_against(&base, source);
+                    if self.fonts_done.contains(&resolved)
+                        || self.pending.contains_key(&resolved)
+                        || self.font_url_family.contains_key(&resolved)
+                    {
+                        continue;
+                    }
+                    if source.starts_with("data:") {
+                        // data: URLs decode synchronously.
+                        if let Some(bytes) = decode_data_url_bytes(source) {
+                            if crate::font_face::register_font_bytes(
+                                &mut self.layout_engine.font_system,
+                                &face.family,
+                                &bytes,
+                            ) {
+                                self.dirty = true;
+                            }
+                        }
+                        self.fonts_done.insert(resolved);
+                        continue;
+                    }
+                    self.font_url_family
+                        .insert(resolved.clone(), face.family.clone());
+                    requests.push((resolved, SubresourceKind::Font));
+                }
+            }
+        }
+        if !requests.is_empty() {
+            tracing::debug!(
+                target: "rowser::engine",
+                "requesting {} web fonts",
+                requests.len()
+            );
+            // Track the fetches in `pending`: `subresource_fetched` drops
+            // the body when the URL is not in `pending` (`pending.remove`
+            // returns None → early return), so font bytes arriving for an
+            // untracked URL were silently discarded and the page kept the
+            // fallback font forever. This mirrors the DOM scan path, which
+            // inserts every request before calling request_subresources.
+            for (url, _) in &requests {
+                self.pending.insert(url.clone(), SubresourceKind::Font);
+            }
+            self.request_subresources(&requests);
+        }
+    }
+
+    /// Resolves `href` against an explicit `base` (absolute hrefs pass
+    /// through; protocol-relative URLs resolve against the base).
+    fn resolve_url_against(&self, base: &str, href: &str) -> String {
+        if href.contains("://") || href.starts_with("data:") {
+            return href.to_owned();
+        }
+        if let Ok(base) = url::Url::parse(base) {
+            if let Ok(joined) = base.join(href) {
+                return joined.to_string();
+            }
+        }
+        self.resolve_url(href)
     }
 
     fn top_site(&self) -> Option<String> {
@@ -1006,7 +1107,26 @@ impl Page {
             SubresourceKind::Stylesheet => {
                 let text = String::from_utf8_lossy(&body).into_owned();
                 self.css_texts.push(text);
+                self.css_bases.push(url.clone());
                 Some(SubresourceKind::Stylesheet)
+            }
+            SubresourceKind::Font => {
+                // Register the face (decode + fontdb + alias) and re-render:
+                // fonts change metrics, so this is a layout-level update.
+                // The CSS family is recoverable from the rule set.
+                if let Some(family) = self.pending_font_family(&url) {
+                    if crate::font_face::register_font_bytes(
+                        &mut self.layout_engine.font_system,
+                        &family,
+                        &body,
+                    ) {
+                        self.style_map = None; // force re-style in render_pipeline
+                        self.dirty = true;
+                        self.render_pipeline();
+                    }
+                }
+                self.fonts_done.insert(url.clone());
+                Some(SubresourceKind::Font)
             }
             SubresourceKind::Script => {
                 let text = String::from_utf8_lossy(&body).into_owned();
@@ -1290,6 +1410,19 @@ impl Page {
             }
             all
         };
+        // Base URL per entry of all_css: link sheets carry their own base
+        // (for @font-face resolution); <style> elements resolve against the
+        // document URL.
+        let css_base_of_sheet: Vec<String> = {
+            let link_count = self.css_texts.len();
+            let doc_url = self.url.clone();
+            let mut bases: Vec<String> = self.css_bases.clone();
+            bases.resize(link_count, doc_url.clone());
+            while bases.len() < all_css.len() {
+                bases.push(doc_url.clone());
+            }
+            bases
+        };
         let fp = {
             use std::hash::{Hash, Hasher};
             let fp_t0 = std::time::Instant::now();
@@ -1328,6 +1461,9 @@ impl Page {
                 .collect()
         };
         self.css_cache = Some((fp, sheets.clone()));
+        // @font-face: request (or synchronously register, for data: URLs)
+        // every not-yet-loaded web font before styling/layout run.
+        self.request_web_fonts(&sheets, &css_base_of_sheet);
         let stage_t0 = std::time::Instant::now();
         if trace {
             eprintln!(
@@ -2144,6 +2280,24 @@ fn media_event_parts(event: &PipelineEvent) -> (String, String) {
             "error".to_owned(),
             format!("{{\"message\":{}}}", serde_json::to_string(message).unwrap_or_default()),
         ),
+    }
+}
+
+/// Decodes a `data:` URL (base64 or percent-encoded) into bytes.
+fn decode_data_url_bytes(data_url: &str) -> Option<Vec<u8>> {
+    let rest = data_url.strip_prefix("data:")?;
+    let (meta, payload) = rest.split_once(',')?;
+    let is_base64 = meta.split(';').any(|p| p.eq_ignore_ascii_case("base64"));
+    if is_base64 {
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD
+            .decode(payload)
+            .ok()
+    } else {
+        percent_encoding::percent_decode_str(payload)
+            .decode_utf8()
+            .ok()
+            .map(|s| s.into_owned().into_bytes())
     }
 }
 
