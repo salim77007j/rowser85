@@ -42,7 +42,7 @@
   // sizing logic (they measured 0x0 before).
   try {
     Object.defineProperty(globalThis, 'scrollY', { configurable: true, get: function () { return __native_dom_viewport().scrollY || 0; } });
-    Object.defineProperty(globalThis, 'scrollX', { configurable: true, get: function () { return 0; } });
+    Object.defineProperty(globalThis, 'scrollX', { configurable: true, get: function () { return 0; } }); // vertical-only engine
     Object.defineProperty(globalThis, 'pageYOffset', { configurable: true, get: function () { return window.scrollY || 0; } });
     Object.defineProperty(globalThis, 'pageXOffset', { configurable: true, get: function () { return 0; } });
     Object.defineProperty(globalThis, 'innerWidth', { configurable: true, get: function () { return __native_dom_viewport().width || 1360; } });
@@ -50,8 +50,19 @@
     Object.defineProperty(globalThis, 'outerWidth', { configurable: true, get: function () { return window.innerWidth; } });
     Object.defineProperty(globalThis, 'outerHeight', { configurable: true, get: function () { return window.innerHeight; } });
   } catch (e) {}
-  globalThis.scrollTo = function () {};
-  globalThis.scrollBy = function () {};
+  // Programmatic scrolling: routed to the page thread (clamped, repaints,
+  // updates the scroll mirror that scrollY/IntersectionObserver read).
+  globalThis.scrollTo = function (x, y) {
+    const o = (x && typeof x === 'object') ? x : null;
+    __native_scroll_to(0, o ? (Number(o.top) || 0) : (Number(y) || 0));
+  };
+  globalThis.scroll = globalThis.scrollTo;
+  globalThis.scrollBy = function (x, y) {
+    const o = (x && typeof x === 'object') ? x : null;
+    const dy = o ? (Number(o.top) || 0) : (Number(y) || 0);
+    const cur = (__native_dom_viewport() || {}).scrollY || 0;
+    __native_scroll_to(0, cur + dy);
+  };
   globalThis.focus = function () {};
   globalThis.blur = function () {};
   globalThis.print = function () {};
@@ -106,6 +117,16 @@
     removeItem(k) { __native_ls_remove(String(k)); },
     key(i) { return null; },
     get length() { return 0; },
+  };
+  // sessionStorage: same surface, per-tab backing map (Page-thread
+  // lifetime — survives navigations, dies with the tab, exactly the spec).
+  globalThis.sessionStorage = {
+    getItem(k) { const v = __native_ss_get(String(k)); return (v === null || v === undefined) ? null : v; },
+    setItem(k, v) { __native_ss_set(String(k), String(v)); },
+    removeItem(k) { __native_ss_remove(String(k)); },
+    clear() { __native_ss_clear(); },
+    key(i) { const keys = JSON.parse(__native_ss_keys() || '[]'); return keys[i] || null; },
+    get length() { return JSON.parse(__native_ss_keys() || '[]').length; },
   };
 
   // ------------------------------------------------------------------ fetch
@@ -2005,8 +2026,27 @@
     measure() {},
   };
   globalThis.alert = globalThis.confirm = globalThis.prompt = function () {};
-  globalThis.requestAnimationFrame = function (cb) { return setTimeout(cb, 16); };
-  globalThis.cancelAnimationFrame = function (id) { clearTimeout(id); };
+  // requestAnimationFrame driven by the engine's frame clock: callbacks
+  // fire on presented frames (nested rAF re-schedules for the next frame).
+  const rafCallbacks = new Map();
+  let rafNextId = 1;
+  globalThis.requestAnimationFrame = function (cb) {
+    if (typeof cb !== 'function') return 0;
+    const id = rafNextId++;
+    rafCallbacks.set(id, cb);
+    try { __native_raf_start(id); } catch (e) {}
+    return id;
+  };
+  globalThis.cancelAnimationFrame = function (id) {
+    rafCallbacks.delete(id);
+    try { __native_raf_clear(id); } catch (e) {}
+  };
+  globalThis.__onRafFired = function (id) {
+    const cb = rafCallbacks.get(id);
+    if (!cb) return;
+    rafCallbacks.delete(id);
+    try { cb(Date.now()); } catch (e) { console.error(errString(e)); }
+  };
   // matchMedia with real evaluation against the live viewport (the same
   // machinery the style engine uses). MediaQueryList change events are a
   // documented gap: matches is correct at read time, no resize listeners.

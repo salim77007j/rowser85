@@ -26,6 +26,7 @@ fn main() {
         mo: Default::default(),
         history: Default::default(),
         observers: Default::default(),
+        session: Default::default(),
     };
     let t0 = Instant::now();
     println!("creating runtime (evals prelude)…");

@@ -321,6 +321,23 @@ pub enum JsCommand {
         /// Relative movement in the joint session history.
         delta: i64,
     },
+    /// `window.scrollTo/scrollBy/scroll` — page-thread scroll update.
+    ScrollTo {
+        /// Absolute target scroll x (ignored; horizontal not scrollable).
+        x: f32,
+        /// Absolute target scroll y (clamped to content).
+        y: f32,
+    },
+    /// `requestAnimationFrame` — fire on the next presented frame.
+    RafStart {
+        /// Callback id.
+        id: u64,
+    },
+    /// `cancelAnimationFrame`.
+    RafClear {
+        /// Callback id.
+        id: u64,
+    },
     /// The DOM was mutated; re-style/layout/render after the script task.
     MarkDirty,
     /// JS set `video.src` (direct URL, data URL, or a `rowser-mse:` object
@@ -437,6 +454,8 @@ pub enum EngineEvent {
         /// JSON message.
         message: String,
     },
+    /// A rAF callback's frame arrived (page-thread frame clock).
+    RafFired(u64),
     /// IntersectionObserver entries computed by the engine after layout.
     IntersectFired {
         /// Observer id.
@@ -570,6 +589,8 @@ pub struct PageBridge {
     pub history: Rc<RefCell<HistoryMirror>>,
     /// Intersection/ResizeObserver registrations (engine drives delivery).
     pub observers: ObserversShared,
+    /// Per-tab sessionStorage (survives navigations, dies with the tab).
+    pub session: Rc<RefCell<std::collections::HashMap<String, String>>>,
 }
 
 /// Synchronous history state shared with the prelude.
@@ -739,6 +760,7 @@ impl JsRuntime {
             EngineEvent::PopState { state } => {
                 format!("__onPopState({})", json_str(&state))
             }
+            EngineEvent::RafFired(id) => format!("__onRafFired({id})"),
             EngineEvent::IntersectFired { id, json } => {
                 format!("__onIntersect({id},{json})")
             }
@@ -1073,6 +1095,78 @@ impl JsRuntime {
                         dark_mode: false,
                     };
                     rowser_parsing::css::media_query_matches_str(&query, &ctx)
+                })?,
+            )?;
+
+            // --- requestAnimationFrame (frame-clock driven) ---
+            let b = Rc::clone(&bridge);
+            globals.set(
+                "__native_raf_start",
+                Function::new(ctx.clone(), move |id: u64| {
+                    if let Some(out) = &b.outgoing {
+                        let _ = out.send(JsCommand::RafStart { id });
+                    }
+                })?,
+            )?;
+            let b = Rc::clone(&bridge);
+            globals.set(
+                "__native_raf_clear",
+                Function::new(ctx.clone(), move |id: u64| {
+                    if let Some(out) = &b.outgoing {
+                        let _ = out.send(JsCommand::RafClear { id });
+                    }
+                })?,
+            )?;
+
+            // --- programmatic scrolling ---
+            let b = Rc::clone(&bridge);
+            globals.set(
+                "__native_scroll_to",
+                Function::new(ctx.clone(), move |x: f64, y: f64| {
+                    if let Some(out) = &b.outgoing {
+                        let _ = out.send(JsCommand::ScrollTo {
+                            x: x as f32,
+                            y: y as f32,
+                        });
+                    }
+                })?,
+            )?;
+
+            // --- sessionStorage (per-tab map; Page owns the lifetime) ---
+            let b = Rc::clone(&bridge);
+            globals.set(
+                "__native_ss_get",
+                Function::new(ctx.clone(), move |key: String| -> Option<String> {
+                    b.session.borrow().get(&key).cloned()
+                })?,
+            )?;
+            let b = Rc::clone(&bridge);
+            globals.set(
+                "__native_ss_set",
+                Function::new(ctx.clone(), move |key: String, value: String| {
+                    b.session.borrow_mut().insert(key, value);
+                })?,
+            )?;
+            let b = Rc::clone(&bridge);
+            globals.set(
+                "__native_ss_remove",
+                Function::new(ctx.clone(), move |key: String| {
+                    b.session.borrow_mut().remove(&key);
+                })?,
+            )?;
+            let b = Rc::clone(&bridge);
+            globals.set(
+                "__native_ss_clear",
+                Function::new(ctx.clone(), move || {
+                    b.session.borrow_mut().clear();
+                })?,
+            )?;
+            let b = Rc::clone(&bridge);
+            globals.set(
+                "__native_ss_keys",
+                Function::new(ctx.clone(), move || -> String {
+                    let keys: Vec<String> = b.session.borrow().keys().cloned().collect();
+                    serde_json::to_string(&keys).unwrap_or_else(|_| "[]".to_owned())
                 })?,
             )?;
 
@@ -2506,6 +2600,7 @@ mod tests {
                 mo: MoShared::default(),
                 history: Default::default(),
                 observers: Default::default(),
+                session: Default::default(),
             },
         )
         .unwrap();
@@ -2755,6 +2850,7 @@ mod tests {
                 mo: MoShared::default(),
                 history: Default::default(),
                 observers: Default::default(),
+                session: Default::default(),
             },
         )
         .unwrap();

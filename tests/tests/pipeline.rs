@@ -406,3 +406,124 @@ async fn observers_fire_with_real_geometry() {
     }
     browser.shutdown();
 }
+
+const SESSION_HTML: &str = r#"<!DOCTYPE html><html><head><title>Session</title></head><body>
+<script>
+  sessionStorage.setItem('page', '1');
+  console.log('SS:' + sessionStorage.getItem('page') + ':' + sessionStorage.length);
+</script>
+</body></html>"#;
+
+/// sessionStorage: set/get across a reload within the same tab.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn session_storage_survives_reload() {
+    let mut routes: HashMap<String, (u16, String, Vec<u8>)> = HashMap::new();
+    routes.insert(
+        "/".to_owned(),
+        (
+            200,
+            "text/html".to_owned(),
+            SESSION_HTML.as_bytes().to_vec(),
+        ),
+    );
+    let mut server = LocalServer::start(routes);
+    let url = server.url();
+    server.serve();
+
+    let browser = BrowserApi::start(test_config("session")).expect("engine start");
+    let tab = browser.new_tab(Some(url));
+    let mut events = browser.events();
+    let seconds = if std::env::var("TSAN_OPTIONS").is_ok() || std::env::var("ASAN_OPTIONS").is_ok()
+    {
+        120
+    } else {
+        20
+    };
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(seconds);
+    let mut count = 0;
+    let mut saw = 0usize;
+    while saw < 1 {
+        let event = tokio::time::timeout_at(deadline, events.recv())
+            .await
+            .expect("timeout waiting for session events")
+            .expect("event channel alive");
+        if let EngineEvent::ConsoleMessage { text, .. } = event {
+            if text.starts_with("SS:") {
+                assert!(text.contains("1:1"), "sessionStorage: {text}");
+                saw += 1;
+            }
+        }
+        count += 1;
+    }
+    // Reload the same tab: the store must persist (per-tab lifetime).
+    browser.reload(tab);
+    let mut saw2 = 0usize;
+    let deadline2 = tokio::time::Instant::now() + Duration::from_secs(seconds);
+    while saw2 < 1 {
+        let event = tokio::time::timeout_at(deadline2, events.recv())
+            .await
+            .expect("timeout on reload")
+            .expect("event channel alive");
+        if let EngineEvent::ConsoleMessage { text, .. } = event {
+            if text.starts_with("SS:") {
+                saw2 += 1;
+            }
+        }
+    }
+    browser.shutdown();
+}
+
+const RAF_HTML: &str = r#"<!DOCTYPE html><html><head><title>RAF</title></head><body>
+<div id="tick" style="width:50px;height:50px"></div>
+<script>
+  let frames = 0;
+  function loop(ts) {
+    frames++;
+    if (frames >= 3) {
+      console.log('RAF-DONE:' + frames + ':' + (ts > 0));
+      return; // stop the loop
+    }
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+</script>
+</body></html>"#;
+
+/// requestAnimationFrame runs on the frame clock: nested scheduling
+/// advances at ~60 FPS until the loop stops itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn raf_frame_clock_advances() {
+    let mut routes: HashMap<String, (u16, String, Vec<u8>)> = HashMap::new();
+    routes.insert(
+        "/".to_owned(),
+        (200, "text/html".to_owned(), RAF_HTML.as_bytes().to_vec()),
+    );
+    let mut server = LocalServer::start(routes);
+    let url = server.url();
+    server.serve();
+
+    let browser = BrowserApi::start(test_config("raf")).expect("engine start");
+    let tab = browser.new_tab(Some(url));
+    let mut events = browser.events();
+    let seconds = if std::env::var("TSAN_OPTIONS").is_ok() || std::env::var("ASAN_OPTIONS").is_ok()
+    {
+        120
+    } else {
+        20
+    };
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(seconds);
+    let mut saw_done = false;
+    while !saw_done {
+        let event = tokio::time::timeout_at(deadline, events.recv())
+            .await
+            .expect("timeout waiting for rAF events")
+            .expect("event channel alive");
+        if let EngineEvent::ConsoleMessage { text, .. } = event {
+            if text.starts_with("RAF-DONE:") {
+                assert!(text.contains("3:true"), "rAF frames: {text}");
+                saw_done = true;
+            }
+        }
+    }
+    browser.shutdown();
+}

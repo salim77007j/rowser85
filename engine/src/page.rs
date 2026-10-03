@@ -226,14 +226,30 @@ pub(crate) fn run(state: Arc<PageState>, rx: Receiver<Message>) {
             page.handle_js_command(command);
         }
         // Block briefly on engine messages; the timeout lets us do idle work
-        // (dirty re-renders, memory reports).
-        match rx.recv_timeout(Duration::from_millis(250)) {
+        // (dirty re-renders, memory reports). With rAF callbacks pending the
+        // timeout shrinks to one 60 FPS frame slot so the frame clock runs.
+        let frame_pace = !page.pending_raf.is_empty()
+            && page
+                .last_raf
+                .map(|t| t.elapsed() >= Duration::from_millis(12))
+                .unwrap_or(true);
+        let timeout = if frame_pace {
+            Duration::from_millis(4)
+        } else if !page.pending_raf.is_empty() {
+            Duration::from_millis(12)
+        } else {
+            Duration::from_millis(250)
+        };
+        match rx.recv_timeout(timeout) {
             Ok(message) => {
                 if page.handle(message) {
                     break;
                 }
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                if frame_pace {
+                    page.fire_raf();
+                }
                 page.idle();
             }
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
@@ -354,6 +370,12 @@ struct Page {
     history_mirror: rowser_js::HistoryMirrorShared,
     /// Intersection/ResizeObserver registrations shared with the runtime.
     observers_state: rowser_js::ObserversShared,
+    /// Per-tab sessionStorage shared with the runtime.
+    session_store: Rc<RefCell<HashMap<String, String>>>,
+    /// Pending rAF callback ids (fired on the frame clock).
+    pending_raf: Vec<u64>,
+    /// Last rAF frame time (pacing).
+    last_raf: Option<std::time::Instant>,
     /// Last-reported media activity (drives the suspension override).
     media_active: bool,
 }
@@ -408,6 +430,9 @@ impl Page {
             mo_state: rowser_js::MoShared::default(),
             history_mirror: rowser_js::HistoryMirrorShared::default(),
             observers_state: rowser_js::ObserversShared::default(),
+            session_store: Rc::new(RefCell::new(HashMap::new())),
+            pending_raf: Vec::new(),
+            last_raf: None,
             media_active: false,
         }
     }
@@ -596,6 +621,26 @@ impl Page {
                     .unwrap_or(url);
                 tracing::debug!(target: "rowser::engine", "tab {} JS navigation → {absolute}", self.state.tab);
                 self.navigate(absolute);
+            }
+            JsCommand::RafStart { id } => {
+                if !self.pending_raf.contains(&id) {
+                    self.pending_raf.push(id);
+                }
+            }
+            JsCommand::RafClear { id } => {
+                self.pending_raf.retain(|i| *i != id);
+            }
+            JsCommand::ScrollTo { x: _, y } => {
+                // Programmatic scroll: clamp + repaint like the UI wheel path.
+                let max = self
+                    .layout
+                    .as_ref()
+                    .map(|l| (l.content_size.1 - self.viewport.height).max(0.0))
+                    .unwrap_or(0.0);
+                self.scroll_y = y.clamp(0.0, max);
+                self.viewport_mirror.borrow_mut().0 = self.scroll_y;
+                self.repaint();
+                // Sticky/observer refresh runs on the next dirty render.
             }
             JsCommand::HistoryPush { state, url } => self.history_push(state, url),
             JsCommand::HistoryReplace { state, url } => self.history_replace(state, url),
@@ -1905,7 +1950,26 @@ impl Page {
                 tab: self.state.tab,
                 frame: frame.id,
             });
+            // Frame presented: rAF callbacks for this frame run now.
+            self.fire_raf();
         }
+    }
+
+    /// Dispatches pending rAF callbacks into JS. The page loop paces this
+    /// at ~60 FPS while callbacks keep re-scheduling (the loop timeout
+    /// shrinks to 16ms when `pending_raf` is non-empty).
+    fn fire_raf(&mut self) {
+        if self.pending_raf.is_empty() {
+            return;
+        }
+        let ids = std::mem::take(&mut self.pending_raf);
+        self.last_raf = Some(std::time::Instant::now());
+        if let Some(js) = &self.js {
+            for id in ids {
+                js.dispatch(JsEngineEvent::RafFired(id));
+            }
+        }
+        self.mark_if_dirty();
     }
 
     fn run_scripts(&mut self) {
@@ -1945,6 +2009,7 @@ impl Page {
                 mo: Rc::clone(&self.mo_state),
                 history: Rc::clone(&self.history_mirror),
                 observers: Rc::clone(&self.observers_state),
+                session: Rc::clone(&self.session_store),
             };
             *self.viewport_mirror.borrow_mut() =
                 (self.scroll_y, self.viewport.width, self.viewport.height);
@@ -2039,6 +2104,7 @@ impl Page {
             mo: rowser_js::MoShared::default(),
             history: Default::default(),
             observers: Default::default(),
+            session: Default::default(),
         };
         if let Ok(runtime) = JsRuntime::new(JsConfig::default(), bridge) {
             runtime

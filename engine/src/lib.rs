@@ -1110,7 +1110,10 @@ fn handle_page_command(state: &EngineLoop, tab: TabId, command: JsCommand) {
         JsCommand::Navigate { .. }
         | JsCommand::HistoryPush { .. }
         | JsCommand::HistoryReplace { .. }
-        | JsCommand::HistoryGo { .. } => {
+        | JsCommand::HistoryGo { .. }
+        | JsCommand::ScrollTo { .. }
+        | JsCommand::RafStart { .. }
+        | JsCommand::RafClear { .. } => {
             send_page(&state.tabs, tab, |tx| {
                 tx.send(page::Message::JsCommand(command.clone()))
             });
