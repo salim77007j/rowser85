@@ -17,7 +17,10 @@ fn face_count(font_system: &FontSystem) -> usize {
 /// The primary family name of a fontdb face (English preferred).
 fn face_family(face: &cosmic_text::fontdb::FaceInfo) -> String {
     // fontdb guarantees the first family is English US; prefer it.
-    face.families.first().map(|(name, _)| name.clone()).unwrap_or_default()
+    face.families
+        .first()
+        .map(|(name, _)| name.clone())
+        .unwrap_or_default()
 }
 
 /// Decompresses `bytes` into an sfnt (TTF/OTF) payload.
@@ -71,7 +74,10 @@ pub fn register_font_bytes(font_system: &mut FontSystem, css_family: &str, bytes
     match real_family {
         Some(real) => {
             rowser_layout::text::register_web_font(css_family, &real);
-            log::debug!("@font-face '{css_family}' -> '{real}' ({} faces)", after - before);
+            log::debug!(
+                "@font-face '{css_family}' -> '{real}' ({} faces)",
+                after - before
+            );
             true
         }
         None => {

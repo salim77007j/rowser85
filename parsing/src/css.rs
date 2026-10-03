@@ -19,6 +19,7 @@ use lightningcss::properties::position::Position;
 use lightningcss::properties::size::{MaxSize, Size};
 use lightningcss::properties::text::TextAlign as LcTextAlign;
 use lightningcss::properties::Property;
+use lightningcss::rules::font_face::{FontFaceProperty, FontFaceRule as FontFaceRuleDef, Source};
 use lightningcss::rules::style::StyleRule;
 use lightningcss::rules::supports::SupportsCondition;
 use lightningcss::rules::CssRule;
@@ -28,14 +29,14 @@ use lightningcss::values::color::{CssColor, LABColor, RGBA};
 use lightningcss::values::length::{
     Length as LcLength, LengthPercentage, LengthPercentageOrAuto, LengthValue,
 };
-use lightningcss::rules::font_face::{FontFaceProperty, Source, FontFaceRule as FontFaceRuleDef};
 use rowser_dom::{parse_selector_list, SelectorList};
 
 use crate::cascade::{
-    AlignItemsMode, BorderEdgeRaw, ClearMode, DisplayMode, FloatMode, FlexDirectionMode, FlexWrapMode,
-    FontSizeRaw, FontStyleMode, FontWeightRaw, GridLineRaw, GridPlacementRaw, JustifyContentMode,
-    Length, LengthOrAuto, LineHeightRaw, LineStyleMode, NamedAreaRaw, OverflowMode, PositionMode,
-    Rgba, StyleProps, TextAlignMode, TrackBoundRaw, TrackRaw, VisibilityMode,
+    AlignItemsMode, BorderEdgeRaw, ClearMode, DisplayMode, FlexDirectionMode, FlexWrapMode,
+    FloatMode, FontSizeRaw, FontStyleMode, FontWeightRaw, GridLineRaw, GridPlacementRaw,
+    JustifyContentMode, Length, LengthOrAuto, LineHeightRaw, LineStyleMode, NamedAreaRaw,
+    OverflowMode, PositionMode, Rgba, StyleProps, TextAlignMode, TrackBoundRaw, TrackRaw,
+    VisibilityMode,
 };
 
 /// One style rule ready for cascade.
@@ -1202,9 +1203,7 @@ fn convert_overflow(value: &lightningcss::properties::overflow::OverflowKeyword)
     }
 }
 
-fn convert_visibility(
-    value: &lightningcss::properties::display::Visibility,
-) -> VisibilityMode {
+fn convert_visibility(value: &lightningcss::properties::display::Visibility) -> VisibilityMode {
     use lightningcss::properties::display::Visibility;
     match value {
         Visibility::Visible => VisibilityMode::Visible,

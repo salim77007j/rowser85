@@ -28,7 +28,10 @@ mod grid_sheet_tests {
         for node in doc.dom.subtree_elements(doc.dom.document()) {
             if let Some(id) = doc.dom.get_attr(node, "id") {
                 if let Some(cs) = styles.get(node) {
-                    println!("GRIDTEST {id} col={:?} row={:?}", cs.grid_column, cs.grid_row);
+                    println!(
+                        "GRIDTEST {id} col={:?} row={:?}",
+                        cs.grid_column, cs.grid_row
+                    );
                 }
             }
         }
@@ -37,7 +40,10 @@ mod grid_sheet_tests {
             &doc.dom,
             &[sheet],
             &MediaContext::default(),
-            Viewport { width: 800.0, height: 600.0 },
+            Viewport {
+                width: 800.0,
+                height: 600.0,
+            },
             &Default::default(),
         );
         let mut by_id = std::collections::HashMap::new();
@@ -51,7 +57,10 @@ mod grid_sheet_tests {
         let a = by_id["a"];
         let b = by_id["b"];
         println!("GRIDTEST a={a:?} b={b:?}");
-        assert!((a.w - 244.0).abs() < 3.0, "a spans 2 cols (120+4+120): {a:?}");
+        assert!(
+            (a.w - 244.0).abs() < 3.0,
+            "a spans 2 cols (120+4+120): {a:?}"
+        );
         assert!((b.x - 372.0).abs() < 3.0, "b at col 4 (x=372): {b:?}");
     }
 
@@ -78,7 +87,10 @@ mod grid_sheet_tests {
             dom,
             &sheets,
             &media,
-            Viewport { width: 1360.0, height: 860.0 },
+            Viewport {
+                width: 1360.0,
+                height: 860.0,
+            },
             &Default::default(),
         );
         let mut by_id = std::collections::HashMap::new();
@@ -103,8 +115,14 @@ mod grid_sheet_tests {
             "b: {b:?}"
         );
         let d = by_id.get("d").expect("d");
-        assert!((d.x - 128.0).abs() < 3.0 && (d.y - 132.0).abs() < 3.0, "d: {d:?}");
-        assert!((d.w - 244.0).abs() < 3.0 && (d.h - 104.0).abs() < 4.0, "d size: {d:?}");
+        assert!(
+            (d.x - 128.0).abs() < 3.0 && (d.y - 132.0).abs() < 3.0,
+            "d: {d:?}"
+        );
+        assert!(
+            (d.w - 244.0).abs() < 3.0 && (d.h - 104.0).abs() < 4.0,
+            "d size: {d:?}"
+        );
     }
 
     fn dom_id(dom: &rowser_dom::Dom, node: rowser_dom::NodeId) -> Option<String> {

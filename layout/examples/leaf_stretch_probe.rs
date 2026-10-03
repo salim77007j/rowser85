@@ -8,8 +8,16 @@ fn main() {
     for (label, overflow_hidden) in [("overflow:Hidden", true), ("overflow:Visible", false)] {
         let mut tree: TaffyTree<()> = TaffyTree::new();
         let ov = || taffy::geometry::Point {
-            x: if overflow_hidden { taffy::Overflow::Hidden } else { taffy::Overflow::Visible },
-            y: if overflow_hidden { taffy::Overflow::Hidden } else { taffy::Overflow::Visible },
+            x: if overflow_hidden {
+                taffy::Overflow::Hidden
+            } else {
+                taffy::Overflow::Visible
+            },
+            y: if overflow_hidden {
+                taffy::Overflow::Hidden
+            } else {
+                taffy::Overflow::Visible
+            },
         };
         let leaf_style = Style {
             display: Display::Block,
@@ -51,7 +59,10 @@ fn main() {
                 let w = width.unwrap_or(699.4);
                 let h = if width.is_some() { 28.0 } else { 28.0 };
                 LayoutOutput {
-                    size: Size { width: w.min(699.4), height: h },
+                    size: Size {
+                        width: w.min(699.4),
+                        height: h,
+                    },
                     scrollable_overflow_rect: taffy::geometry::Rect::ZERO,
                     baselines: Baselines::NONE,
                     top_margin: CollapsibleMarginSet::ZERO,
@@ -90,8 +101,15 @@ fn main() {
             tree2
                 .compute_layout_with_measure(
                     container2,
-                    Size { width: AvailableSpace::Definite(1360.0), height: AvailableSpace::Definite(860.0) },
-                    |input: LayoutInput, _n: taffy::NodeId, _c: Option<&mut ()>, _s: &Style| -> LayoutOutput {
+                    Size {
+                        width: AvailableSpace::Definite(1360.0),
+                        height: AvailableSpace::Definite(860.0),
+                    },
+                    |input: LayoutInput,
+                     _n: taffy::NodeId,
+                     _c: Option<&mut ()>,
+                     _s: &Style|
+                     -> LayoutOutput {
                         let w = match input.known_dimensions.width {
                             Some(w) => Some(w.max(0.0)),
                             None => match input.available_space.width {
@@ -100,7 +118,10 @@ fn main() {
                             },
                         };
                         LayoutOutput {
-                            size: Size { width: w.unwrap_or(699.4).min(699.4), height: 28.0 },
+                            size: Size {
+                                width: w.unwrap_or(699.4).min(699.4),
+                                height: 28.0,
+                            },
                             scrollable_overflow_rect: taffy::geometry::Rect::ZERO,
                             baselines: Baselines::NONE,
                             top_margin: CollapsibleMarginSet::ZERO,
@@ -122,8 +143,7 @@ fn main() {
         let c = tree.layout(container).unwrap();
         println!(
             "{label}: leaf final = {:.1}x{:.1} @ ({:.1},{:.1}); container = {:.1}x{:.1}",
-            l.size.width, l.size.height, l.location.x, l.location.y,
-            c.size.width, c.size.height
+            l.size.width, l.size.height, l.location.x, l.location.y, c.size.width, c.size.height
         );
     }
 }

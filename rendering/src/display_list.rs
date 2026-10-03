@@ -168,20 +168,23 @@ fn intersect_clip(a: Option<Rect>, b: Option<Rect>) -> Option<Rect> {
             let x1 = (a.x + a.w).min(b.x + b.w);
             let y1 = (a.y + a.h).min(b.y + b.h);
             if x1 <= x0 || y1 <= y0 {
-                return Some(Rect { x: x0, y: y0, w: 0.0, h: 0.0 });
+                return Some(Rect {
+                    x: x0,
+                    y: y0,
+                    w: 0.0,
+                    h: 0.0,
+                });
             }
-            Some(Rect { x: x0, y: y0, w: x1 - x0, h: y1 - y0 })
+            Some(Rect {
+                x: x0,
+                y: y0,
+                w: x1 - x0,
+                h: y1 - y0,
+            })
         }
         (Some(a), None) | (None, Some(a)) => Some(a),
         (None, None) => None,
     }
-}
-
-/// True when the subtree must not paint: `opacity: 0` or
-/// `visibility: hidden` (children can re-enable visibility).
-fn subtree_hidden_by_paint(style: &ComputedStyle) -> bool {
-    style.opacity <= 0.01
-        || style.visibility == rowser_parsing::cascade::VisibilityMode::Hidden
 }
 
 fn layout_root(dom: &Dom) -> Option<NodeId> {

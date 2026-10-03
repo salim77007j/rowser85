@@ -27,8 +27,8 @@ use taffy::style::{
     LengthPercentageAuto, Overflow as TaffyOverflow, Position as TaffyPosition, Style,
 };
 use taffy::style::{
-    Clear as TaffyClear, Float as TaffyFloat, GridPlacement, GridTemplateArea,
-    GridTemplateAreas, GridTemplateComponent, MaxTrackSizingFunction, MinTrackSizingFunction,
+    Clear as TaffyClear, Float as TaffyFloat, GridPlacement, GridTemplateArea, GridTemplateAreas,
+    GridTemplateComponent, MaxTrackSizingFunction, MinTrackSizingFunction,
 };
 use taffy::style_helpers::TaffyAuto;
 use taffy::style_helpers::{
@@ -179,9 +179,7 @@ impl LayoutEngine {
             .map(|cs| {
                 let m = &cs.margins;
                 let px = |v: &rowser_parsing::cascade::LengthOrAuto| match v {
-                    rowser_parsing::cascade::LengthOrAuto::Length(l) => {
-                        l.resolve(cs.font_size)
-                    }
+                    rowser_parsing::cascade::LengthOrAuto::Length(l) => l.resolve(cs.font_size),
                     rowser_parsing::cascade::LengthOrAuto::Auto => 0.0,
                 };
                 (px(&m.left), px(&m.top), px(&m.right), px(&m.bottom))
@@ -197,14 +195,12 @@ impl LayoutEngine {
         // (content at x=0); this keeps the margin semantics while staying
         // definite. An explicit author width (px/em) wins.
         let mut root_style = taffy_style(styles.get(root).unwrap_or(&ComputedStyle::default()));
-        let root_has_author_width = styles.get(root).is_some_and(|cs| {
-            !matches!(cs.width, rowser_parsing::cascade::LengthOrAuto::Auto)
-        });
+        let root_has_author_width = styles
+            .get(root)
+            .is_some_and(|cs| !matches!(cs.width, rowser_parsing::cascade::LengthOrAuto::Auto));
         if !root_has_author_width {
             root_style.size = TaffySize {
-                width: Dimension::length(
-                    (viewport.width - root_margin.0 - root_margin.2).max(0.0),
-                ),
+                width: Dimension::length((viewport.width - root_margin.0 - root_margin.2).max(0.0)),
                 height: Dimension::AUTO,
             };
         }
@@ -272,10 +268,7 @@ impl TableGrids {
     pub fn collect(dom: &Dom, root: NodeId) -> Self {
         let mut grids = TableGrids::default();
         for node in dom.descendants(root) {
-            if dom
-                .element(node)
-                .is_some_and(|e| &*e.name.local == "table")
-            {
+            if dom.element(node).is_some_and(|e| &*e.name.local == "table") {
                 let (cells, cols) = table_grid(dom, node);
                 grids.cells.extend(cells);
                 grids.cols.insert(node, cols);
@@ -306,10 +299,7 @@ fn table_grid(dom: &Dom, table: NodeId) -> (HashMap<NodeId, TableCellPlacement>,
                 "tr" => rows.push(child),
                 "tbody" | "thead" | "tfoot" => {
                     for sub in dom.flat_children(child) {
-                        if dom
-                            .element(sub)
-                            .is_some_and(|e| &*e.name.local == "tr")
-                        {
+                        if dom.element(sub).is_some_and(|e| &*e.name.local == "tr") {
                             rows.push(sub);
                         }
                     }
@@ -342,9 +332,8 @@ fn table_grid(dom: &Dom, table: NodeId) -> (HashMap<NodeId, TableCellPlacement>,
             let rowspan = span_attr(cell, "rowspan");
             // First slot (from the row cursor) where the whole span fits.
             while col < 10_000 {
-                let fits = (row..row + rowspan).all(|r| {
-                    (col..col + colspan).all(|c| !occupied.contains(&(r, c)))
-                });
+                let fits = (row..row + rowspan)
+                    .all(|r| (col..col + colspan).all(|c| !occupied.contains(&(r, c))));
                 if fits {
                     break;
                 }
@@ -591,7 +580,11 @@ fn taffy_style(cs: &ComputedStyle) -> Style {
         grid_row: grid_line_pair(cs.grid_row),
         grid_column: grid_line_pair(cs.grid_column),
         grid_auto_rows: cs.grid_auto_rows.iter().map(track_auto_sizing_fn).collect(),
-        grid_auto_columns: cs.grid_auto_columns.iter().map(track_auto_sizing_fn).collect(),
+        grid_auto_columns: cs
+            .grid_auto_columns
+            .iter()
+            .map(track_auto_sizing_fn)
+            .collect(),
         ..Style::default()
     }
 }
@@ -635,9 +628,7 @@ fn grid_line_placement(side: rowser_parsing::cascade::GridLineRaw) -> GridPlacem
 }
 
 /// Maps a (start, end) placement pair onto a taffy Line<GridPlacement>.
-fn grid_line_pair(
-    placement: rowser_parsing::cascade::GridPlacementRaw,
-) -> Line<GridPlacement> {
+fn grid_line_pair(placement: rowser_parsing::cascade::GridPlacementRaw) -> Line<GridPlacement> {
     Line {
         start: grid_line_placement(placement.start),
         end: grid_line_placement(placement.end),
@@ -768,30 +759,19 @@ fn build_box(
             ),
         };
     }
-    if dom
-        .element(node)
-        .is_some_and(|e| &*e.name.local == "table")
+    if dom.element(node).is_some_and(|e| &*e.name.local == "table")
         && style.display == TaffyDisplay::Grid
     {
         if let Some(&cols) = tables.cols.get(&node) {
-            let definite_width = styles.get(node).is_some_and(|cs| {
-                !matches!(
-                    cs.width,
-                    rowser_parsing::cascade::LengthOrAuto::Auto
-                )
-            });
+            let definite_width = styles
+                .get(node)
+                .is_some_and(|cs| !matches!(cs.width, rowser_parsing::cascade::LengthOrAuto::Auto));
             style.grid_template_columns = (0..cols)
                 .map(|_| {
                     if definite_width {
-                        GridTemplateComponent::Single(minmax(
-                            track_auto(),
-                            fr(1.0),
-                        ))
+                        GridTemplateComponent::Single(minmax(track_auto(), fr(1.0)))
                     } else {
-                        GridTemplateComponent::Single(minmax(
-                            track_auto(),
-                            track_auto(),
-                        ))
+                        GridTemplateComponent::Single(minmax(track_auto(), track_auto()))
                     }
                 })
                 .collect();
@@ -976,7 +956,13 @@ fn collect_children(
                             // §9.2.1), not after the block children.
                             if !text.is_empty() {
                                 flush_text_leaf(
-                                    tree, node, text, spans, &ctx.clone(), children, false,
+                                    tree,
+                                    node,
+                                    text,
+                                    spans,
+                                    &ctx.clone(),
+                                    children,
+                                    false,
                                 );
                             }
                             if let Some(t) = build_box(
@@ -1034,9 +1020,7 @@ fn collect_children(
                         // <table>, or lines around <br>) glued into one
                         // leaf appended AFTER the block boxes.
                         if !text.is_empty() {
-                            flush_text_leaf(
-                                tree, node, text, spans, &ctx.clone(), children, false,
-                            );
+                            flush_text_leaf(tree, node, text, spans, &ctx.clone(), children, false);
                         }
                         if let Some(t) = build_box(
                             dom,
@@ -1322,7 +1306,6 @@ mod tests {
     use rowser_parsing::css::{parse_stylesheet, MediaContext};
     use rowser_parsing::html::parse_html;
 
-
     /// Finds the first element with `tag` under the layout root.
     fn find_tag(dom: &Dom, tag: &str) -> Option<NodeId> {
         dom.subtree_elements(dom.document()).find(|n| {
@@ -1347,7 +1330,10 @@ mod tests {
             &doc.dom,
             &[sheet],
             &MediaContext::default(),
-            Viewport { width: 800.0, height: 600.0 },
+            Viewport {
+                width: 800.0,
+                height: 600.0,
+            },
             &Default::default(),
         );
         let divs: Vec<Rect> = doc
@@ -1357,8 +1343,8 @@ mod tests {
             .filter_map(|n| layout.rects.get(&n).copied())
             .collect();
         let float = divs[1]; // first inner div = the float
-        // The float's containing block chain starts at the body content
-        // edge (UA 8px margin), matching Chrome.
+                             // The float's containing block chain starts at the body content
+                             // edge (UA 8px margin), matching Chrome.
         assert!((float.x - 8.0).abs() < 1.0, "float at left edge: {float:?}");
         assert!((float.w - 200.0).abs() < 1.0, "float width: {float:?}");
         // The block box may span the full width (CSS: blocks overlap floats),
@@ -1393,7 +1379,10 @@ mod tests {
             &doc.dom,
             &[sheet],
             &MediaContext::default(),
-            Viewport { width: 800.0, height: 600.0 },
+            Viewport {
+                width: 800.0,
+                height: 600.0,
+            },
             &Default::default(),
         );
         let float = *layout
@@ -1437,7 +1426,10 @@ mod tests {
             &doc.dom,
             &[sheet],
             &MediaContext::default(),
-            Viewport { width: 800.0, height: 600.0 },
+            Viewport {
+                width: 800.0,
+                height: 600.0,
+            },
             &Default::default(),
         );
         let cleared = layout
@@ -1465,7 +1457,10 @@ mod tests {
             &doc.dom,
             &[sheet],
             &MediaContext::default(),
-            Viewport { width: 800.0, height: 600.0 },
+            Viewport {
+                width: 800.0,
+                height: 600.0,
+            },
             &Default::default(),
         );
         let ps: Vec<Rect> = doc
@@ -1505,7 +1500,10 @@ mod tests {
             &doc.dom,
             &[sheet],
             &MediaContext::default(),
-            Viewport { width: 800.0, height: 600.0 },
+            Viewport {
+                width: 800.0,
+                height: 600.0,
+            },
             &Default::default(),
         );
         let mut by_id = HashMap::new();
@@ -1517,11 +1515,20 @@ mod tests {
             }
         }
         let a = by_id["a"];
-        assert!((a.x - 0.0).abs() < 1.0 && (a.w - 200.0).abs() < 2.0, "A spans cols 1-3: {a:?}");
+        assert!(
+            (a.x - 0.0).abs() < 1.0 && (a.w - 200.0).abs() < 2.0,
+            "A spans cols 1-3: {a:?}"
+        );
         let b = by_id["b"];
-        assert!((b.x - 200.0).abs() < 1.0 && (b.w - 100.0).abs() < 2.0, "B in col 3: {b:?}");
+        assert!(
+            (b.x - 200.0).abs() < 1.0 && (b.w - 100.0).abs() < 2.0,
+            "B in col 3: {b:?}"
+        );
         let c = by_id["c"];
-        assert!((c.y - 60.0).abs() < 1.0 && (c.w - 200.0).abs() < 2.0, "C spans 2 cols in row 2: {c:?}");
+        assert!(
+            (c.y - 60.0).abs() < 1.0 && (c.w - 200.0).abs() < 2.0,
+            "C spans 2 cols in row 2: {c:?}"
+        );
     }
 
     /// `grid-area: r1 / c1 / r2 / c2` (4-line form) places the item.
@@ -1537,7 +1544,10 @@ mod tests {
             &doc.dom,
             &[sheet],
             &MediaContext::default(),
-            Viewport { width: 800.0, height: 600.0 },
+            Viewport {
+                width: 800.0,
+                height: 600.0,
+            },
             &Default::default(),
         );
         let mut rect = None;
@@ -1567,7 +1577,10 @@ mod tests {
             &doc.dom,
             &[sheet],
             &MediaContext::default(),
-            Viewport { width: 800.0, height: 600.0 },
+            Viewport {
+                width: 800.0,
+                height: 600.0,
+            },
             &Default::default(),
         );
         let node_id = |id: &str| -> NodeId {
@@ -1579,10 +1592,7 @@ mod tests {
             panic!("no node for {id}")
         };
         let table = *layout.rects.get(&node_id("full")).expect("table rect");
-        assert!(
-            (table.w - 800.0).abs() < 8.0,
-            "full-width table: {table:?}"
-        );
+        assert!((table.w - 800.0).abs() < 8.0, "full-width table: {table:?}");
         let c2 = *layout.rects.get(&node_id("c2")).expect("c2 rect");
         assert!(c2.x >= 399.0, "second column in the right half: {c2:?}");
     }
@@ -1604,7 +1614,10 @@ mod tests {
             &doc.dom,
             &[sheet],
             &MediaContext::default(),
-            Viewport { width: 800.0, height: 600.0 },
+            Viewport {
+                width: 800.0,
+                height: 600.0,
+            },
             &Default::default(),
         );
         let rect = |id: &str| -> Rect {
@@ -1636,7 +1649,10 @@ mod tests {
             .map(|run| run.glyphs.first().map(|g| g.y as f32).unwrap_or(-1.0))
             .collect();
         assert_eq!(ys.len(), 3, "three br-separated lines: {ys:?}");
-        assert!(ys[1] > ys[0] + 5.0 && ys[2] > ys[1] + 5.0, "br lines stack: {ys:?}");
+        assert!(
+            ys[1] > ys[0] + 5.0 && ys[2] > ys[1] + 5.0,
+            "br lines stack: {ys:?}"
+        );
         // Text before the block child stays ABOVE the nested table cell.
         let label_y = layout
             .text
@@ -1667,7 +1683,10 @@ mod tests {
             &doc.dom,
             &[sheet],
             &MediaContext::default(),
-            Viewport { width: 800.0, height: 600.0 },
+            Viewport {
+                width: 800.0,
+                height: 600.0,
+            },
             &Default::default(),
         );
         let rect = |id: &str| -> Rect {
@@ -1684,7 +1703,10 @@ mod tests {
         let b = rect("b");
         let x1 = rect("x1");
         let x2 = rect("x2");
-        assert!(b.x >= wide.x + wide.w - 1.0, "B starts after the colspan span: wide={wide:?} b={b:?}");
+        assert!(
+            b.x >= wide.x + wide.w - 1.0,
+            "B starts after the colspan span: wide={wide:?} b={b:?}"
+        );
         // The span covers the sum of the two single-cell columns (which
         // carry their own content constraints from row 2).
         assert!(
@@ -1712,7 +1734,10 @@ mod tests {
             &doc.dom,
             &[sheet],
             &MediaContext::default(),
-            Viewport { width: 800.0, height: 600.0 },
+            Viewport {
+                width: 800.0,
+                height: 600.0,
+            },
             &Default::default(),
         );
         let rect = |id: &str| -> Rect {
@@ -1729,7 +1754,10 @@ mod tests {
         let r1 = rect("r1");
         let r2 = rect("r2");
         // The spanning cell is beside r1 (same row)...
-        assert!((tall.y - r1.y).abs() < 1.0, "tall aligns with row 1: tall={tall:?} r1={r1:?}");
+        assert!(
+            (tall.y - r1.y).abs() < 1.0,
+            "tall aligns with row 1: tall={tall:?} r1={r1:?}"
+        );
         // ...and covers row 2's band vertically.
         assert!(
             tall.y + tall.h >= r2.y + r2.h - 2.0,
@@ -1758,7 +1786,10 @@ mod tests {
             &doc.dom,
             &[sheet],
             &MediaContext::default(),
-            Viewport { width: 800.0, height: 600.0 },
+            Viewport {
+                width: 800.0,
+                height: 600.0,
+            },
             &Default::default(),
         );
         let rect = |id: &str| -> Rect {
@@ -1772,17 +1803,34 @@ mod tests {
             panic!("no rect for {id}");
         };
         let (h, l, a, b, c, d) = (
-            rect("h"), rect("l"), rect("a"), rect("b"), rect("c"), rect("d"),
+            rect("h"),
+            rect("l"),
+            rect("a"),
+            rect("b"),
+            rect("c"),
+            rect("d"),
         );
         // Header spans the full three-column width.
-        assert!(h.w >= a.w + b.w + 2.0 * (a.x - l.x) - 4.0 || h.w > 2.0 * a.w, "header spans: h={h:?}");
+        assert!(
+            h.w >= a.w + b.w + 2.0 * (a.x - l.x) - 4.0 || h.w > 2.0 * a.w,
+            "header spans: h={h:?}"
+        );
         // Row 2: rail + a + b side by side, a right of l.
         assert!(a.x > l.x + l.w - 2.0, "a right of rail: l={l:?} a={a:?}");
-        assert!((b.x - (a.x + a.w)).abs() < 3.0, "b follows a: a={a:?} b={b:?}");
+        assert!(
+            (b.x - (a.x + a.w)).abs() < 3.0,
+            "b follows a: a={a:?} b={b:?}"
+        );
         // Row 3 (below the rowspan): c and d shifted into the rail's
         // column band only if the rail no longer occupies it.
-        assert!((c.y - (l.y + l.h)).abs() < 40.0, "c below the rowspan: l={l:?} c={c:?}");
-        assert!((d.x - (c.x + c.w)).abs() < 3.0, "d follows c: c={c:?} d={d:?}");
+        assert!(
+            (c.y - (l.y + l.h)).abs() < 40.0,
+            "c below the rowspan: l={l:?} c={c:?}"
+        );
+        assert!(
+            (d.x - (c.x + c.w)).abs() < 3.0,
+            "d follows c: c={c:?} d={d:?}"
+        );
     }
 
     /// `grid-auto-rows` sizes implicit rows.
@@ -1798,7 +1846,10 @@ mod tests {
             &doc.dom,
             &[sheet],
             &MediaContext::default(),
-            Viewport { width: 800.0, height: 600.0 },
+            Viewport {
+                width: 800.0,
+                height: 600.0,
+            },
             &Default::default(),
         );
         let mut by_id = HashMap::new();
@@ -1809,9 +1860,21 @@ mod tests {
                 }
             }
         }
-        assert!((by_id["r1"].h - 40.0).abs() < 1.0, "auto row height 40: {:?}", by_id["r1"]);
-        assert!((by_id["r3"].y - 40.0).abs() < 1.0, "row 2 at y=40: {:?}", by_id["r3"]);
-        assert!((by_id["r2"].x - 100.0).abs() < 1.0, "r2 in col 2: {:?}", by_id["r2"]);
+        assert!(
+            (by_id["r1"].h - 40.0).abs() < 1.0,
+            "auto row height 40: {:?}",
+            by_id["r1"]
+        );
+        assert!(
+            (by_id["r3"].y - 40.0).abs() < 1.0,
+            "row 2 at y=40: {:?}",
+            by_id["r3"]
+        );
+        assert!(
+            (by_id["r2"].x - 100.0).abs() < 1.0,
+            "r2 in col 2: {:?}",
+            by_id["r2"]
+        );
     }
 
     /// The built-in media viewer page: video must fill the width and get a
@@ -1930,11 +1993,7 @@ mod tests {
         let body_rect = layout.rects.get(&body).cloned().unwrap();
         // Chrome semantics: body carries the UA 8px margin, so the border
         // box is inset 8px and spans viewport - 16.
-        assert!(
-            (body_rect.x - 8.0).abs() < 1.0,
-            "body x {}",
-            body_rect.x
-        );
+        assert!((body_rect.x - 8.0).abs() < 1.0, "body x {}", body_rect.x);
         assert!(
             (body_rect.w - 784.0).abs() < 1.0,
             "body width {}",

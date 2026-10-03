@@ -1,8 +1,8 @@
 // Deterministic probe: register the three test fonts, then shape text whose
 // CSS stack names the web families and report the resolved family + metrics.
-use rowser_layout::text::shape;
+use rowser_layout::text::{shape, SpanStyle};
 use rowser_layout::TextLeaf;
-use rowser_layout::text::SpanStyle;
+use rowser_parsing::cascade::{FontStyleMode, Rgba, TextAlignMode};
 
 fn leaf_with_stack(text: &str, stack: &[&str]) -> TextLeaf {
     TextLeaf {
@@ -32,11 +32,8 @@ fn main() {
     ];
     for (family, path) in faces {
         let bytes = std::fs::read(path).unwrap();
-        let ok = rowser_engine::font_face::register_font_bytes(
-            &mut engine.font_system,
-            family,
-            &bytes,
-        );
+        let ok =
+            rowser_engine::font_face::register_font_bytes(&mut engine.font_system, family, &bytes);
         println!("register {family} ({} bytes): {ok}", bytes.len());
     }
     // Shape with each web family before the stack fallback.
@@ -49,7 +46,12 @@ fn main() {
         let lines = shape(&mut leaf, &mut engine.font_system, Some(1200.0));
         let n_glyphs: usize = lines.iter().map(|l| l.glyphs.len()).sum();
         let width: f32 = lines.iter().map(|l| l.w).sum();
-        println!("{label}: lines={} glyphs={} width={:.1}", lines.len(), n_glyphs, width);
+        println!(
+            "{label}: lines={} glyphs={} width={:.1}",
+            lines.len(),
+            n_glyphs,
+            width
+        );
     }
     // Reference: the same text shaped with plain monospace fallback.
     let mut leaf = leaf_with_stack("The quick brown fox", &["NotLoadedFace", "monospace"]);
@@ -60,7 +62,11 @@ fn main() {
     let mut leaf = leaf_with_stack("The quick brown fox", &["DejaVu Serif"]);
     let lines = shape(&mut leaf, &mut engine.font_system, Some(1200.0));
     let width: f32 = lines.iter().map(|l| l.w).sum();
-    println!("dejavu-serif direct: lines={} width={:.1}", lines.len(), width);
+    println!(
+        "dejavu-serif direct: lines={} width={:.1}",
+        lines.len(),
+        width
+    );
     // Generic sans-serif: which face does cosmic-text pick, and how wide?
     for family in ["sans-serif", "DejaVu Sans", "Liberation Sans", "Noto Sans"] {
         let mut leaf = leaf_with_stack("The quick brown fox", &[family]);

@@ -219,22 +219,44 @@ mod tests {
             &doc.dom,
             &[author],
             &MediaContext::default(),
-            Viewport { width: 800.0, height: 600.0 },
+            Viewport {
+                width: 800.0,
+                height: 600.0,
+            },
             &Default::default(),
         );
-        let list = build_display_list(&doc.dom, &styles, &layout, &Default::default(), &Default::default(), &Default::default());
+        let list = build_display_list(
+            &doc.dom,
+            &styles,
+            &layout,
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+        );
         let mut painter = Painter::new();
         let mut options = RenderOptions::default();
         options.viewport_width = 400;
         options.viewport_height = 300;
-        let frame = painter.render(&list, options, &mut engine.font_system).expect("frame");
+        let frame = painter
+            .render(&list, options, &mut engine.font_system)
+            .expect("frame");
         let px = |x: usize, y: usize| {
             let i = (y * frame.width as usize + x) * 4;
             (frame.pixels[i], frame.pixels[i + 1], frame.pixels[i + 2])
         };
         assert_eq!(px(100, 60), (255, 0, 0), "inside clip is red");
-        assert_eq!(px(100, 115), (0, 0, 255), "below clip (inside body) is blue, got {:?}", px(100, 115));
-        assert_eq!(px(300, 60), (0, 0, 255), "right of clip is blue, got {:?}", px(300, 60));
+        assert_eq!(
+            px(100, 115),
+            (0, 0, 255),
+            "below clip (inside body) is blue, got {:?}",
+            px(100, 115)
+        );
+        assert_eq!(
+            px(300, 60),
+            (0, 0, 255),
+            "right of clip is blue, got {:?}",
+            px(300, 60)
+        );
     }
 
     /// opacity: 0 and visibility: hidden hide subtrees entirely.
@@ -251,15 +273,27 @@ mod tests {
             &doc.dom,
             &[author],
             &MediaContext::default(),
-            Viewport { width: 800.0, height: 600.0 },
+            Viewport {
+                width: 800.0,
+                height: 600.0,
+            },
             &Default::default(),
         );
-        let list = build_display_list(&doc.dom, &styles, &layout, &Default::default(), &Default::default(), &Default::default());
+        let list = build_display_list(
+            &doc.dom,
+            &styles,
+            &layout,
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+        );
         let mut painter = Painter::new();
         let mut options = RenderOptions::default();
         options.viewport_width = 200;
         options.viewport_height = 150;
-        let frame = painter.render(&list, options, &mut engine.font_system).expect("frame");
+        let frame = painter
+            .render(&list, options, &mut engine.font_system)
+            .expect("frame");
         for p in frame.pixels.chunks_exact(4) {
             let rgb = (p[0], p[1], p[2]);
             assert!(
@@ -268,5 +302,4 @@ mod tests {
             );
         }
     }
-
 }

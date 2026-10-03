@@ -16,7 +16,11 @@ fn main() {
         .and_then(|s| s.split("</style>").next())
         .expect("style block")
         .to_owned();
-    let media = MediaContext { width: 1360.0, height: 860.0, dark_mode: false };
+    let media = MediaContext {
+        width: 1360.0,
+        height: 860.0,
+        dark_mode: false,
+    };
     let sheets = vec![parse_stylesheet(&css, &media)];
     let doc = parse_html(html.as_bytes());
     let mut engine = rowser_layout::LayoutEngine::new();
@@ -27,24 +31,31 @@ fn main() {
         ("WebTestC", "/home/z/my-project/fonttest/wtest.ttf"),
     ] {
         let bytes = std::fs::read(path).unwrap();
-        let ok = rowser_engine::font_face::register_font_bytes(
-            &mut engine.font_system,
-            family,
-            &bytes,
-        );
+        let ok =
+            rowser_engine::font_face::register_font_bytes(&mut engine.font_system, family, &bytes);
         println!("registered {family}: {ok}");
     }
     let (styles, layout) = engine.layout_document(
         &doc.dom,
         &sheets,
         &media,
-        Viewport { width: 1360.0, height: 860.0 },
+        Viewport {
+            width: 1360.0,
+            height: 860.0,
+        },
         &Default::default(),
     );
 
     for (node, rect) in layout.rects.iter() {
-        let name = doc.dom.element(*node).map(|e| e.name.local.to_string()).unwrap_or_default();
-        println!("  rect node={} <{}>: x={:.1} y={:.1} w={:.1} h={:.1}", node, name, rect.x, rect.y, rect.w, rect.h);
+        let name = doc
+            .dom
+            .element(*node)
+            .map(|e| e.name.local.to_string())
+            .unwrap_or_default();
+        println!(
+            "  rect node={} <{}>: x={:.1} y={:.1} w={:.1} h={:.1}",
+            node, name, rect.x, rect.y, rect.w, rect.h
+        );
     }
 
     // Computed style dump for body/h1/first-row.
@@ -57,15 +68,31 @@ fn main() {
             };
             println!(
                 "style node={probe}: font_size={:.1} line_h={:.1} stack={:?} margins=({},{},{},{})",
-                cs.font_size, cs.line_height, cs.font_stack,
-                fmt(&m.top), fmt(&m.right), fmt(&m.bottom), fmt(&m.left)
+                cs.font_size,
+                cs.line_height,
+                cs.font_stack,
+                fmt(&m.top),
+                fmt(&m.right),
+                fmt(&m.bottom),
+                fmt(&m.left)
             );
         } else {
             println!("style node={probe}: NOT FOUND");
         }
     }
-    let list = build_display_list(&doc.dom, &styles, &layout, &Default::default(), &Default::default(), &Default::default());
-    println!("display list: {} commands, {} text runs", list.commands.len(), layout.text.len());
+    let list = build_display_list(
+        &doc.dom,
+        &styles,
+        &layout,
+        &Default::default(),
+        &Default::default(),
+        &Default::default(),
+    );
+    println!(
+        "display list: {} commands, {} text runs",
+        list.commands.len(),
+        layout.text.len()
+    );
     for run in layout.text.iter().take(10) {
         let first = run.glyphs.first();
         println!(
@@ -85,14 +112,19 @@ fn main() {
             let mut n: usize = 0;
             let mut flush = |line_y: Option<i32>, x0: i32, x1: i32, n: usize| {
                 if let Some(y) = line_y {
-                    println!("  run node={} line@y={} x {}..{} ({} glyphs)", run.node, y, x0, x1, n);
+                    println!(
+                        "  run node={} line@y={} x {}..{} ({} glyphs)",
+                        run.node, y, x0, x1, n
+                    );
                 }
             };
             for g in run.glyphs.iter() {
                 if line_y.map(|ly: i32| (g.y - ly).abs() > 2).unwrap_or(true) {
                     flush(line_y, x0, x1, n);
                     line_y = Some(g.y);
-                    x0 = i32::MAX; x1 = i32::MIN; n = 0;
+                    x0 = i32::MAX;
+                    x1 = i32::MIN;
+                    n = 0;
                 }
                 x0 = x0.min(g.x);
                 x1 = x1.max(g.x);

@@ -15,7 +15,11 @@ mod wiki_real_tests {
         let dom = &doc.dom;
         // collect all css: inline <style> elements + the link stylesheets
         let mut sheets = Vec::new();
-        let media = MediaContext { width: 1360.0, height: 860.0, dark_mode: false };
+        let media = MediaContext {
+            width: 1360.0,
+            height: 860.0,
+            dark_mode: false,
+        };
         for node in dom.subtree_elements(dom.document()) {
             if dom.element(node).is_some_and(|e| &*e.name.local == "style") {
                 let text = dom.text_content(node);
@@ -53,7 +57,10 @@ mod wiki_real_tests {
             dom,
             &sheets,
             &media,
-            Viewport { width: 1360.0, height: 860.0 },
+            Viewport {
+                width: 1360.0,
+                height: 860.0,
+            },
             &Default::default(),
         );
         let rect = layout.rects.get(&infobox).expect("infobox rect");
@@ -98,7 +105,10 @@ mod wiki_real_tests {
                 loop {
                     match dom.flat_parent_element(n) {
                         Some(p) => {
-                            let name = dom.element(p).map(|e| e.name.local.to_string()).unwrap_or_default();
+                            let name = dom
+                                .element(p)
+                                .map(|e| e.name.local.to_string())
+                                .unwrap_or_default();
                             let cls = dom.get_attr(p, "class").unwrap_or_default().to_string();
                             let cls = cls.split_whitespace().next().unwrap_or("").to_string();
                             out.push(format!("{name}.{cls}"));
@@ -106,17 +116,25 @@ mod wiki_real_tests {
                         }
                         None => break,
                     }
-                    if out.len() > 12 { break; }
+                    if out.len() > 12 {
+                        break;
+                    }
                 }
                 out
             };
             eprintln!("WIKI infobox chain: {:?}", chain(infobox));
             for run in &layout.text {
-                if in_infobox.contains(&run.node) { continue; }
+                if in_infobox.contains(&run.node) {
+                    continue;
+                }
                 let g = run.glyphs.first().unwrap();
                 let gy = g.y as f32;
                 if gy >= rect.y && gy <= rect.y + rect.h && g.x as f32 > rect.x + 4.0 {
-                    eprintln!("WIKI overlapping-run node={} chain={:?}", u64::from(run.node), chain(run.node));
+                    eprintln!(
+                        "WIKI overlapping-run node={} chain={:?}",
+                        u64::from(run.node),
+                        chain(run.node)
+                    );
                     break;
                 }
             }

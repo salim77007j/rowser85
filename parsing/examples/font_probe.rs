@@ -9,7 +9,11 @@ fn main() {
     @font-face { font-family: 'WebTestC'; src: url(wtest.ttf); }
     p { color: red; }
     "#;
-    let media = MediaContext { width: 1360.0, height: 860.0, dark_mode: false };
+    let media = MediaContext {
+        width: 1360.0,
+        height: 860.0,
+        dark_mode: false,
+    };
     let sheet = parse_stylesheet(css, &media);
     println!("font_faces: {}", sheet.font_faces.len());
     for face in &sheet.font_faces {

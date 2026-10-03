@@ -13,8 +13,8 @@
 //!                                 (tokio runtime + timer service)
 //! ```
 
-pub mod memory;
 pub mod font_face;
+pub mod memory;
 pub mod page;
 
 use std::collections::HashMap;

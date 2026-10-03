@@ -149,7 +149,14 @@ impl Painter {
                     colors,
                 } => {
                     let rect = translate(rect, scroll);
-                    paint_border(pixmap, &rect, *widths, *colors, viewport, clips.last().copied());
+                    paint_border(
+                        pixmap,
+                        &rect,
+                        *widths,
+                        *colors,
+                        viewport,
+                        clips.last().copied(),
+                    );
                 }
                 DrawCmd::Text { run } => {
                     self.paint_run(
@@ -218,9 +225,19 @@ fn intersect(a: &Rect, b: &Rect) -> Rect {
     let x1 = (a.x + a.w).min(b.x + b.w);
     let y1 = (a.y + a.h).min(b.y + b.h);
     if x1 <= x0 || y1 <= y0 {
-        return Rect { x: x0, y: y0, w: 0.0, h: 0.0 };
+        return Rect {
+            x: x0,
+            y: y0,
+            w: 0.0,
+            h: 0.0,
+        };
     }
-    Rect { x: x0, y: y0, w: x1 - x0, h: y1 - y0 }
+    Rect {
+        x: x0,
+        y: y0,
+        w: x1 - x0,
+        h: y1 - y0,
+    }
 }
 
 fn translate(rect: &Rect, scroll: (f32, f32)) -> Rect {
@@ -416,7 +433,14 @@ fn blit_glyph(
                     if a > 0 {
                         let px = base_x + off_x;
                         if px >= 0 && px < w && px >= gx0 && px < gx1 {
-                            blend_pixel(pixmap, row_y as usize * stride + px as usize * 4, r, g, b, a);
+                            blend_pixel(
+                                pixmap,
+                                row_y as usize * stride + px as usize * 4,
+                                r,
+                                g,
+                                b,
+                                a,
+                            );
                         }
                     }
                     i += 4;

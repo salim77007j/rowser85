@@ -26,13 +26,23 @@ fn main() {
             &doc.dom,
             &[sheet],
             &MediaContext::default(),
-            Viewport { width: 800.0, height: 600.0 },
+            Viewport {
+                width: 800.0,
+                height: 600.0,
+            },
             &Default::default(),
         );
         for (node, r) in layout.rects.iter() {
-            let el = doc.dom.element(*node).map(|e| e.name.local.to_string()).unwrap_or_default();
+            let el = doc
+                .dom
+                .element(*node)
+                .map(|e| e.name.local.to_string())
+                .unwrap_or_default();
             let id = doc.dom.get_attr(*node, "id").unwrap_or("");
-            println!("{name}: <{el} id={id}> x={:.1} y={:.1} w={:.1} h={:.1}", r.x, r.y, r.w, r.h);
+            println!(
+                "{name}: <{el} id={id}> x={:.1} y={:.1} w={:.1} h={:.1}",
+                r.x, r.y, r.w, r.h
+            );
         }
     }
 }

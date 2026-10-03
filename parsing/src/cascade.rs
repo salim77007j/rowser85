@@ -1572,7 +1572,11 @@ mod custom_property_tests {
             other => panic!("body margin-top not a length: {other:?}"),
         }
         let h1 = map.get(first_tag(&doc, "h1")).expect("h1 style");
-        assert!((h1.font_size - 26.0).abs() < 0.1, "h1 font-size {} (UA 2em won)", h1.font_size);
+        assert!(
+            (h1.font_size - 26.0).abs() < 0.1,
+            "h1 font-size {} (UA 2em won)",
+            h1.font_size
+        );
     }
 
     #[test]
