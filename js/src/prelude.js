@@ -1921,6 +1921,23 @@
   globalThis.alert = globalThis.confirm = globalThis.prompt = function () {};
   globalThis.requestAnimationFrame = function (cb) { return setTimeout(cb, 16); };
   globalThis.cancelAnimationFrame = function (id) { clearTimeout(id); };
+  // matchMedia with real evaluation against the live viewport (the same
+  // machinery the style engine uses). MediaQueryList change events are a
+  // documented gap: matches is correct at read time, no resize listeners.
   globalThis.matchMedia = function (q) {
-    return { matches: false, media: String(q), addEventListener() {}, removeEventListener() {} };
+    const media = String(q);
+    let matches = false;
+    try { matches = !!__native_match_media(media); } catch (e) { matches = false; }
+    return {
+      media,
+      matches,
+      onchange: null,
+      addListener(cb) { /* legacy alias: change events not yet delivered */ },
+      removeListener() {},
+      addEventListener() {},
+      removeEventListener() {},
+      dispatchEvent() { return false; },
+    };
   };
+})();
+

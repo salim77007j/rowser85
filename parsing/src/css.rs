@@ -121,6 +121,29 @@ pub fn parse_stylesheet(css: &str, media: &MediaContext) -> ParsedStylesheet {
     out
 }
 
+/// Evaluates one `window.matchMedia()` query string against a viewport —
+/// the JS-side entry into the same media machinery the style engine uses.
+/// Unknown/invalid queries parse as non-matching (Chrome's behavior for
+/// unknown features is false, not throw).
+pub fn media_query_matches_str(query: &str, ctx: &MediaContext) -> bool {
+    let wrapped = format!("@media {query} {{}}");
+    let Ok(sheet) = StyleSheet::parse(
+        wrapped.as_str(),
+        ParserOptions {
+            error_recovery: true,
+            ..ParserOptions::default()
+        },
+    ) else {
+        return false;
+    };
+    for rule in &sheet.rules.0 {
+        if let CssRule::Media(media_rule) = rule {
+            return media_matches(&media_rule.query, ctx);
+        }
+    }
+    false
+}
+
 fn collect_rules(
     rules: &[CssRule<'_>],
     media: &MediaContext,

@@ -998,6 +998,22 @@ impl JsRuntime {
                 })?,
             )?;
 
+            // --- matchMedia: real evaluation against the live viewport ---
+            let b = Rc::clone(&bridge);
+            globals.set(
+                "__native_match_media",
+                Function::new(ctx.clone(), move |query: String| -> bool {
+                    let (scroll_y, width, height) = *b.viewport.borrow();
+                    let _ = scroll_y;
+                    let ctx = rowser_parsing::css::MediaContext {
+                        width,
+                        height,
+                        dark_mode: false,
+                    };
+                    rowser_parsing::css::media_query_matches_str(&query, &ctx)
+                })?,
+            )?;
+
             // --- history API ---
             let b = Rc::clone(&bridge);
             globals.set(
@@ -2355,6 +2371,26 @@ mod tests {
             runtime.eval("JSON.stringify({a: 1})", "test.js").unwrap(),
             "{\"a\":1}"
         );
+    }
+
+    #[test]
+    fn match_media_evaluates_viewport_queries() {
+        let (runtime, _dom) = runtime_with_dom(b"<html><body></body></html>");
+        let out = runtime
+            .eval(
+                r#"[
+                  matchMedia('(max-width: 800px)').matches,
+                  matchMedia('(min-width: 800px)').matches,
+                  matchMedia('screen').matches,
+                  matchMedia('print').matches,
+                  matchMedia('(min-width: 100px) and (max-width: 200px)').matches,
+                ].map(function (v) { return v ? '1' : '0'; }).join('')"#,
+                "test.js",
+            )
+            .unwrap();
+        // Viewport width is 0 in the test runtime: max-width true,
+        // min-width false, screen true, print false, and-range false.
+        assert_eq!(out, "10100", "matchMedia results: {out}");
     }
 
     #[test]
