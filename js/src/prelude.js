@@ -41,12 +41,18 @@
   // innerWidth/innerHeight/scrollY unblocks every player framework's
   // sizing logic (they measured 0x0 before).
   try {
-    Object.defineProperty(globalThis, 'scrollY', { configurable: true, get: function () { return __native_dom_viewport().scrollY || 0; } });
+    // The viewport native returns a JSON string — parse once per read.
+    // (Reading `.scrollY` off the raw string silently gave undefined/0;
+    // scrollY/scrollBy/innerWidth all read 0 before this.)
+    function viewportInfo() {
+      try { return JSON.parse(__native_dom_viewport()) || {}; } catch (e) { return {}; }
+    }
+    Object.defineProperty(globalThis, 'scrollY', { configurable: true, get: function () { return viewportInfo().scrollY || 0; } });
     Object.defineProperty(globalThis, 'scrollX', { configurable: true, get: function () { return 0; } }); // vertical-only engine
     Object.defineProperty(globalThis, 'pageYOffset', { configurable: true, get: function () { return window.scrollY || 0; } });
     Object.defineProperty(globalThis, 'pageXOffset', { configurable: true, get: function () { return 0; } });
-    Object.defineProperty(globalThis, 'innerWidth', { configurable: true, get: function () { return __native_dom_viewport().width || 1360; } });
-    Object.defineProperty(globalThis, 'innerHeight', { configurable: true, get: function () { return __native_dom_viewport().height || 760; } });
+    Object.defineProperty(globalThis, 'innerWidth', { configurable: true, get: function () { return viewportInfo().width || 1360; } });
+    Object.defineProperty(globalThis, 'innerHeight', { configurable: true, get: function () { return viewportInfo().height || 760; } });
     Object.defineProperty(globalThis, 'outerWidth', { configurable: true, get: function () { return window.innerWidth; } });
     Object.defineProperty(globalThis, 'outerHeight', { configurable: true, get: function () { return window.innerHeight; } });
   } catch (e) {}
@@ -60,7 +66,8 @@
   globalThis.scrollBy = function (x, y) {
     const o = (x && typeof x === 'object') ? x : null;
     const dy = o ? (Number(o.top) || 0) : (Number(y) || 0);
-    const cur = (__native_dom_viewport() || {}).scrollY || 0;
+    let cur = 0;
+    try { cur = (JSON.parse(__native_dom_viewport()) || {}).scrollY || 0; } catch (e) {}
     __native_scroll_to(0, cur + dy);
   };
   globalThis.focus = function () {};

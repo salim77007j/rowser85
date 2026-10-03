@@ -567,6 +567,66 @@ const SCRIPT_EVENTS_HTML: &str = r#"<!DOCTYPE html><html><head><title>Script Eve
 const PARSER_JS: &str = "console.log('SL:PARSER-RAN');";
 const DYNAMIC_JS: &str = "console.log('SL:DYNAMIC-RAN');";
 
+const SCROLL_HTML: &str = r#"<!DOCTYPE html><html><head><title>Scroll</title></head><body>
+<div style="height:3000px; background:#eee"></div>
+<script>
+  // Programmatic scroll: the command routes to the page thread, which
+  // clamps to content, updates the scroll mirror (scrollY, rect queries)
+  // and repaints.
+  scrollTo(0, 500);
+  setTimeout(function () {
+    console.log('SCROLL:' + Math.round(window.scrollY));
+    scrollBy(0, 250);
+    setTimeout(function () {
+      console.log('SCROLL2:' + Math.round(window.scrollY));
+    }, 120);
+  }, 120);
+</script>
+</body></html>"#;
+
+/// window.scrollTo/scrollBy update the scroll mirror (scrollY) end-to-end.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn programmatic_scroll_updates_mirror() {
+    let mut routes: HashMap<String, (u16, String, Vec<u8>)> = HashMap::new();
+    routes.insert(
+        "/".to_owned(),
+        (200, "text/html".to_owned(), SCROLL_HTML.as_bytes().to_vec()),
+    );
+    let mut server = LocalServer::start(routes);
+    let url = server.url();
+    server.serve();
+
+    let browser = BrowserApi::start(test_config("scroll")).expect("engine start");
+    let _tab = browser.new_tab(Some(url));
+    let mut events = browser.events();
+    let seconds = if std::env::var("TSAN_OPTIONS").is_ok() || std::env::var("ASAN_OPTIONS").is_ok()
+    {
+        120
+    } else {
+        20
+    };
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(seconds);
+    let mut saw1 = false;
+    let mut saw2 = false;
+    while !(saw1 && saw2) {
+        let event = tokio::time::timeout_at(deadline, events.recv())
+            .await
+            .expect("timeout waiting for scroll markers")
+            .expect("event channel alive");
+        if let EngineEvent::ConsoleMessage { text, .. } = event {
+            if text.starts_with("SCROLL:") {
+                assert!(text.ends_with("500"), "scrollTo: {text}");
+                saw1 = true;
+            }
+            if text.starts_with("SCROLL2:") {
+                assert!(text.ends_with("750"), "scrollBy: {text}");
+                saw2 = true;
+            }
+        }
+    }
+    browser.shutdown();
+}
+
 /// Script load-event dispatch: parser scripts, dynamic `src` scripts
 /// (fetch + execute + load), inline dynamic scripts, `error` on failed
 /// fetches, and window `load` firing exactly once.
@@ -618,9 +678,6 @@ async fn script_load_events_end_to_end() {
             .expect("timeout waiting for script event markers")
             .expect("event channel alive");
         if let EngineEvent::ConsoleMessage { text, .. } = event {
-            if std::env::var("SL_DEBUG").is_ok() {
-                eprintln!("[SL-DEBUG] console: {text}");
-            }
             if text.starts_with("SL:") {
                 saw.insert(text.trim().to_owned());
             }
