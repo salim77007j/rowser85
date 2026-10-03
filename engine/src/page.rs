@@ -59,6 +59,16 @@ pub enum Message {
         /// Script source.
         code: String,
     },
+    /// A dynamically-inserted <script src> finished fetching; evaluate it
+    /// and fire the element's `load` (or `error`) event.
+    ScriptCodeFetched {
+        /// DOM handle of the script element.
+        node: u64,
+        /// Script source (or an error message to console.error).
+        code: String,
+        /// Fetch success — `true` fires `load`, `false` fires `error`.
+        ok: bool,
+    },
     /// A command from JavaScript (timers, fetches, ...).
     JsCommand(JsCommand),
     /// An event to dispatch into JavaScript.
@@ -471,6 +481,25 @@ impl Page {
             Message::SubresourceFailed { url, pending, .. } => {
                 self.pending.remove(&url);
                 let _ = pending;
+                // A failed parser-inserted <script src> fires `error` on
+                // the element (async error paths depend on it).
+                if let Some((_, _, node)) = self
+                    .scripts
+                    .iter()
+                    .find(|(src, code, _)| src.as_deref() == Some(url.as_str()) && code.is_empty())
+                    .cloned()
+                {
+                    if node != 0 {
+                        if let Some(js) = &self.js {
+                            let _ = js.eval(
+                                &format!(
+                                    "globalThis.__fireElementEvent && __fireElementEvent({node}, 'error');"
+                                ),
+                                "script-error-event.js",
+                            );
+                        }
+                    }
+                }
                 // Page-side truth (same race as above): only complete when
                 // nothing we asked for is still outstanding. A failed
                 // *document* leaves dom empty — subresources_complete ends
@@ -481,6 +510,9 @@ impl Page {
             }
             Message::WorkerScriptFetched { worker, code } => {
                 self.spawn_worker(worker, code);
+            }
+            Message::ScriptCodeFetched { node, code, ok } => {
+                self.run_dynamic_script(node, code, ok);
             }
             Message::JsEvent(event) => {
                 if let Some(js) = &self.js {
@@ -573,6 +605,10 @@ impl Page {
             JsCommand::WorkerTerminate { id } => {
                 self.workers.remove(&id);
             }
+            // NOTE: ScriptFetch must NOT be handled here — it falls into the
+            // `other` arm below and is forwarded to the engine, whose
+            // network task fetches the bytes and replies with
+            // Message::ScriptCodeFetched.
             JsCommand::MarkDirty => {
                 self.dirty = true;
             }
@@ -2083,6 +2119,18 @@ impl Page {
                         "current-script-clear.js",
                     );
                 }
+                // HTML: the element's `load` event fires when the script has
+                // executed. Sites gate async bootstraps on this (Wikipedia's
+                // loader, analytics bundles, JSONP callbacks). Non-bubbling:
+                // window 'load' listeners must not see per-script events.
+                if *node != 0 {
+                    let _ = js.eval(
+                        &format!(
+                            "globalThis.__fireElementEvent && __fireElementEvent({node}, 'load');"
+                        ),
+                        "script-load-event.js",
+                    );
+                }
                 if std::env::var("ROWSER_UI_TRACE").is_ok()
                     && t0.elapsed() > std::time::Duration::from_millis(300)
                 {
@@ -2101,6 +2149,63 @@ impl Page {
         if std::env::var("ROWSER_UI_TRACE").is_ok() {
             eprintln!("[page-{}] run_scripts done", self.state.tab);
         }
+    }
+
+    /// A dynamically-inserted `<script src>` finished fetching: evaluate
+    /// its code in the page runtime and fire the element's `load` (ok) or
+    /// `error` (failure) event — the contract every async loader
+    /// (`script.onload = boot`, JSONP, module preloads) depends on.
+    fn run_dynamic_script(&mut self, node: u64, code: String, ok: bool) {
+        let node_id = node as NodeId;
+        if self
+            .dom
+            .as_ref()
+            .is_none_or(|d| !d.borrow().is_valid(node_id))
+        {
+            return; // script was removed from the document while fetching
+        }
+        if let Some(js) = &self.js {
+            if ok {
+                let name = self
+                    .dom
+                    .as_ref()
+                    .and_then(|d| d.borrow().get_attr(node_id, "src").map(str::to_owned))
+                    .unwrap_or_else(|| "dynamic-script.js".to_owned());
+                if node != 0 {
+                    let _ = js.eval(
+                        &format!("globalThis.__setCurrentScript && __setCurrentScript({node})"),
+                        "current-script.js",
+                    );
+                }
+                if let Err(err) = js.eval(&code, &name) {
+                    let _ = self.state.event_tx.send(EngineEvent::ConsoleMessage {
+                        tab: self.state.tab,
+                        level: "error".to_owned(),
+                        text: format!("{name}: {err}"),
+                    });
+                }
+                if node != 0 {
+                    let _ = js.eval(
+                        "globalThis.__setCurrentScript && __setCurrentScript(0)",
+                        "current-script-clear.js",
+                    );
+                }
+            } else {
+                // Fetch failure: `error` on the element, plus the console
+                // diagnostic the engine-side task embedded in `code`.
+                let _ = js.eval(&code, "script-fetch-error.js");
+            }
+            let event = if ok { "load" } else { "error" };
+            if node != 0 {
+                let _ = js.eval(
+                    &format!(
+                        "globalThis.__fireElementEvent && __fireElementEvent({node}, '{event}');"
+                    ),
+                    "script-load-event.js",
+                );
+            }
+        }
+        self.mark_if_dirty();
     }
 
     fn spawn_worker(&mut self, worker: u64, code: String) {

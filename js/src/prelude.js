@@ -310,6 +310,42 @@
         tryUpgrade(h, __native_dom_tagName(h));
       }
     }
+    // Dynamic <script> semantics: a script "prepares" when it is inserted
+    // into the document — `src` scripts are fetched by the engine and
+    // execute on arrival (firing load/error); inline scripts run now.
+    // createElement('script') + appendChild is how every async loader,
+    // JSONP endpoint and module preloader injects code.
+    const scripts = JSON.parse(__native_dom_findCustomTags(rootHandle, '["script"]') || '[]');
+    for (const h of scripts) scriptMaybeStart(h);
+  }
+
+  // HTML "prepare the script element": runs once per insertion. `src`
+  // scripts delegate to the engine (network + eval + load/error events);
+  // inline scripts execute synchronously here, global scope, with
+  // currentScript set, then fire their `load` event (non-bubbling).
+  function scriptMaybeStart(h) {
+    if (!h || !__native_dom_isConnected(h)) return;
+    const w = wrapElement(h);
+    if (w._scriptStarted) return;
+    const src = __native_dom_getAttr(h, 'src');
+    if (src) {
+      w._scriptStarted = true;
+      let abs = String(src);
+      if (!/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(abs) && typeof env !== 'undefined') {
+        try { abs = new URL(abs, env.location).href; } catch (e) {}
+      }
+      if (globalThis.__native_script_fetch) __native_script_fetch(h, abs);
+    } else {
+      const text = __native_dom_textContent(h);
+      if (text && String(text).trim()) {
+        w._scriptStarted = true;
+        __setCurrentScript(h);
+        try { (0, eval)(String(text)); }
+        catch (e) { console.error('inline script: ' + errString(e)); }
+        __setCurrentScript(0);
+        if (globalThis.__fireElementEvent) __fireElementEvent(h, 'load');
+      }
+    }
   }
 
   // Before removal: collect custom descendants of a connected subtree so
@@ -593,6 +629,35 @@
     document._currentScript = h ? wrapElement(h) : null;
   };
 
+  // ------------------------------------------------------------------ on* handler properties
+  // `el.onload = fn` / `script.onerror = fn` are the most common event
+  // subscription style on real sites (async script loaders above all).
+  // Stored in the same `_ls` store `addEventListener` uses, so both forms
+  // fire from the same dispatch path (`fireAt`).
+  const onEventNames = ['load', 'error', 'click', 'dblclick', 'input', 'change',
+    'submit', 'reset', 'keydown', 'keyup', 'keypress', 'mousedown', 'mouseup',
+    'mousemove', 'mouseover', 'mouseout', 'mouseenter', 'mouseleave', 'focus',
+    'blur', 'scroll', 'wheel', 'contextmenu', 'abort', 'toggle', 'play',
+    'pause', 'ended', 'waiting', 'canplay', 'playing', 'progress',
+    'loadedmetadata', 'loadeddata', 'durationchange', 'timeupdate',
+    'volumechange', 'ratechange', 'emptied', 'message', 'open', 'close',
+    'hashchange', 'popstate', 'beforeunload', 'unload', 'pageshow',
+    'pagehide', 'resize', 'transitionend', 'animationstart', 'animationend',
+    'animationiteration', 'DOMContentLoaded'];
+  for (const en of onEventNames) {
+    Object.defineProperty(Element.prototype, 'on' + en, {
+      get: function () {
+        const l = this._ls && this._ls[en];
+        return (l && l.length) ? l[0] : null;
+      },
+      set: function (cb) {
+        const ls = (this._ls = this._ls || {});
+        ls[en] = (typeof cb === 'function') ? [cb] : [];
+      },
+      configurable: true,
+    });
+  }
+
   // ------------------------------------------------------------------ DOM classes
   // `class X extends HTMLElement` is ubiquitous; without the HTML* element
   // classes every modern framework's class registration throws.
@@ -666,7 +731,33 @@
     HTMLSpanElement: class HTMLSpanElement extends HTMLElementBase {},
     HTMLAnchorElement: class HTMLAnchorElement extends HTMLElementBase {},
     HTMLImageElement: class HTMLImageElement extends HTMLElementBase {},
-    HTMLScriptElement: class HTMLScriptElement extends HTMLElementBase {},
+    // Script elements: `src` assignment/attribute on a connected element
+    // prepares the script (fetch + execute + load/error events), matching
+    // the `s.src = url; head.appendChild(s)` and
+    // `s.setAttribute('src', ...)` loader patterns.
+    HTMLScriptElement: class HTMLScriptElement extends HTMLElementBase {
+      get src() { return this.getAttribute('src') || ''; }
+      set src(v) {
+        this.setAttribute('src', v);
+        if (this.isConnected) scriptMaybeStart(this._h);
+      }
+      setAttribute(n, v) {
+        super.setAttribute(n, v);
+        if (String(n).toLowerCase() === 'src' && this.isConnected) {
+          const w = wrapElement(this._h);
+          if (w) w._scriptStarted = false;
+          scriptMaybeStart(this._h);
+        }
+      }
+      get async() { return this.hasAttribute('async'); }
+      set async(v) { if (v) this.setAttribute('async', ''); else this.removeAttribute('async'); }
+      get defer() { return this.hasAttribute('defer'); }
+      set defer(v) { if (v) this.setAttribute('defer', ''); else this.removeAttribute('defer'); }
+      get type() { return this.getAttribute('type') || ''; }
+      set type(v) { this.setAttribute('type', v); }
+      get text() { return this.textContent; }
+      set text(v) { this.textContent = v; }
+    },
     HTMLStyleElement: class HTMLStyleElement extends HTMLElementBase {},
     HTMLLinkElement: class HTMLLinkElement extends HTMLElementBase {},
     HTMLInputElement: class HTMLInputElement extends HTMLElementBase {},
@@ -1588,6 +1679,17 @@
     }
   }
 
+  // Non-bubbling element dispatch — HTML reserves `load`/`error` on
+  // <script>/<img>/<link> as element-target events: they must NOT reach
+  // document/window listeners (a window 'load' listener firing once per
+  // script would double-boot half the web).
+  globalThis.__fireElementEvent = function (handle, type) {
+    const el = wrapElement(handle);
+    const ev = new Event(type);
+    ev.target = el;
+    fireAt(handle, type, ev);
+  };
+
   globalThis.__onDomEvent = function (handle, type) {
     const el = wrapElement(handle);
     const ev = new Event(type);
@@ -1620,6 +1722,9 @@
     (winListeners[type] || []).forEach(function (cb) { try { cb(ev); } catch (e) { __native_console('error', 'DOMContentLoaded handler: ' + errString(e)); } });
     const docLs = document._ls && document._ls[type];
     if (docLs) { try { docLs(ev); } catch (e) { __native_console('error', 'DOMContentLoaded doc handler: ' + (e && e.message)); } }
+    // `window.onload = fn` / `window.onpopstate = fn` inline handlers.
+    const inline = globalThis['on' + type];
+    if (typeof inline === 'function') { try { inline(ev); } catch (e) { __native_console('error', 'on' + type + ' handler: ' + errString(e)); } }
   };
 
   // ------------------------------------------------------------------ media events + MSE

@@ -1252,6 +1252,41 @@ fn handle_page_command(state: &EngineLoop, tab: TabId, command: JsCommand) {
                 );
             });
         }
+        JsCommand::ScriptFetch { node, url } => {
+            // A dynamically-inserted <script src>: fetch the bytes, hand
+            // them to the page thread which evaluates them and fires the
+            // element's `load` (or `error`) event.
+            let request = rowser_networking::FetchRequest {
+                url: url.clone(),
+                resource_type: rowser_networking::ResourceKind::Script,
+                source_url: state.source_url(tab),
+                top_site: None,
+                ..rowser_networking::FetchRequest::default()
+            };
+            let network = Arc::clone(&state.network);
+            let cmd_tx = state.cmd_tx.clone();
+            state.runtime.spawn(async move {
+                let outcome = rowser_networking::fetch(&network, request).await;
+                let (code, ok) = match outcome {
+                    Ok(response) if response.is_success() => {
+                        (String::from_utf8_lossy(&response.body).into_owned(), true)
+                    }
+                    Ok(response) => (
+                        format!("console.error('script failed: HTTP {}');", response.status),
+                        false,
+                    ),
+                    Err(err) => (
+                        format!("console.error('script fetch failed: {err}');"),
+                        false,
+                    ),
+                };
+                send_page_direct(
+                    cmd_tx,
+                    tab,
+                    page::Message::ScriptCodeFetched { node, code, ok },
+                );
+            });
+        }
         JsCommand::WorkerPost { .. } | JsCommand::WorkerTerminate { .. } => {
             // Handled locally by the page thread.
         }

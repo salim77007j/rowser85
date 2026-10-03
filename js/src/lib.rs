@@ -278,6 +278,15 @@ pub enum JsCommand {
         /// Script URL.
         url: String,
     },
+    /// Fetch a dynamically-inserted `<script src>` (createElement +
+    /// appendChild); the engine fetches the bytes, the page thread
+    /// evaluates them and fires `load`/`error` on the element.
+    ScriptFetch {
+        /// DOM handle of the script element.
+        node: u64,
+        /// Absolute or page-relative URL.
+        url: String,
+    },
     /// Post a message to a worker.
     WorkerPost {
         /// Worker id.
@@ -1390,6 +1399,17 @@ impl JsRuntime {
                 Function::new(ctx.clone(), move |id: u64| {
                     if let Some(out) = &b.outgoing {
                         let _ = out.send(JsCommand::WorkerTerminate { id });
+                    }
+                })?,
+            )?;
+
+            // --- dynamic <script src> fetch requests (from afterInsert) ---
+            let b = Rc::clone(&bridge);
+            globals.set(
+                "__native_script_fetch",
+                Function::new(ctx.clone(), move |node: u64, url: String| {
+                    if let Some(out) = &b.outgoing {
+                        let _ = out.send(JsCommand::ScriptFetch { node, url });
                     }
                 })?,
             )?;

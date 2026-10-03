@@ -305,7 +305,7 @@ async fn history_pushstate_popstate_roundtrip() {
     server.serve();
 
     let browser = BrowserApi::start(test_config("history")).expect("engine start");
-    let tab = browser.new_tab(Some(url.clone()));
+    let _tab = browser.new_tab(Some(url.clone()));
     let mut events = browser.events();
 
     let seconds = if std::env::var("TSAN_OPTIONS").is_ok() || std::env::var("ASAN_OPTIONS").is_ok()
@@ -375,7 +375,7 @@ async fn observers_fire_with_real_geometry() {
     server.serve();
 
     let browser = BrowserApi::start(test_config("observers")).expect("engine start");
-    let tab = browser.new_tab(Some(url));
+    let _tab = browser.new_tab(Some(url));
     let mut events = browser.events();
 
     let seconds = if std::env::var("TSAN_OPTIONS").is_ok() || std::env::var("ASAN_OPTIONS").is_ok()
@@ -440,7 +440,6 @@ async fn session_storage_survives_reload() {
         20
     };
     let deadline = tokio::time::Instant::now() + Duration::from_secs(seconds);
-    let mut count = 0;
     let mut saw = 0usize;
     while saw < 1 {
         let event = tokio::time::timeout_at(deadline, events.recv())
@@ -453,7 +452,6 @@ async fn session_storage_survives_reload() {
                 saw += 1;
             }
         }
-        count += 1;
     }
     // Reload the same tab: the store must persist (per-tab lifetime).
     browser.reload(tab);
@@ -503,7 +501,7 @@ async fn raf_frame_clock_advances() {
     server.serve();
 
     let browser = BrowserApi::start(test_config("raf")).expect("engine start");
-    let tab = browser.new_tab(Some(url));
+    let _tab = browser.new_tab(Some(url));
     let mut events = browser.events();
     let seconds = if std::env::var("TSAN_OPTIONS").is_ok() || std::env::var("ASAN_OPTIONS").is_ok()
     {
@@ -526,4 +524,148 @@ async fn raf_frame_clock_advances() {
         }
     }
     browser.shutdown();
+}
+
+const SCRIPT_EVENTS_HTML: &str = r#"<!DOCTYPE html><html><head><title>Script Events</title>
+</head><body>
+<div id="out">x</div>
+<script>
+  // Registers a load listener on a parser-inserted <script src> that comes
+  // LATER in document order (the whole DOM exists before any script runs,
+  // but scripts execute in order — so this listener is live when the
+  // external script executes and fires its load event).
+  var ps = document.getElementById('late-parser');
+  ps.addEventListener('load', function () { console.log('SL:PARSER-LOADED'); });
+  ps.addEventListener('error', function () { console.log('SL:PARSER-ERROR'); });
+
+  // 1) Dynamic external script: createElement + src + onload + appendChild.
+  var s = document.createElement('script');
+  s.src = '/dynamic.js';
+  s.onload = function () { console.log('SL:DYN-LOADED'); };
+  s.onerror = function () { console.log('SL:DYN-ERROR'); };
+  document.head.appendChild(s);
+
+  // 2) Inline dynamic script: runs at insertion, fires load.
+  var s2 = document.createElement('script');
+  s2.textContent = "console.log('SL:INLINE-RAN');";
+  s2.onload = function () { console.log('SL:INLINE-LOADED'); };
+  document.body.appendChild(s2);
+
+  // 3) Error path: missing script fires onerror, not onload.
+  var s3 = document.createElement('script');
+  s3.src = '/missing.js';
+  s3.onload = function () { console.log('SL:MISS-LOADED'); };
+  s3.onerror = function () { console.log('SL:MISS-ERROR'); };
+  document.body.appendChild(s3);
+
+  // 4) window.onload inline handler must fire exactly once.
+  window.onload = function () { console.log('SL:WINDOW-ONLOAD'); };
+</script>
+<script id="late-parser" src="/parser.js"></script>
+</body></html>"#;
+
+const PARSER_JS: &str = "console.log('SL:PARSER-RAN');";
+const DYNAMIC_JS: &str = "console.log('SL:DYNAMIC-RAN');";
+
+/// Script load-event dispatch: parser scripts, dynamic `src` scripts
+/// (fetch + execute + load), inline dynamic scripts, `error` on failed
+/// fetches, and window `load` firing exactly once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn script_load_events_end_to_end() {
+    let mut routes: HashMap<String, (u16, String, Vec<u8>)> = HashMap::new();
+    routes.insert(
+        "/".to_owned(),
+        (
+            200,
+            "text/html".to_owned(),
+            SCRIPT_EVENTS_HTML.as_bytes().to_vec(),
+        ),
+    );
+    routes.insert(
+        "/parser.js".to_owned(),
+        (
+            200,
+            "text/javascript".to_owned(),
+            PARSER_JS.as_bytes().to_vec(),
+        ),
+    );
+    routes.insert(
+        "/dynamic.js".to_owned(),
+        (
+            200,
+            "text/javascript".to_owned(),
+            DYNAMIC_JS.as_bytes().to_vec(),
+        ),
+    );
+    let mut server = LocalServer::start(routes);
+    let url = server.url();
+    server.serve();
+
+    let browser = BrowserApi::start(test_config("script-events")).expect("engine start");
+    let _tab = browser.new_tab(Some(url));
+    let mut events = browser.events();
+    let seconds = if std::env::var("TSAN_OPTIONS").is_ok() || std::env::var("ASAN_OPTIONS").is_ok()
+    {
+        120
+    } else {
+        20
+    };
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(seconds);
+    let mut saw = std::collections::HashSet::new();
+    while saw.len() < 8 {
+        let event = tokio::time::timeout_at(deadline, events.recv())
+            .await
+            .expect("timeout waiting for script event markers")
+            .expect("event channel alive");
+        if let EngineEvent::ConsoleMessage { text, .. } = event {
+            if std::env::var("SL_DEBUG").is_ok() {
+                eprintln!("[SL-DEBUG] console: {text}");
+            }
+            if text.starts_with("SL:") {
+                saw.insert(text.trim().to_owned());
+            }
+        }
+    }
+    browser.shutdown();
+
+    // Executed...
+    assert!(saw.contains("SL:PARSER-RAN"), "parser script ran: {saw:?}");
+    assert!(
+        saw.contains("SL:DYNAMIC-RAN"),
+        "dynamic script ran: {saw:?}"
+    );
+    assert!(
+        saw.contains("SL:INLINE-RAN"),
+        "inline dynamic script ran: {saw:?}"
+    );
+    // ...and their load events fired (parser load via addEventListener on
+    // the element, dynamic load + inline load via on-properties)...
+    assert!(
+        saw.contains("SL:PARSER-LOADED"),
+        "parser script load event: {saw:?}"
+    );
+    assert!(
+        saw.contains("SL:DYN-LOADED"),
+        "dynamic script load event: {saw:?}"
+    );
+    assert!(
+        saw.contains("SL:INLINE-LOADED"),
+        "inline script load event: {saw:?}"
+    );
+    // ...the failure path errored...
+    assert!(
+        saw.contains("SL:MISS-ERROR"),
+        "missing script error: {saw:?}"
+    );
+    assert!(
+        !saw.contains("SL:MISS-LOADED"),
+        "missing script must not load: {saw:?}"
+    );
+    // ...and window onload fired exactly once (guard: the test only exits
+    // the loop when all 8 distinct markers arrive; WINDOW-ONLOAD is the 8th).
+    assert!(
+        saw.contains("SL:WINDOW-ONLOAD"),
+        "window.onload fired: {saw:?}"
+    );
+    assert_eq!(saw.len(), 8, "exactly the expected markers: {saw:?}");
 }
