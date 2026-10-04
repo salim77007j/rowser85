@@ -2617,14 +2617,22 @@ fn js(v: &[serde_json::Value], i: usize) -> Option<String> {
     v.get(i).and_then(|x| x.as_str()).map(str::to_owned)
 }
 
-/// Lookup helper: borrow the live canvas for a handle.
+/// Lookup helper: borrow the live canvas for a handle. Every op that flows
+/// through here bumps the canvas content revision (conservative: reads like
+/// getImageData bump too — the only cost is the painter's scroll-blit
+/// fallback to a full raster, never a stale frame).
 fn with_canvas<T>(
     reg: &rowser_rendering::canvas2d::CanvasRegistryShared,
     h: u64,
     f: impl FnOnce(&mut rowser_rendering::canvas2d::Canvas2D) -> T,
 ) -> Option<T> {
     let arc = reg.borrow().get(&(h as u32)).cloned();
-    arc.map(|c| f(&mut c.borrow_mut()))
+    arc.map(|c| {
+        let mut canvas = c.borrow_mut();
+        let out = f(&mut canvas);
+        canvas.touch();
+        out
+    })
 }
 
 /// Installs the canvas 2D binding surface. One JSON-op dispatcher keeps the

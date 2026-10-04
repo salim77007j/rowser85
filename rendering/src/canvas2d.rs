@@ -54,6 +54,14 @@ pub fn new_registry() -> CanvasRegistryShared {
     Rc::new(RefCell::new(HashMap::new()))
 }
 
+/// Aggregate content revision of every live canvas (sum of per-canvas
+/// revisions). The painter compares this across frames: unchanged ⇒ the
+/// canvases' pixels are stable and a scroll blit may reuse them.
+pub fn registry_revision(reg: &CanvasRegistryShared) -> u64 {
+    let map = reg.borrow();
+    map.values().map(|c| c.borrow().rev).sum()
+}
+
 // ---------------------------------------------------------------------------
 // Style values
 // ---------------------------------------------------------------------------
@@ -571,6 +579,11 @@ pub struct Canvas2D {
     patterns: HashMap<u32, Rc<Pixmap>>,
     pattern_modes: HashMap<u32, PatternRepeat>,
     next_obj: u32,
+    /// Content revision: bumped by every mutating op (the JS dispatcher
+    /// touches it per op). The painter's scroll-blit path compares the
+    /// registry revision against the last rendered frame — canvas pixels
+    /// changed ⇒ the shifted-pixels shortcut must not run.
+    rev: u64,
 }
 
 impl Canvas2D {
@@ -588,7 +601,18 @@ impl Canvas2D {
             patterns: HashMap::new(),
             pattern_modes: HashMap::new(),
             next_obj: 1,
+            rev: 0,
         }
+    }
+
+    /// Content revision of this canvas (see `rev`).
+    pub fn rev(&self) -> u64 {
+        self.rev
+    }
+
+    /// Marks the content as changed (bumps the revision).
+    pub fn touch(&mut self) {
+        self.rev = self.rev.wrapping_add(1);
     }
 
     pub fn width(&self) -> u32 {
@@ -605,6 +629,7 @@ impl Canvas2D {
             .unwrap_or_else(|| Pixmap::new(1, 1).expect("1x1 pixmap"));
         self.stack.clear();
         self.state = CtxState::default();
+        self.touch();
     }
 
     /// Straight-RGBA snapshot for the display-list image map.

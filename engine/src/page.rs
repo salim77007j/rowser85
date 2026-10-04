@@ -16,7 +16,7 @@ use rowser_layout::{LayoutEngine, LayoutResult, Viewport};
 use rowser_media::{
     MediaEvent as PipelineEvent, MediaIngressSender, MediaNotification, MediaPipeline,
 };
-use rowser_parsing::cascade::StyleMap;
+use rowser_parsing::cascade::{compute_styles, StyleMap};
 use rowser_parsing::css::{parse_stylesheet, MediaContext, ParsedStylesheet};
 use rowser_parsing::html::{parse_html, Document};
 use rowser_rendering::display_list::{build_display_list, ImageMap};
@@ -485,8 +485,34 @@ struct Page {
     dom: Option<Rc<RefCell<Dom>>>,
     document: Option<Document>,
     style_map: Option<StyleMap>,
-    layout: Option<LayoutResult>,
-    display_list: Option<rowser_rendering::DisplayList>,
+    layout: Option<std::sync::Arc<LayoutResult>>,
+    display_list: Option<std::sync::Arc<rowser_rendering::DisplayList>>,
+    /// Layout-inputs fingerprint (dom version + css fp + viewport +
+    /// intrinsic sizes + font generation, WITHOUT interaction state) at
+    /// the last pass through styles/layout (Group E). Equal ⇒ the round
+    /// is paint-only and skips compute_styles + the taffy solve entirely
+    /// (canvas draw loops, find highlights, settle ticks).
+    layout_fp: Option<u64>,
+    /// Interaction-state fingerprint (:hover/:active/:focus/:visited) at
+    /// the last styles pass — styles depend on it while `dom.version`
+    /// does not cover it.
+    state_fp: u64,
+    /// Display-list generation bookkeeping: `paint_gen` is bumped by every
+    /// producer that changes display-list inputs (fresh layout, animation
+    /// override ticks, element scroll, video frames, image arrivals, SVG
+    /// raster refresh); `dl_gen` is the generation the cached list was
+    /// built at. Equal ⇒ repaint reuses the cached list (page scroll and
+    /// canvas draws reuse it by design).
+    paint_gen: u64,
+    dl_gen: Option<u64>,
+    /// Cached merged image map (images + SVG rasters; canvases resolve
+    /// lazily at raster) + the `image_map_gen` it was built at.
+    image_map_cache: Option<ImageMap>,
+    image_map_gen: Option<u64>,
+    /// Canvas element node ids, cached per dom version (the intrinsic-size
+    /// scan walks the whole document; canvas draw loops do not bump the
+    /// version, so the cached list keeps that walk off the hot path).
+    canvas_nodes: Option<(u64, Vec<NodeId>)>,
     images: ImageMap,
     /// Live canvas surfaces shared with the JS runtime (Group D).
     canvas_registry: rowser_rendering::canvas2d::CanvasRegistryShared,
@@ -616,6 +642,13 @@ impl Page {
             style_map: None,
             layout: None,
             display_list: None,
+            layout_fp: None,
+            state_fp: 0,
+            paint_gen: 0,
+            dl_gen: None,
+            image_map_cache: None,
+            image_map_gen: None,
+            canvas_nodes: None,
             images: ImageMap::new(),
             canvas_registry: rowser_rendering::canvas2d::new_registry(),
             image_mirror: Rc::new(RefCell::new(ImageMap::new())),
@@ -1498,6 +1531,8 @@ impl Page {
             let consumed = next - current;
             remaining -= consumed;
             self.element_scroll.entry(*node).or_insert((0.0, 0.0)).1 = next;
+            // Element scroll offsets feed PushClip in the display list.
+            self.paint_gen = self.paint_gen.wrapping_add(1);
             self.repaint();
             if remaining.abs() < 0.5 {
                 return; // fully consumed
@@ -1584,6 +1619,7 @@ impl Page {
                     entry.push(None);
                 }
                 entry[i] = Some(Arc::new(image));
+                self.paint_gen = self.paint_gen.wrapping_add(1);
             }
         }
         if !requests.is_empty() {
@@ -1616,7 +1652,19 @@ impl Page {
         self.style_map = None;
         self.layout = None;
         self.display_list = None;
+        self.layout_fp = None;
+        self.state_fp = 0;
+        self.dl_gen = None;
+        self.image_map_cache = None;
+        self.image_map_gen = None;
+        self.canvas_nodes = None;
         self.images.clear();
+        self.svg_rasters.clear();
+        self.background_images.clear();
+        self.element_scroll.clear();
+        // New document: every shape from the old document is dead weight.
+        self.layout_engine.shape_cache.clear();
+        self.paint_gen = self.paint_gen.wrapping_add(1);
         self.css_texts.clear();
         self.css_bases.clear();
         self.fonts_done.clear();
@@ -1835,6 +1883,7 @@ impl Page {
                     });
                     if let Some(node) = owner {
                         self.images.insert(node, Arc::new(image));
+                        self.paint_gen = self.paint_gen.wrapping_add(1);
                     }
                     self.sync_image_mirror();
                     self.dirty = true;
@@ -1856,6 +1905,7 @@ impl Page {
                     }
                 }
                 if delivered_bg {
+                    self.paint_gen = self.paint_gen.wrapping_add(1);
                     self.dirty = true;
                 }
                 Some(SubresourceKind::Image)
@@ -1934,6 +1984,7 @@ impl Page {
                                 )
                             }) {
                                 self.images.insert(node, Arc::new(image));
+                                self.paint_gen = self.paint_gen.wrapping_add(1);
                             }
                         } else {
                             requests.push((src, SubresourceKind::Image));
@@ -2167,66 +2218,167 @@ impl Page {
                 self.css_texts.iter().map(|c| c.len()).sum::<usize>()
             );
         }
-        let (styles, layout) = {
-            // Intrinsic video sizes: 300x150 default, real aspect once the
-            // pipeline knows the dimensions (replaced-element layout).
-            let mut intrinsic: HashMap<NodeId, (f32, f32)> = HashMap::new();
-            for (node, slot) in &self.media_slots {
-                let info = slot.pipeline.info();
-                if info.width > 0 && info.height > 0 {
-                    intrinsic.insert(
-                        NodeId::try_from(*node).unwrap_or(0),
-                        (info.width as f32, info.height as f32),
-                    );
-                }
+        // Intrinsic video sizes: 300x150 default, real aspect once the
+        // pipeline knows the dimensions (replaced-element layout).
+        let mut intrinsic: HashMap<NodeId, (f32, f32)> = HashMap::new();
+        for (node, slot) in &self.media_slots {
+            let info = slot.pipeline.info();
+            if info.width > 0 && info.height > 0 {
+                intrinsic.insert(
+                    NodeId::try_from(*node).unwrap_or(0),
+                    (info.width as f32, info.height as f32),
+                );
             }
-            // Decoded <img> natural sizes drive replaced-element sizing
-            // (auto-sized images get their intrinsic box, Chrome-style).
-            for (node, image) in &self.images {
-                if image.width > 0 && image.height > 0 {
-                    intrinsic.insert(*node, (image.width as f32, image.height as f32));
-                }
+        }
+        // Decoded <img> natural sizes drive replaced-element sizing
+        // (auto-sized images get their intrinsic box, Chrome-style).
+        for (node, image) in &self.images {
+            if image.width > 0 && image.height > 0 {
+                intrinsic.insert(*node, (image.width as f32, image.height as f32));
             }
-            // <canvas> elements size from their width/height attributes
-            // (default 300x150, the spec's intrinsic size).
-            if let Some(dom_rc) = &self.dom {
-                let dom = dom_rc.borrow();
-                for node in dom.subtree_elements(dom.document()) {
-                    let is_canvas = dom
-                        .element(node)
-                        .is_some_and(|el| &*el.name.local == "canvas");
-                    if !is_canvas {
-                        continue;
-                    }
-                    let attr = |name: &str| -> f32 {
-                        dom.get_attr(node, name)
-                            .and_then(|v| v.trim().parse::<f32>().ok())
-                            .filter(|v| *v >= 0.0)
-                            .unwrap_or(match name {
-                                "width" => 300.0,
-                                _ => 150.0,
-                            })
-                    };
-                    intrinsic.insert(node, (attr("width"), attr("height")));
-                }
+        }
+        // <canvas> elements size from their width/height attributes
+        // (default 300x150, the spec's intrinsic size). The canvas scan is
+        // a full-document walk, so its node list is cached per dom version
+        // (canvas draw loops never bump the version — the scan runs once).
+        if let Some(dom_rc) = &self.dom {
+            let dom = dom_rc.borrow();
+            let version = dom.version;
+            let canvas_nodes: Vec<NodeId> = match &self.canvas_nodes {
+                Some((v, nodes)) if *v == version => nodes.clone(),
+                _ => dom
+                    .subtree_elements(dom.document())
+                    .filter(|&node| {
+                        dom.element(node)
+                            .is_some_and(|el| &*el.name.local == "canvas")
+                    })
+                    .collect(),
+            };
+            if self.canvas_nodes.as_ref().map(|(v, _)| *v) != Some(version) {
+                self.canvas_nodes = Some((version, canvas_nodes.clone()));
             }
-            let (styles, layout) = self.layout_engine.layout_document(
-                &dom.borrow(),
-                &sheets,
-                &media,
-                self.viewport,
-                &intrinsic,
-            );
-            // JS layout mirror refresh (getBoundingClientRect).
-            {
-                let mut rects = self.rect_mirror.borrow_mut();
-                rects.clear();
-                for (node, rect) in &layout.rects {
-                    rects.insert(u64::from(*node), [rect.x, rect.y, rect.w, rect.h]);
-                }
+            for node in canvas_nodes {
+                let attr = |name: &str| -> f32 {
+                    dom.get_attr(node, name)
+                        .and_then(|v| v.trim().parse::<f32>().ok())
+                        .filter(|v| *v >= 0.0)
+                        .unwrap_or(match name {
+                            "width" => 300.0,
+                            _ => 150.0,
+                        })
+                };
+                intrinsic.insert(node, (attr("width"), attr("height")));
             }
-            (styles, layout)
+        }
+        // ---- Group E layout gates ---------------------------------------
+        // Fingerprint every input styles/layout depend on EXCEPT the
+        // interaction state (hover/focus/:active/:visited — covered
+        // separately below): DOM version, sheet set, viewport, intrinsic
+        // sizes, web-font generation.
+        let state_fp = {
+            use std::hash::Hasher;
+            let dom_ref = dom.borrow();
+            let st = dom_ref.interaction_state.borrow();
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            for node in &st.hover {
+                h.write_u32(*node);
+            }
+            if let Some(node) = st.active {
+                h.write_u32(node);
+            }
+            if let Some(node) = st.focus {
+                h.write_u32(node);
+            }
+            let mut visited: Vec<u32> = st.visited.iter().copied().collect();
+            visited.sort_unstable();
+            for node in visited {
+                h.write_u32(node);
+            }
+            h.finish()
         };
+        let inputs_fp = {
+            use std::hash::Hasher;
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            h.write_u64(dom.borrow().version);
+            h.write_u64(fp);
+            h.write_u32(self.viewport.width.to_bits());
+            h.write_u32(self.viewport.height.to_bits());
+            let mut entries: Vec<(NodeId, (f32, f32))> =
+                intrinsic.iter().map(|(n, s)| (*n, *s)).collect();
+            entries.sort_unstable_by(|a, b| {
+                a.0.cmp(&b.0).then(a.1 .0.to_bits().cmp(&b.1 .0.to_bits()))
+            });
+            for (node, (w, ht)) in entries {
+                h.write_u32(node);
+                h.write_u32(w.to_bits());
+                h.write_u32(ht.to_bits());
+            }
+            h.write_u64(rowser_layout::text::FONT_GEN.load(std::sync::atomic::Ordering::Relaxed));
+            h.finish()
+        };
+        if self.layout_fp == Some(inputs_fp) && self.state_fp == state_fp {
+            // Gate 1 — paint-only round: nothing that feeds styles or
+            // layout changed since the last full pass (canvas draw loops,
+            // find highlighting, settle ticks). Skip compute_styles AND
+            // the taffy solve; repaint with the cached list.
+            if trace {
+                eprintln!(
+                    "[page-{}] gate 1: paint-only round (dom v{}, {} intrinsic)",
+                    self.state.tab,
+                    dom.borrow().version,
+                    intrinsic.len()
+                );
+            }
+            self.dirty = false;
+            self.repaint();
+            self.deliver_observers();
+            return;
+        }
+        let styles = {
+            let t = std::time::Instant::now();
+            let s = compute_styles(&dom.borrow(), &sheets, &media);
+            if trace {
+                eprintln!(
+                    "[page-{}] compute_styles took {}ms",
+                    self.state.tab,
+                    t.elapsed().as_millis()
+                );
+            }
+            s
+        };
+        if self.layout_fp == Some(inputs_fp)
+            && self.state_fp != state_fp
+            && self.style_map.as_ref().is_some_and(|prev| *prev == styles)
+        {
+            // Gate 2 — interaction-state churn with an unchanged DOM: the
+            // re-computed styles are DEEP-EQUAL to the previous set (the
+            // hovered element has no :hover rules, or the rules produce
+            // the same values). Keep the existing layout; skip the solve.
+            if trace {
+                eprintln!(
+                    "[page-{}] gate 2: state churn, styles identical — layout kept",
+                    self.state.tab
+                );
+            }
+            self.style_map = Some(styles);
+            self.state_fp = state_fp;
+            self.layout_fp = Some(inputs_fp);
+            self.dirty = false;
+            self.repaint();
+            self.deliver_observers();
+            return;
+        }
+        let layout = self
+            .layout_engine
+            .compute(&dom.borrow(), &styles, self.viewport, &intrinsic);
+        // JS layout mirror refresh (getBoundingClientRect).
+        {
+            let mut rects = self.rect_mirror.borrow_mut();
+            rects.clear();
+            for (node, rect) in &layout.rects {
+                rects.insert(u64::from(*node), [rect.x, rect.y, rect.w, rect.h]);
+            }
+        }
         if trace {
             eprintln!(
                 "[page-{}] layout took {}ms ({} dom nodes)",
@@ -2235,16 +2387,30 @@ impl Page {
                 dom.borrow().node_count()
             );
         }
-        let stage_t1 = std::time::Instant::now();
-        let _ = stage_t1;
+        if trace {
+            let (hits, misses, entries, bytes, lookups) = self.layout_engine.last_shape_stats;
+            eprintln!(
+                "[page-{}] shape cache: {} hits / {} misses ({} entries, ~{} KiB, {} lookups)",
+                self.state.tab,
+                hits,
+                misses,
+                entries,
+                bytes / 1024,
+                lookups
+            );
+        }
         // Background images: request any URL layers not yet fetched.
         self.collect_background_images(&styles);
         // CSS animations: refresh @keyframes + activate new animation
         // declarations (paint-side subset: transform/opacity/filters).
         self.refresh_animations(&styles, &sheets);
         self.style_map = Some(styles);
-        self.layout = Some(layout);
+        self.layout = Some(std::sync::Arc::new(layout));
         self.rendered_dom_version = dom.borrow().version;
+        self.layout_fp = Some(inputs_fp);
+        self.state_fp = state_fp;
+        // Fresh styles + layout: the display list must be rebuilt.
+        self.paint_gen = self.paint_gen.wrapping_add(1);
         self.display_list = None;
         // NOTE: do NOT leave `dirty` set here. idle() clears dirty before
         // calling us; re-setting it made every tab re-render on every 250ms
@@ -2571,7 +2737,55 @@ impl Page {
             true
         });
         self.anim_overrides = overrides;
+        // Animation overrides patch the styles the display list is built
+        // from — a changed override set means the list must be rebuilt.
+        self.paint_gen = self.paint_gen.wrapping_add(1);
         self.repaint();
+    }
+
+    /// Builds the display list, applying animation overrides (paint-side
+    /// properties only — no relayout needed). Returns None when styles are
+    /// not yet computed.
+    fn build_list(
+        &self,
+        dom: &Rc<RefCell<Dom>>,
+        layout: &std::sync::Arc<LayoutResult>,
+        images: &ImageMap,
+        media_overlays: &rowser_rendering::display_list::MediaOverlays,
+    ) -> Option<std::sync::Arc<rowser_rendering::DisplayList>> {
+        let base_styles = self.style_map.as_ref()?;
+        // Animation overrides patch transform/opacity/filters onto the
+        // computed styles (a full StyleMap clone ONLY while animations run).
+        let patched;
+        let styles: &StyleMap = if self.anim_overrides.is_empty() {
+            base_styles
+        } else {
+            let mut clone = base_styles.clone();
+            for (node, override_style) in &self.anim_overrides {
+                if let Some(target) = clone.styles.get_mut(node) {
+                    if !override_style.transform.is_empty() {
+                        target.transform = override_style.transform.clone();
+                    }
+                    if (override_style.opacity - 1.0).abs() > 1e-6 {
+                        target.opacity = override_style.opacity;
+                    }
+                    if !override_style.filters.is_empty() {
+                        target.filters = override_style.filters.clone();
+                    }
+                }
+            }
+            patched = clone;
+            &patched
+        };
+        let inputs = rowser_rendering::display_list::PaintInputs {
+            images,
+            background_images: &self.background_images,
+            video_frames: &self.video_frames,
+            media: media_overlays,
+            element_scroll: &self.element_scroll,
+        };
+        let list = build_display_list(&dom.borrow(), styles, layout, &inputs);
+        Some(std::sync::Arc::new(list))
     }
 
     fn repaint(&mut self) {
@@ -2580,9 +2794,6 @@ impl Page {
         }
         let trace = std::env::var("ROWSER_UI_TRACE").is_ok();
         let Some(layout) = self.layout.clone() else {
-            return;
-        };
-        let Some(styles) = self.style_map.clone() else {
             return;
         };
         let Some(dom) = self.dom.clone() else { return };
@@ -2609,44 +2820,53 @@ impl Page {
                 },
             );
         }
-        // Animation overrides (paint-side props only — no relayout needed).
-        let styles = if self.anim_overrides.is_empty() {
-            styles
-        } else {
-            let mut patched = styles.clone();
-            for (node, override_style) in &self.anim_overrides {
-                if let Some(target) = patched.styles.get_mut(node) {
-                    if !override_style.transform.is_empty() {
-                        target.transform = override_style.transform.clone();
+        // Display-list cache (Group E): producers that change list inputs
+        // bump `paint_gen` (fresh layout, animation ticks, element scroll,
+        // video frames, image arrivals, SVG raster refresh). Pure page
+        // scroll and canvas draw loops do NOT — they reuse the list (the
+        // list is in document coordinates; canvas pixels resolve lazily
+        // at raster).
+        let was_cached = self.dl_gen == Some(self.paint_gen) && self.display_list.is_some();
+        let list: std::sync::Arc<rowser_rendering::DisplayList> =
+            if self.dl_gen == Some(self.paint_gen) {
+                match &self.display_list {
+                    Some(cached) => std::sync::Arc::clone(cached),
+                    None => self
+                        .build_list(&dom, &layout, &images, &media_overlays)
+                        .inspect(|built| {
+                            self.display_list = Some(std::sync::Arc::clone(built));
+                            self.dl_gen = Some(self.paint_gen);
+                        })
+                        .unwrap_or_default(),
+                }
+            } else {
+                match self.build_list(&dom, &layout, &images, &media_overlays) {
+                    Some(built) => {
+                        self.display_list = Some(std::sync::Arc::clone(&built));
+                        self.dl_gen = Some(self.paint_gen);
+                        built
                     }
-                    if (override_style.opacity - 1.0).abs() > 1e-6 {
-                        target.opacity = override_style.opacity;
-                    }
-                    if !override_style.filters.is_empty() {
-                        target.filters = override_style.filters.clone();
+                    None => {
+                        self.display_list = None;
+                        self.dl_gen = None;
+                        return;
                     }
                 }
-            }
-            patched
-        };
-        let inputs = rowser_rendering::display_list::PaintInputs {
-            images: &images,
-            background_images: &self.background_images,
-            video_frames: &self.video_frames,
-            media: &media_overlays,
-            element_scroll: &self.element_scroll,
-        };
-        let list = build_display_list(&dom.borrow(), &styles, &layout, &inputs);
-        if std::env::var("ROWSER_UI_TRACE").is_ok() {
+            };
+        if trace {
             eprintln!(
-                "[page-{}] display_list took {}ms ({} cmds)",
+                "[page-{}] display_list {} ({} cmds, gen {}, {}ms)",
                 self.state.tab,
-                dl_t0.elapsed().as_millis(),
-                list.commands.len()
+                if was_cached { "cached" } else { "rebuilt" },
+                list.commands.len(),
+                self.paint_gen,
+                dl_t0.elapsed().as_millis()
             );
         }
-        self.display_list = Some(list.clone());
-        let background = page_background(&dom.borrow(), &styles, &layout);
+        let background = match self.style_map.as_ref() {
+            Some(styles) => page_background(&dom.borrow(), styles, &layout),
+            None => rowser_parsing::cascade::Rgba::new_opaque(255, 255, 255),
+        };
         let options = RenderOptions {
             viewport_width: self.viewport.width as u32,
             viewport_height: self.viewport.height as u32,
@@ -2656,10 +2876,22 @@ impl Page {
             find_matches: self.find_matches.clone(),
             active_match: self.active_match,
         };
-        if let Some(frame) =
-            self.painter
-                .render(&list, options, &mut self.layout_engine.font_system)
-        {
+        let paint_t0 = std::time::Instant::now();
+        if let Some(frame) = self.painter.render_ctx(
+            &list,
+            options,
+            &mut self.layout_engine.font_system,
+            Some(&self.canvas_registry),
+        ) {
+            if trace {
+                eprintln!(
+                    "[page-{}] paint took {}ms ({} blits, {} fulls)",
+                    self.state.tab,
+                    paint_t0.elapsed().as_millis(),
+                    self.painter.scroll_stats().0,
+                    self.painter.scroll_stats().1
+                );
+            }
             if trace {
                 eprintln!(
                     "[page-{}] painted frame id={} {}x{}",
@@ -2705,6 +2937,7 @@ impl Page {
         if wanted.is_empty() {
             if !self.svg_rasters.is_empty() {
                 self.svg_rasters.clear();
+                self.paint_gen = self.paint_gen.wrapping_add(1);
             }
             return;
         }
@@ -2739,11 +2972,15 @@ impl Page {
             return; // nothing changed, keep the cache
         }
         // Pass 2 (mutable): drop stale entries, rasterize misses.
+        let before = self.svg_rasters.len();
         self.svg_rasters.retain(|node, r| {
             targets
                 .iter()
                 .any(|(t, w, h, sig)| t == node && r.w == *w && r.h == *h && r.sig == *sig)
         });
+        if self.svg_rasters.len() != before {
+            self.paint_gen = self.paint_gen.wrapping_add(1);
+        }
         let t0 = std::time::Instant::now();
         let mut rasterized = 0usize;
         for (node, w, h, sig) in targets {
@@ -2767,6 +3004,7 @@ impl Page {
                         image: Arc::new(image),
                     },
                 );
+                self.paint_gen = self.paint_gen.wrapping_add(1);
                 rasterized += 1;
             }
         }
@@ -2783,20 +3021,23 @@ impl Page {
 
     /// The image map the display list sees: decoded `<img>`s overlaid with
     /// inline-SVG rasters (both paint through the same DrawCmd::Image path).
-    fn merged_images(&self) -> ImageMap {
-        // Canvas snapshots first (cheapest when nothing drew).
-        let canvases = self.canvas_registry.borrow();
-        if canvases.is_empty() && self.svg_rasters.is_empty() {
-            return self.images.clone();
+    fn merged_images(&mut self) -> ImageMap {
+        // Cached (images + SVG rasters) map, rebuilt only when either
+        // source changes. Canvases are NOT merged anymore: the display
+        // list references them via DrawCmd::Canvas and the painter pulls
+        // live pixels per raster (Group E — canvas draws no longer rebuild
+        // the display list or re-clone the image map).
+        if self.image_map_gen == Some(self.paint_gen) {
+            if let Some(cached) = &self.image_map_cache {
+                return cached.clone();
+            }
         }
         let mut merged = self.images.clone();
-        for (node, canvas) in canvases.iter() {
-            let snapshot = canvas.borrow().snapshot();
-            merged.insert(NodeId::try_from(*node).unwrap_or(0), Arc::new(snapshot));
-        }
         for (node, raster) in &self.svg_rasters {
             merged.insert(*node, Arc::clone(&raster.image));
         }
+        self.image_map_cache = Some(merged.clone());
+        self.image_map_gen = Some(self.paint_gen);
         merged
     }
 
@@ -3063,6 +3304,7 @@ impl Page {
                 DecodedImage::decode(&body).or_else(|| rowser_rendering::decode_svg_bytes(&body))
             {
                 self.images.insert(node_id, Arc::new(image));
+                self.paint_gen = self.paint_gen.wrapping_add(1);
             }
         }
         // Refresh the JS-visible image mirror FIRST — onload handlers
@@ -3277,6 +3519,9 @@ impl Page {
                 rgba: Arc::clone(&image.rgba),
             };
             self.video_frames.insert(node as NodeId, Arc::new(image));
+            // Video frames are embedded in the display list (DrawCmd::Image):
+            // each new frame requires a rebuild + raster.
+            self.paint_gen = self.paint_gen.wrapping_add(1);
             self.dirty = true;
             self.repaint();
         }

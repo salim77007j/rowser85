@@ -1,6 +1,6 @@
 // Deterministic probe: register the three test fonts, then shape text whose
 // CSS stack names the web families and report the resolved family + metrics.
-use rowser_layout::text::{shape, SpanStyle};
+use rowser_layout::text::{shape, ShapeCache, SpanStyle};
 use rowser_layout::TextLeaf;
 use rowser_parsing::cascade::{FontStyleMode, Rgba, TextAlignMode};
 
@@ -19,12 +19,12 @@ fn leaf_with_stack(text: &str, stack: &[&str]) -> TextLeaf {
             line_height: 28.0,
             text_align: TextAlignMode::Left,
         },
-        cache: None,
     }
 }
 
 fn main() {
     let mut engine = rowser_layout::LayoutEngine::new();
+    let mut shape_cache = ShapeCache::new();
     let faces = [
         ("WebTestA", "/home/z/my-project/fonttest/wtest.woff2"),
         ("WebTestB", "/home/z/my-project/fonttest/wtest.woff"),
@@ -42,8 +42,13 @@ fn main() {
         ("WebTestB", "woff"),
         ("WebTestC", "ttf"),
     ] {
-        let mut leaf = leaf_with_stack("The quick brown fox", &[family, "monospace"]);
-        let lines = shape(&mut leaf, &mut engine.font_system, Some(1200.0));
+        let leaf = leaf_with_stack("The quick brown fox", &[family, "monospace"]);
+        let lines = shape(
+            &leaf,
+            &mut engine.font_system,
+            Some(1200.0),
+            &mut shape_cache,
+        );
         let n_glyphs: usize = lines.iter().map(|l| l.glyphs.len()).sum();
         let width: f32 = lines.iter().map(|l| l.w).sum();
         println!(
@@ -54,13 +59,23 @@ fn main() {
         );
     }
     // Reference: the same text shaped with plain monospace fallback.
-    let mut leaf = leaf_with_stack("The quick brown fox", &["NotLoadedFace", "monospace"]);
-    let lines = shape(&mut leaf, &mut engine.font_system, Some(1200.0));
+    let leaf = leaf_with_stack("The quick brown fox", &["NotLoadedFace", "monospace"]);
+    let lines = shape(
+        &leaf,
+        &mut engine.font_system,
+        Some(1200.0),
+        &mut shape_cache,
+    );
     let width: f32 = lines.iter().map(|l| l.w).sum();
     println!("fallback: lines={} width={:.1}", lines.len(), width);
     // And plain DejaVu Serif direct (the real family inside the files).
-    let mut leaf = leaf_with_stack("The quick brown fox", &["DejaVu Serif"]);
-    let lines = shape(&mut leaf, &mut engine.font_system, Some(1200.0));
+    let leaf = leaf_with_stack("The quick brown fox", &["DejaVu Serif"]);
+    let lines = shape(
+        &leaf,
+        &mut engine.font_system,
+        Some(1200.0),
+        &mut shape_cache,
+    );
     let width: f32 = lines.iter().map(|l| l.w).sum();
     println!(
         "dejavu-serif direct: lines={} width={:.1}",
@@ -72,7 +87,12 @@ fn main() {
         let mut leaf = leaf_with_stack("The quick brown fox", &[family]);
         leaf.defaults.font_size = 26.0;
         leaf.defaults.line_height = 32.0;
-        let lines = shape(&mut leaf, &mut engine.font_system, Some(1200.0));
+        let lines = shape(
+            &leaf,
+            &mut engine.font_system,
+            Some(1200.0),
+            &mut shape_cache,
+        );
         let width: f32 = lines.iter().map(|l| l.w).sum();
         println!("26px {family}: width={:.1}", width);
     }

@@ -1,7 +1,8 @@
 //! Text shaping: flattening inline content into rich spans and shaping them
 //! with cosmic-text (rustybuzz + fontdb + swash).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use cosmic_text::fontdb;
@@ -117,20 +118,214 @@ pub struct TextRun {
     pub glyphs: Vec<PlacedGlyph>,
 }
 
-/// Shapes `leaf` at `width` and returns the shaped lines (cached).
-pub fn shape(
-    leaf: &mut TextLeaf,
-    font_system: &mut FontSystem,
-    width: Option<f32>,
-) -> Arc<Vec<LayoutLine>> {
-    let key = width.map(|w| w.round()).unwrap_or(-1.0);
-    if let Some((cached_key, lines)) = &leaf.cache {
-        if *cached_key == key {
-            return Arc::clone(lines);
+/// Hashes an f32 by its bit pattern (bit-stable keys: styles and widths
+/// arrive as exact f32 values, so equal values hash equal).
+fn hash_f32<H: std::hash::Hasher>(v: &f32, state: &mut H) {
+    state.write_u32(v.to_bits());
+}
+
+/// Hashes a byte range's bounds.
+fn hash_range<H: std::hash::Hasher>(r: &std::ops::Range<usize>, state: &mut H) {
+    state.write_usize(r.start);
+    state.write_usize(r.end);
+}
+
+impl SpanStyle {
+    /// Feeds every field that influences shaping into `state`.
+    fn hash_into<H: std::hash::Hasher>(&self, state: &mut H) {
+        state.write(self.family.as_bytes());
+        state.write_usize(self.family_stack.len());
+        for f in &self.family_stack {
+            state.write(f.as_bytes());
+        }
+        hash_f32(&self.font_size, state);
+        hash_f32(&self.weight, state);
+        state.write_u8(match self.style {
+            FontStyleMode::Normal => 0,
+            FontStyleMode::Italic => 1,
+        });
+        state.write_u8(self.color.r);
+        state.write_u8(self.color.g);
+        state.write_u8(self.color.b);
+        state.write_u8(self.color.a);
+        hash_f32(&self.line_height, state);
+        state.write_u8(match self.text_align {
+            TextAlignMode::Left => 0,
+            TextAlignMode::Center => 1,
+            TextAlignMode::Right => 2,
+            TextAlignMode::Justify => 3,
+        });
+    }
+}
+
+/// Full key of one shaped result. `width_key` is the rounded measure
+/// width (-1.0 for indefinite). `font_gen` snapshots the web-font
+/// generation at shape time.
+#[derive(Clone, PartialEq)]
+struct ShapeKey {
+    text: String,
+    spans: Vec<(std::ops::Range<usize>, SpanStyle)>,
+    defaults: SpanStyle,
+    width_key: f32,
+    font_gen: u64,
+}
+
+impl ShapeKey {
+    fn of(leaf: &TextLeaf, width: Option<f32>) -> ShapeKey {
+        ShapeKey {
+            text: leaf.text.clone(),
+            spans: leaf.spans.clone(),
+            defaults: leaf.defaults.clone(),
+            width_key: width.map(|w| w.round()).unwrap_or(-1.0),
+            font_gen: font_gen(),
         }
     }
+
+    fn hash64(&self) -> u64 {
+        use std::hash::Hasher;
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        h.write(self.text.as_bytes());
+        h.write_usize(self.spans.len());
+        for (range, span) in &self.spans {
+            hash_range(range, &mut h);
+            span.hash_into(&mut h);
+        }
+        self.defaults.hash_into(&mut h);
+        hash_f32(&self.width_key, &mut h);
+        h.write_u64(self.font_gen);
+        h.finish()
+    }
+
+    /// Rough memory footprint of the cached value (lines + glyphs).
+    fn value_bytes(lines: &[LayoutLine]) -> usize {
+        let glyph = lines.first().map_or(64, |l| l.glyphs.len());
+        let per_line = std::mem::size_of::<LayoutLine>() + glyph.max(1) * 64;
+        per_line * lines.len().max(1)
+    }
+}
+
+#[derive(Clone)]
+struct ShapeCacheEntry {
+    key: ShapeKey,
+    value: Arc<Vec<LayoutLine>>,
+    bytes: usize,
+}
+
+/// Persistent cross-render text-shaping cache (Group E).
+///
+/// The taffy tree is rebuilt from the DOM every layout pass, so the
+/// per-leaf caches died with the tree and every re-render re-shaped every
+/// text run through cosmic-text — the dominant relayout cost on
+/// text-heavy pages (Wikipedia, GitHub). This cache lives on the
+/// [`crate::LayoutEngine`], keyed by the *complete* shaping input: text,
+/// span styles, default style, rounded width and the web-font generation.
+/// A hit skips both font-stack resolution and shaping entirely.
+///
+/// Bounded by entry count and an estimated byte budget, LRU-evicted.
+#[derive(Default)]
+pub struct ShapeCache {
+    entries: HashMap<u64, ShapeCacheEntry>,
+    order: VecDeque<u64>,
+    bytes: usize,
+    hits: u64,
+    misses: u64,
+    shape_calls: u64,
+}
+
+impl ShapeCache {
+    /// Cache tuning: at most 2048 entries / 48 MiB of estimated line data.
+    const MAX_ENTRIES: usize = 2048;
+    const MAX_BYTES: usize = 48 * 1024 * 1024;
+
+    /// Creates an empty cache.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// (hits, misses, live entries, estimated bytes, total lookups).
+    pub fn stats(&self) -> (u64, u64, usize, usize, u64) {
+        (
+            self.hits,
+            self.misses,
+            self.entries.len(),
+            self.bytes,
+            self.shape_calls,
+        )
+    }
+
+    /// Drops every entry (memory pressure, navigation).
+    pub fn clear(&mut self) {
+        self.entries.clear();
+        self.order.clear();
+        self.bytes = 0;
+    }
+
+    fn lookup(&mut self, leaf: &TextLeaf, width: Option<f32>) -> Option<Arc<Vec<LayoutLine>>> {
+        self.shape_calls += 1;
+        let key = ShapeKey::of(leaf, width);
+        let hash = key.hash64();
+        if let Some(entry) = self.entries.get(&hash) {
+            if entry.key == key {
+                self.hits += 1;
+                // LRU touch.
+                if let Some(pos) = self.order.iter().position(|&h| h == hash) {
+                    self.order.remove(pos);
+                    self.order.push_back(hash);
+                }
+                return Some(Arc::clone(&entry.value));
+            }
+        }
+        self.misses += 1;
+        None
+    }
+
+    fn insert(&mut self, leaf: &TextLeaf, width: Option<f32>, value: Arc<Vec<LayoutLine>>) {
+        let key = ShapeKey::of(leaf, width);
+        let hash = key.hash64();
+        let bytes = ShapeKey::value_bytes(&value);
+        // Replace (same leaf re-shaped at a width that collided rounds).
+        if let Some(old) = self
+            .entries
+            .insert(hash, ShapeCacheEntry { key, value, bytes })
+        {
+            self.bytes = self.bytes.saturating_sub(old.bytes);
+            if let Some(pos) = self.order.iter().position(|&h| h == hash) {
+                self.order.remove(pos);
+            }
+        }
+        self.bytes += bytes;
+        self.order.push_back(hash);
+        self.evict();
+    }
+
+    fn evict(&mut self) {
+        while self.entries.len() > Self::MAX_ENTRIES || self.bytes > Self::MAX_BYTES {
+            let Some(oldest) = self.order.pop_front() else {
+                break;
+            };
+            if let Some(entry) = self.entries.remove(&oldest) {
+                self.bytes = self.bytes.saturating_sub(entry.bytes);
+            }
+        }
+    }
+}
+
+/// Shapes `leaf` at `width` (persistent-cache backed).
+///
+/// Hits return the previously shaped lines without touching the shaper;
+/// misses shape and cache. Within one layout pass the same leaf measured
+/// at the same width hits the cache directly.
+pub fn shape(
+    leaf: &TextLeaf,
+    font_system: &mut FontSystem,
+    width: Option<f32>,
+    cache: &mut ShapeCache,
+) -> Arc<Vec<LayoutLine>> {
+    if let Some(lines) = cache.lookup(leaf, width) {
+        return lines;
+    }
     let lines = Arc::new(shape_lines(leaf, font_system, width));
-    leaf.cache = Some((key, Arc::clone(&lines)));
+    cache.insert(leaf, width, Arc::clone(&lines));
     lines
 }
 
@@ -140,12 +335,9 @@ pub fn shape_at(
     font_system: &mut FontSystem,
     width: Option<f32>,
     abs: (f32, f32),
+    cache: &mut ShapeCache,
 ) -> Vec<PlacedGlyph> {
-    let key = width.map(|w| w.round()).unwrap_or(-1.0);
-    let lines = match &leaf.cache {
-        Some((cached_key, lines)) if *cached_key == key => Arc::clone(lines),
-        _ => Arc::new(shape_lines(leaf, font_system, width)),
-    };
+    let lines = shape(leaf, font_system, width, cache);
     let mut glyphs = Vec::new();
     let defaults = &leaf.defaults;
     let default_line_h = defaults.line_height;
@@ -308,9 +500,20 @@ const FALLBACK_CHAIN: &[&str] = &["Liberation Sans", "DejaVu Sans", "Noto Sans S
 static WEB_FONTS: std::sync::OnceLock<std::sync::RwLock<HashMap<String, String>>> =
     std::sync::OnceLock::new();
 
+/// Web-font installation generation: bumped every time a @font-face face
+/// registers. Part of the shape-cache key — new faces change shaping
+/// results, so cached lines shaped before registration must not be reused.
+pub static FONT_GEN: AtomicU64 = AtomicU64::new(0);
+
+/// Reads the web-font generation counter.
+fn font_gen() -> u64 {
+    FONT_GEN.load(Ordering::Relaxed)
+}
+
 /// Registers a loaded @font-face: `css_family` (as written in the rule) maps
 /// to `real_family` (the name inside the font file).
 pub fn register_web_font(css_family: &str, real_family: &str) {
+    FONT_GEN.fetch_add(1, Ordering::Relaxed);
     let lock = WEB_FONTS.get_or_init(|| std::sync::RwLock::new(HashMap::new()));
     if let Ok(mut map) = lock.write() {
         map.insert(css_family.to_ascii_lowercase(), real_family.to_owned());
@@ -479,8 +682,95 @@ mod tests {
                 line_height: 20.0,
                 text_align: TextAlignMode::Left,
             },
-            cache: None,
         }
+    }
+
+    /// Second shape of the same (text, style, width) must hit the
+    /// persistent cache: identical output, no re-shaping.
+    #[test]
+    fn shape_cache_hits_on_repeat() {
+        let mut font_system = cosmic_text::FontSystem::new();
+        let mut cache = ShapeCache::new();
+        let leaf = leaf_with("cache me once");
+        let a = shape(&leaf, &mut font_system, Some(400.0), &mut cache);
+        let b = shape(&leaf, &mut font_system, Some(400.0), &mut cache);
+        let (hits, _, entries, _, _) = cache.stats();
+        assert_eq!(hits, 1, "second shape must be a cache hit");
+        assert_eq!(entries, 1);
+        assert_eq!(a.len(), b.len());
+    }
+
+    /// A different width is a different key: miss, different wrapping.
+    #[test]
+    fn shape_cache_misses_on_different_width() {
+        let mut font_system = cosmic_text::FontSystem::new();
+        let mut cache = ShapeCache::new();
+        let leaf = leaf_with("one two three four five six seven eight");
+        let wide = shape(&leaf, &mut font_system, Some(400.0), &mut cache);
+        let narrow = shape(&leaf, &mut font_system, Some(60.0), &mut cache);
+        let (hits, misses, entries, _, _) = cache.stats();
+        assert_eq!(hits, 0);
+        assert_eq!(misses, 2);
+        assert_eq!(entries, 2);
+        // Narrow width must wrap into more lines than wide.
+        assert!(
+            narrow.len() > wide.len(),
+            "narrow={} wide={}",
+            narrow.len(),
+            wide.len()
+        );
+    }
+
+    /// Style changes (font size) are different keys.
+    #[test]
+    fn shape_cache_misses_on_style_change() {
+        let mut font_system = cosmic_text::FontSystem::new();
+        let mut cache = ShapeCache::new();
+        let mut leaf = leaf_with("styled text");
+        shape(&leaf, &mut font_system, Some(400.0), &mut cache);
+        leaf.defaults.font_size = 28.0;
+        shape(&leaf, &mut font_system, Some(400.0), &mut cache);
+        let (hits, misses, entries, _, _) = cache.stats();
+        assert_eq!(hits, 0);
+        assert_eq!(misses, 2);
+        assert_eq!(entries, 2);
+    }
+
+    /// Web-font registration bumps the generation: cached lines shaped
+    /// against the old face set must NOT be reused.
+    #[test]
+    fn shape_cache_invalidates_on_web_font_registration() {
+        let mut font_system = cosmic_text::FontSystem::new();
+        let mut cache = ShapeCache::new();
+        let leaf = leaf_with("webfont era");
+        shape(&leaf, &mut font_system, Some(400.0), &mut cache);
+        register_web_font("MyFace", "Liberation Sans");
+        shape(&leaf, &mut font_system, Some(400.0), &mut cache);
+        let (hits, misses, entries, _, _) = cache.stats();
+        assert_eq!(hits, 0, "stale font-generation entry must not be reused");
+        assert_eq!(misses, 2);
+        assert_eq!(entries, 2, "both generations cached separately");
+    }
+
+    /// LRU eviction keeps the cache bounded.
+    #[test]
+    fn shape_cache_evicts_lru() {
+        let mut font_system = cosmic_text::FontSystem::new();
+        let mut cache = ShapeCache::new();
+        for i in 0..64 {
+            let leaf = leaf_with(&format!("eviction candidate number {i}"));
+            shape(&leaf, &mut font_system, Some(400.0), &mut cache);
+        }
+        let (_, _, entries, _, _) = cache.stats();
+        assert_eq!(entries, 64);
+        // Touch entry 0 (oldest) so it becomes most-recent, then overflow.
+        let oldest = leaf_with("eviction candidate number 0");
+        shape(&oldest, &mut font_system, Some(400.0), &mut cache);
+        let newer = leaf_with("eviction candidate number 64");
+        shape(&newer, &mut font_system, Some(400.0), &mut cache);
+        let (hits, _, entries, _, _) = cache.stats();
+        assert_eq!(entries, 65);
+        assert_eq!(hits, 1, "the touch must have hit");
     }
 
     /// Regression: bidi class-B separators (U+001C/001D/001E) inside a

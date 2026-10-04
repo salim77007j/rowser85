@@ -1101,3 +1101,92 @@ async fn eventsource_finite_stream() {
     assert!(summary.contains("g=2"), "two message events: {summary}");
     assert!(summary.contains("c=1"), "one custom event: {summary}");
 }
+
+/// Group E — a JS canvas animation loop (draw + MarkDirty every rAF) must
+/// (a) keep updating the rendered canvas pixels through the paint-only
+/// gate, and (b) NOT swallow a DOM mutation that lands afterwards: the
+/// mutation must still re-style/re-layout/re-paint (gate invalidation).
+/// This catches fingerprints that are too coarse (a stuck-open gate would
+/// show the green block never painting).
+const GATE_HTML: &str = r#"<!DOCTYPE html>
+<html><head><style>body { margin: 0; }</style></head>
+<body>
+<canvas id="c" width="60" height="40" style="width:60px;height:40px;border:0"></canvas>
+<div id="after" style="width:120px;height:40px;background-color:#00cc00;display:none"></div>
+<script>
+const cv = document.getElementById('c');
+const ctx = cv.getContext('2d');
+let frame = 0;
+function tick() {
+    ctx.fillStyle = (frame % 2) ? '#dd0000' : '#0000dd';
+    ctx.fillRect(0, 0, 60, 40);
+    frame++;
+    if (frame < 20) { requestAnimationFrame(tick); return; }
+    // Last fill was frame=19 -> 19 % 2 = 1 -> RED.
+    document.getElementById('after').style.display = 'block';
+    console.log('CV:GATEDONE frames=' + frame + ' disp=' + document.getElementById('after').style.display);
+}
+requestAnimationFrame(tick);
+</script>
+</body></html>"#;
+
+#[tokio::test]
+async fn gate_canvas_loop_then_dom_mutation_repaints() {
+    let mut routes: HashMap<String, (u16, String, Vec<u8>)> = HashMap::new();
+    routes.insert(
+        "/".to_owned(),
+        (200, "text/html".to_owned(), GATE_HTML.as_bytes().to_vec()),
+    );
+    let mut server = LocalServer::start(routes);
+    let url = server.url();
+    server.serve();
+
+    let browser = BrowserApi::start(test_config("gate-canvas")).expect("engine start");
+    let tab = browser.new_tab(Some(url));
+    let mut events = browser.events();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(wait_seconds());
+    let mut done = false;
+    while !done {
+        let event = tokio::time::timeout_at(deadline, events.recv())
+            .await
+            .expect("timeout waiting for gate marker")
+            .expect("event channel alive");
+        if let EngineEvent::ConsoleMessage { text, .. } = event {
+            if text.starts_with("CV:GATEDONE") {
+                done = true;
+            }
+        }
+    }
+    // Allow the mutation render round to land.
+    tokio::time::sleep(Duration::from_millis(700)).await;
+
+    let frame = browser.frame(tab).expect("frame");
+    let straight = frame.straight_rgba();
+    let w = frame.width as usize;
+    let at = |x: usize, y: usize| -> [u8; 4] {
+        let i = (y * w + x) * 4;
+        [
+            straight[i],
+            straight[i + 1],
+            straight[i + 2],
+            straight[i + 3],
+        ]
+    };
+    // body margin 0, canvas first element at (0,0): red fill covers
+    // (0..60, 0..40). The LAST rAF fill (frame 19) must be visible —
+    // lazy canvas resolution pulls live pixels per raster.
+    let red = at(30, 20);
+    assert!(
+        red[0] >= 200 && red[1] < 60 && red[2] < 60,
+        "canvas final frame must be red (got {red:?})"
+    );
+    // The post-loop DOM mutation (display:none -> block) must have
+    // re-rendered: the green block sits below the canvas (y 40..80).
+    let green = at(60, 60);
+    assert!(
+        green[1] >= 180 && green[0] < 80 && green[2] < 80,
+        "post-canvas DOM mutation must repaint (got {green:?})"
+    );
+    browser.shutdown();
+    drop(server);
+}

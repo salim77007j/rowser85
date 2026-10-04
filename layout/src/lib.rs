@@ -97,15 +97,22 @@ pub struct TextLeaf {
     pub spans: Vec<(std::ops::Range<usize>, SpanStyle)>,
     /// Default (inherited) span style for the whole run.
     pub defaults: SpanStyle,
-    /// Shaping cache: (width, shaped lines) from the last shape.
-    pub cache: Option<(f32, std::sync::Arc<Vec<cosmic_text::LayoutLine>>)>,
 }
 
 /// The layout engine. Owns the shared font system (system fonts loaded
-/// once per engine instance).
+/// once per engine instance) and the persistent cross-render shaping
+/// cache (see [`text::ShapeCache`]).
 pub struct LayoutEngine {
     /// Shared cosmic-text font system.
     pub font_system: cosmic_text::FontSystem,
+    /// Persistent text-shaping cache: survives layout passes, keyed by
+    /// full shaping input (text/spans/style/width/font-generation),
+    /// LRU-bounded. Second and later renders of the same text skip
+    /// cosmic-text entirely.
+    pub shape_cache: text::ShapeCache,
+    /// (hits, misses, entries, bytes, lookups) after the last layout —
+    /// surfaced for trace logs and tests.
+    pub last_shape_stats: (u64, u64, usize, usize, u64),
 }
 
 impl Default for LayoutEngine {
@@ -119,6 +126,8 @@ impl LayoutEngine {
     pub fn new() -> Self {
         LayoutEngine {
             font_system: cosmic_text::FontSystem::new(),
+            shape_cache: text::ShapeCache::new(),
+            last_shape_stats: (0, 0, 0, 0, 0),
         }
     }
 
@@ -146,6 +155,9 @@ impl LayoutEngine {
         viewport: Viewport,
         intrinsic: &HashMap<NodeId, (f32, f32)>,
     ) -> LayoutResult {
+        let font_system = &mut self.font_system;
+        let shape_cache = &mut self.shape_cache;
+        self.last_shape_stats = shape_cache.stats();
         let root = find_layout_root(dom);
         let mut tree: TaffyTree<TextLeaf> = TaffyTree::new();
         let mut dom_to_taffy: HashMap<NodeId, TaffyNode> = HashMap::new();
@@ -217,11 +229,19 @@ impl LayoutEngine {
             height: AvailableSpace::Definite(f32::MAX),
         };
 
-        let font_system = &mut self.font_system;
+        let font_system = &mut *font_system;
+        let shape_cache = &mut *shape_cache;
+        let solve_t0 = std::time::Instant::now();
         tree.compute_layout_with_measure(taffy_root, available, |input, _node, context, _style| {
-            measure_leaf(input, context, font_system)
+            measure_leaf(input, context, font_system, shape_cache)
         })
         .ok();
+        if std::env::var("ROWSER_UI_TRACE").is_ok() {
+            eprintln!(
+                "[layout] taffy solve 1: {}ms",
+                solve_t0.elapsed().as_millis()
+            );
+        }
 
         // Extract results. The root (body) border box sits at its margins:
         // taffy reports root-relative locations, so seed the walk with the
@@ -241,6 +261,7 @@ impl LayoutEngine {
             abs,
             &mut result,
             font_system,
+            shape_cache,
         );
         // Pass 2 (conditional): resolve calc(<%> + <px>) lengths against the
         // ACTUAL containing-block sizes from pass 1, then re-layout. Only
@@ -339,7 +360,9 @@ impl LayoutEngine {
                 tree.compute_layout_with_measure(
                     taffy_root,
                     available,
-                    |input, _node, context, _style| measure_leaf(input, context, font_system),
+                    |input, _node, context, _style| {
+                        measure_leaf(input, context, font_system, shape_cache)
+                    },
                 )
                 .ok();
                 let mut result2 = LayoutResult {
@@ -355,10 +378,12 @@ impl LayoutEngine {
                     abs,
                     &mut result2,
                     font_system,
+                    shape_cache,
                 );
                 result = result2;
             }
         }
+        self.last_shape_stats = shape_cache.stats();
         result
     }
 }
@@ -1185,7 +1210,6 @@ fn build_pseudo_box(
         text: content,
         spans: Vec::new(),
         defaults,
-        cache: None,
     };
     let style = taffy_style(pseudo);
     let node = tree.new_leaf_with_context(style, leaf).ok()?;
@@ -1210,7 +1234,6 @@ fn flush_text_leaf(
         text: std::mem::take(text),
         spans: std::mem::take(spans),
         defaults: defaults.clone(),
-        cache: None,
     };
     // The leaf is an ANONYMOUS block-level box for the element's inline
     // content — NOT a second copy of the owning element's box. Carrying
@@ -1525,6 +1548,7 @@ fn measure_leaf(
     input: LayoutInput,
     context: Option<&mut TextLeaf>,
     font_system: &mut cosmic_text::FontSystem,
+    shape_cache: &mut crate::text::ShapeCache,
 ) -> LayoutOutput {
     let Some(leaf) = context else {
         return LayoutOutput::HIDDEN;
@@ -1536,7 +1560,7 @@ fn measure_leaf(
             _ => None,
         },
     };
-    let lines = text::shape(leaf, font_system, width);
+    let lines = text::shape(leaf, font_system, width, shape_cache);
     let line_h = leaf.defaults.line_height;
     let total_h = lines
         .iter()
@@ -1578,6 +1602,7 @@ fn extract(
     abs: (f32, f32),
     out: &mut LayoutResult,
     font_system: &mut cosmic_text::FontSystem,
+    shape_cache: &mut crate::text::ShapeCache,
 ) {
     let _ = dom;
     let Ok(layout) = tree.layout(taffy_node) else {
@@ -1616,7 +1641,7 @@ fn extract(
                 Ok(l) => (node_abs.0 + l.location.x, node_abs.1 + l.location.y),
                 Err(_) => node_abs,
             };
-            let glyphs = text::shape_at(leaf, font_system, Some(width), origin);
+            let glyphs = text::shape_at(leaf, font_system, Some(width), origin, shape_cache);
             if !glyphs.is_empty() {
                 out.text.push(TextRun {
                     node: leaf.node,
@@ -1634,6 +1659,7 @@ fn extract(
                     node_abs,
                     out,
                     font_system,
+                    shape_cache,
                 );
             }
         }

@@ -7,13 +7,16 @@
 //! anchors, and per-element scroll translation.
 
 use cosmic_text::{FontSystem, SwashCache, SwashContent, SwashImage};
+use std::collections::HashMap;
 use tiny_skia::{FillRule, Paint, Pixmap, PixmapPaint, Shader, Transform};
 
+use rowser_dom::NodeId;
 use rowser_layout::text::TextRun;
 use rowser_parsing::cascade::{
     BorderRadius, FilterSpec, GradientGeometry, GradientSpec, GradientStop, Rgba,
 };
 
+use crate::canvas2d::CanvasRegistryShared;
 use crate::display_list::{DisplayList, DrawCmd, StickyInfo};
 use crate::{to_skia_color, DecodedImage, Rect};
 
@@ -53,6 +56,17 @@ impl Default for RenderOptions {
 
 /// Row-major affine [a b c d e f]: x' = a*x + c*y + e, y' = b*x + d*y + f.
 type Affine = [f32; 6];
+
+/// Straight RGBA → premultiplied RGBA bytes (for the blit band clear).
+fn premul_bytes(c: Rgba) -> [u8; 4] {
+    let a = c.a as u32;
+    [
+        ((c.r as u32 * a + 127) / 255) as u8,
+        ((c.g as u32 * a + 127) / 255) as u8,
+        ((c.b as u32 * a + 127) / 255) as u8,
+        c.a,
+    ]
+}
 
 const IDENTITY: Affine = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
 
@@ -136,6 +150,72 @@ pub struct Painter {
     swash_cache: SwashCache,
     frame_id: u64,
     mask_cache: Option<MaskCache>,
+    /// Previous-frame state for the scroll-blit fast path (Group E):
+    /// pure page scrolls shift the prior raster and re-render only the
+    /// newly exposed band instead of the full viewport.
+    last: Option<LastFrame>,
+    /// Fast-path statistics: (scroll-blit frames, full rasters).
+    scroll_stats: (u64, u64),
+}
+
+/// State of the last fully rendered frame, for scroll blits.
+struct LastFrame {
+    /// Copy of the last presented pixels.
+    pixmap: Pixmap,
+    /// Page scroll offset the frame was rendered at (CSS px).
+    scroll_y: f32,
+    /// Fingerprint of all non-scroll render options.
+    sig: u64,
+    /// Display-list identity the frame was rendered from.
+    dl_version: u64,
+    /// Canvas registry revision at render time (content freshness).
+    canvas_rev: u64,
+}
+
+/// Fingerprint of the render options that matter beyond scroll: viewport
+/// size, scale, background and find state.
+fn options_sig(options: &RenderOptions, w: u32, h: u32) -> u64 {
+    use std::hash::Hasher;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    hasher.write_u32(w);
+    hasher.write_u32(h);
+    hasher.write_u32(options.scale.to_bits());
+    hasher.write_u8(options.background.r);
+    hasher.write_u8(options.background.g);
+    hasher.write_u8(options.background.b);
+    hasher.write_u8(options.background.a);
+    hasher.write_usize(options.find_matches.len());
+    for m in &options.find_matches {
+        hasher.write_u32(m.x.to_bits());
+        hasher.write_u32(m.y.to_bits());
+        hasher.write_u32(m.w.to_bits());
+        hasher.write_u32(m.h.to_bits());
+    }
+    hasher.write_u8(u8::from(options.active_match.is_some()));
+    hasher.finish()
+}
+
+/// Snapshots every canvas referenced by the list (lazily — canvases not
+/// in the list cost nothing).
+fn resolve_canvases(
+    list: &DisplayList,
+    canvases: Option<&CanvasRegistryShared>,
+) -> HashMap<NodeId, DecodedImage> {
+    let mut out = HashMap::new();
+    let Some(reg) = canvases else { return out };
+    let reg = reg.borrow();
+    for cmd in &list.commands {
+        if let DrawCmd::Canvas { node, .. } = cmd {
+            if out.contains_key(node) {
+                continue;
+            }
+            if let Some(c) = reg.get(node) {
+                let snapshot = c.borrow().snapshot();
+                out.insert(*node, snapshot);
+            }
+        }
+    }
+    out
 }
 
 impl Default for Painter {
@@ -151,15 +231,36 @@ impl Painter {
             swash_cache: SwashCache::new(),
             frame_id: 0,
             mask_cache: None,
+            last: None,
+            scroll_stats: (0, 0),
         }
     }
 
-    /// Rasterizes `list` into a fresh frame.
+    /// (scroll-blit frames, full rasters) since painter creation.
+    pub fn scroll_stats(&self) -> (u64, u64) {
+        self.scroll_stats
+    }
+
+    /// Rasterizes `list` into a fresh frame (no live canvases — the
+    /// display list is expected to carry embedded images only).
     pub fn render(
         &mut self,
         list: &DisplayList,
         options: RenderOptions,
         font_system: &mut FontSystem,
+    ) -> Option<crate::Frame> {
+        self.render_ctx(list, options, font_system, None)
+    }
+
+    /// Rasterizes `list` with live canvas resolution. `canvases` backs the
+    /// lazy `DrawCmd::Canvas` commands (fresh pixels per raster) and feeds
+    /// the scroll-blit freshness check.
+    pub fn render_ctx(
+        &mut self,
+        list: &DisplayList,
+        options: RenderOptions,
+        font_system: &mut FontSystem,
+        canvases: Option<&CanvasRegistryShared>,
     ) -> Option<crate::Frame> {
         let scale = if options.scale.is_finite() && options.scale > 0.0 {
             options.scale
@@ -168,10 +269,54 @@ impl Painter {
         };
         let w = (options.viewport_width as f32 * scale).ceil() as u32;
         let h = (options.viewport_height as f32 * scale).ceil() as u32;
+        let sig = options_sig(&options, w, h);
+        let canvas_rev = canvases
+            .map(crate::canvas2d::registry_revision)
+            .unwrap_or(0);
+        // Scroll-blit fast path: only the page scroll moved, the list is
+        // the same, no fixed/sticky anchors, no find highlights, canvas
+        // content unchanged. Shift the prior pixels and rasterize only the
+        // exposed band.
+        if let Some(last) = &self.last {
+            let delta_px = ((options.scroll_y - last.scroll_y) * scale).round() as i32;
+            if delta_px != 0
+                && delta_px.abs() < h as i32
+                && last.sig == sig
+                && last.dl_version == list.version
+                && last.canvas_rev == canvas_rev
+                && !list.has_fixed_or_sticky
+                && options.find_matches.is_empty()
+                && w > 0
+                && h > 0
+            {
+                let last = LastFrame {
+                    pixmap: last.pixmap.clone(),
+                    scroll_y: last.scroll_y,
+                    sig: last.sig,
+                    dl_version: last.dl_version,
+                    canvas_rev: last.canvas_rev,
+                };
+                if let Some(frame) = self.blit_scroll(
+                    list,
+                    &options,
+                    scale,
+                    w,
+                    h,
+                    delta_px,
+                    &last,
+                    font_system,
+                    canvases,
+                ) {
+                    return Some(frame);
+                }
+            }
+        }
+        // Full raster.
         let mut pixmap = Pixmap::new(w, h)?;
         pixmap.fill(to_skia_color(options.background));
         let mut state = PaintState::new(options.scroll_y, scale);
         let viewport = (pixmap.width() as f32, pixmap.height() as f32);
+        let canvas_images = resolve_canvases(list, canvases);
         self.mask_cache = None;
         self.paint_commands(
             &list.commands,
@@ -179,9 +324,123 @@ impl Painter {
             &mut state,
             font_system,
             viewport,
+            &canvas_images,
         );
         self.paint_find_highlights(&mut pixmap, &options);
         self.frame_id += 1;
+        self.scroll_stats.1 += 1;
+        self.last = Some(LastFrame {
+            pixmap: pixmap.clone(),
+            scroll_y: options.scroll_y,
+            sig,
+            dl_version: list.version,
+            canvas_rev,
+        });
+        Some(crate::Frame {
+            width: pixmap.width(),
+            height: pixmap.height(),
+            pixels: pixmap.take(),
+            id: self.frame_id,
+        })
+    }
+
+    /// Scroll fast path: `delta_px > 0` scrolled down (content moves up).
+    /// Blits the prior rows, clears the exposed band to the page
+    /// background, rasterizes the band in a shifted coordinate frame and
+    /// composites it. Falls back to `None` (caller full-renders) on any
+    /// geometry problem.
+    #[allow(clippy::too_many_arguments)]
+    fn blit_scroll(
+        &mut self,
+        list: &DisplayList,
+        options: &RenderOptions,
+        scale: f32,
+        w: u32,
+        h: u32,
+        delta_px: i32,
+        last: &LastFrame,
+        font_system: &mut FontSystem,
+        canvases: Option<&CanvasRegistryShared>,
+    ) -> Option<crate::Frame> {
+        if w == 0 || h == 0 {
+            return None;
+        }
+        let row = w as usize * 4;
+        let mut pixmap = Pixmap::new(w, h)?;
+        {
+            let dst = pixmap.data_mut();
+            let src = last.pixmap.data();
+            if delta_px > 0 {
+                let d = delta_px as usize;
+                for y in 0..(h as usize - d) {
+                    let s = (y + d) * row;
+                    let di = y * row;
+                    dst[di..di + row].copy_from_slice(&src[s..s + row]);
+                }
+            } else {
+                let d = (-delta_px) as usize;
+                for y in d..h as usize {
+                    let s = (y - d) * row;
+                    let di = y * row;
+                    dst[di..di + row].copy_from_slice(&src[s..s + row]);
+                }
+            }
+        }
+        // Clear the exposed band to the page background (premultiplied).
+        let band_y0 = if delta_px > 0 {
+            h as usize - delta_px as usize
+        } else {
+            0
+        };
+        let band_h = delta_px.unsigned_abs() as usize;
+        if band_h > 0 && band_y0 + band_h <= h as usize {
+            let bg = premul_bytes(options.background);
+            let dst = pixmap.data_mut();
+            for y in band_y0..(band_y0 + band_h) {
+                let di = y * row;
+                for px in dst[di..di + row].chunks_exact_mut(4) {
+                    px[0] = bg[0];
+                    px[1] = bg[1];
+                    px[2] = bg[2];
+                    px[3] = bg[3];
+                }
+            }
+        }
+        // Rasterize the band in its own pixmap (viewport = band bounds →
+        // per-command culling and masks stay correct with zero changes).
+        if band_h > 0 {
+            let mut band = Pixmap::new(w, band_h as u32)?;
+            let mut state = PaintState::new(options.scroll_y, scale);
+            // Shift device-y by -band_y0: band row 0 == full-frame row band_y0.
+            state.transform[5] -= band_y0 as f32;
+            let canvas_images = resolve_canvases(list, canvases);
+            self.mask_cache = None;
+            self.paint_commands(
+                &list.commands,
+                &mut band,
+                &mut state,
+                font_system,
+                (w as f32, band_h as f32),
+                &canvas_images,
+            );
+            pixmap.draw_pixmap(
+                0,
+                band_y0 as i32,
+                band.as_ref(),
+                &PixmapPaint::default(),
+                Transform::identity(),
+                None,
+            );
+        }
+        self.frame_id += 1;
+        self.scroll_stats.0 += 1;
+        self.last = Some(LastFrame {
+            pixmap: pixmap.clone(),
+            scroll_y: options.scroll_y,
+            sig: last.sig,
+            dl_version: list.version,
+            canvas_rev: last.canvas_rev,
+        });
         Some(crate::Frame {
             width: pixmap.width(),
             height: pixmap.height(),
@@ -235,6 +494,7 @@ impl Painter {
         state: &mut PaintState,
         font_system: &mut FontSystem,
         viewport: (f32, f32),
+        canvases: &HashMap<NodeId, DecodedImage>,
     ) {
         let mut i = 0usize;
         while i < cmds.len() {
@@ -292,6 +552,7 @@ impl Painter {
                             &mut sub_state,
                             font_system,
                             viewport,
+                            canvases,
                         );
                         let paint = PixmapPaint {
                             opacity: alpha.clamp(0.0, 1.0),
@@ -312,18 +573,52 @@ impl Painter {
                 DrawCmd::PopOpacity => {}
                 DrawCmd::PushFilter { filters, region } => {
                     let end = matching_pop(cmds, i);
-                    if let Some(mut layer) = Pixmap::new(viewport.0 as u32, viewport.1 as u32) {
+                    // Group E: the offscreen layer is sized to the EFFECT
+                    // REGION (the padded border box, blur-expanded at list
+                    // build time), not the full viewport. The old full-frame
+                    // layers blurred 1360x745 (~4 MB) per group — GitHub's
+                    // three blur(40-60px) cards cost ~7 s per paint; the
+                    // region-sized layers cut that ~5-10x. Content outside
+                    // the region never affects the composited result (the
+                    // final draw is masked to the region anyway).
+                    let screen_region = transform_rect(state.transform, *region);
+                    let clipped_region = screen_region.clipped(viewport);
+                    let lw = (clipped_region.w.ceil().max(1.0) as u32)
+                        .min(viewport.0 as u32)
+                        .max(1);
+                    let lh = (clipped_region.h.ceil().max(1.0) as u32)
+                        .min(viewport.1 as u32)
+                        .max(1);
+                    let ox = clipped_region.x.round().max(0.0) as i32;
+                    let oy = clipped_region.y.round().max(0.0) as i32;
+                    if let Some(mut layer) = Pixmap::new(lw, lh) {
                         let mut sub_state = state.clone();
+                        // Shift into layer-local coordinates.
+                        sub_state.transform[4] -= ox as f32;
+                        sub_state.transform[5] -= oy as f32;
+                        sub_state.clips = sub_state
+                            .clips
+                            .iter()
+                            .map(|c| ClipShape {
+                                rect: Rect {
+                                    x: c.rect.x - ox as f32,
+                                    y: c.rect.y - oy as f32,
+                                    w: c.rect.w,
+                                    h: c.rect.h,
+                                },
+                                radius: c.radius,
+                            })
+                            .collect();
                         self.paint_commands(
                             &cmds[i + 1..end],
                             &mut layer,
                             &mut sub_state,
                             font_system,
-                            viewport,
+                            (lw as f32, lh as f32),
+                            canvases,
                         );
                         apply_filters(&mut layer, filters);
                         // Clip the composite to the effect region + clips.
-                        let screen_region = transform_rect(state.transform, *region);
                         let extra = ClipShape {
                             rect: screen_region,
                             radius: BorderRadius::default(),
@@ -331,8 +626,8 @@ impl Painter {
                         let paint = PixmapPaint::default();
                         let mask = self.build_mask(state, viewport, Some(extra));
                         pixmap.draw_pixmap(
-                            0,
-                            0,
+                            ox,
+                            oy,
                             layer.as_ref(),
                             &paint,
                             Transform::identity(),
@@ -365,6 +660,13 @@ impl Painter {
                     radius,
                 } => {
                     self.paint_image(pixmap, state, *rect, image, *radius, viewport);
+                }
+                DrawCmd::Canvas { rect, radius, node } => {
+                    // Lazy resolution: the pixels are whatever the canvas
+                    // holds RIGHT NOW (fresh per raster — JS games).
+                    if let Some(image) = canvases.get(node) {
+                        self.paint_image(pixmap, state, *rect, image, *radius, viewport);
+                    }
                 }
                 DrawCmd::Border {
                     rect,

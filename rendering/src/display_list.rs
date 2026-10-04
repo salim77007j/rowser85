@@ -78,6 +78,20 @@ pub enum DrawCmd {
         /// Corner radii (rounded img).
         radius: BorderRadius,
     },
+    /// A `<canvas>` element: pixels resolve LAZILY at raster time from
+    /// the live canvas registry (Group E). Embedding snapshots in the list
+    /// (the old path) forced a full display-list rebuild on every canvas
+    /// draw op — JS-animated canvases (games, charts) repainted the whole
+    /// document walk per frame. Referencing the node keeps the list
+    /// stable across draws; the painter pulls fresh pixels per raster.
+    Canvas {
+        /// Destination rectangle (the canvas's layout box).
+        rect: Rect,
+        /// Corner radii.
+        radius: BorderRadius,
+        /// The canvas element's node id (registry key).
+        node: NodeId,
+    },
     /// Pushes a clip rectangle (intersected with the current clip): all
     /// commands until the matching [`DrawCmd::PopClip`] are clipped to it.
     /// Emitted for `overflow`-clipping containers. An optional per-element
@@ -135,7 +149,19 @@ pub enum DrawCmd {
 pub struct DisplayList {
     /// Commands in paint order.
     pub commands: Vec<DrawCmd>,
+    /// True when the list contains any page-fixed or sticky-anchored
+    /// subtree. Those elements do NOT translate with the page scroll, so
+    /// the painter's scroll-blit fast path must not run (it shifts prior
+    /// pixels, which would drag fixed/sticky content along).
+    pub has_fixed_or_sticky: bool,
+    /// Monotonic list identity (built lists get distinct ids). The painter
+    /// compares it against the last rendered frame to detect list changes
+    /// that make a scroll blit invalid (content changed beyond scrolling).
+    pub version: u64,
 }
+
+/// Display-list identity counter.
+static LIST_VERSION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 /// Decoded images keyed by DOM node id, produced by the engine (network or
 /// data URLs) before display list construction.
@@ -244,11 +270,13 @@ pub fn build_display_list(
         match entry.anchor {
             // Fixed: cancel the page scroll translation at paint time.
             PositionedAnchor::Fixed => {
+                list.has_fixed_or_sticky = true;
                 prefix.push(DrawCmd::PushFixed);
                 suffix.push(DrawCmd::PopTransform);
             }
             // Sticky: the painter computes the clamped offset from scroll.
             PositionedAnchor::Sticky(info) => {
+                list.has_fixed_or_sticky = true;
                 prefix.push(DrawCmd::PushSticky { info });
                 suffix.push(DrawCmd::PopTransform);
             }
@@ -269,6 +297,7 @@ pub fn build_display_list(
         commands.extend(suffix);
         list.commands.extend(commands);
     }
+    list.version = LIST_VERSION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     list
 }
 
@@ -749,8 +778,16 @@ fn paint_element(
         }
     }
 
-    // Images (img elements with a decoded image).
-    if let Some(image) = ctx.inputs.images.get(&node) {
+    // Replaced content: <img> with a decoded image, or <canvas> whose
+    // pixels resolve lazily at raster time (see DrawCmd::Canvas).
+    let tag = dom.element(node).map(|e| &*e.name.local);
+    if tag == Some("canvas") {
+        list.commands.push(DrawCmd::Canvas {
+            rect,
+            radius: style.border_radius,
+            node,
+        });
+    } else if let Some(image) = ctx.inputs.images.get(&node) {
         list.commands.push(DrawCmd::Image {
             rect,
             image: Arc::clone(image),

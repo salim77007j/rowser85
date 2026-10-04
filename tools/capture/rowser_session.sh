@@ -17,10 +17,12 @@ export DISPLAY=:99
 export LD_LIBRARY_PATH="$HERE/../../debs-extracted/usr-lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
 # name|url|settle_floor_secs — heavy pages get a higher minimum settle.
+# Floors scale with first-render cost (compute_styles dominates on
+# JS-built pages: github ~19s, wikipedia ~12s at 2 cores).
 PAGES=(
   "example|https://example.com|9"
-  "wikipedia|https://en.wikipedia.org/wiki/Rust_(programming_language)|18"
-  "github|https://github.com|24"
+  "wikipedia|https://en.wikipedia.org/wiki/Rust_(programming_language)|30"
+  "github|https://github.com|40"
   "hackernews|https://news.ycombinator.com|12"
   "rustlang|https://www.rust-lang.org|18"
   "bing|https://www.bing.com/search?q=rust+programming+language|15"
@@ -37,7 +39,7 @@ for entry in "${PAGES[@]}"; do
   # Fresh profile per page: no session restore, no cross-page interference.
   export HOME=$(mktemp -d /tmp/rowser-profile.XXXX)
   export XDG_DATA_HOME="$HOME/.local/share"
-  "$BIN" "$url" > /tmp/rowser-page.log 2>&1 &
+  "$BIN" "$url" > "/tmp/rowser-page-$name.log" 2>&1 &
   ROWSER_PID=$!
   sleep 5
 

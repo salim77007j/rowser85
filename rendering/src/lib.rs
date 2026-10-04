@@ -1463,4 +1463,217 @@ mod tests {
             rect.w
         );
     }
+
+    /// Group E — the scroll-blit fast path must produce (nearly) the same
+    /// pixels as a full re-raster at the new scroll, and must actually run
+    /// (scroll_stats). The page has NO fixed/sticky elements.
+    #[test]
+    fn scroll_blit_matches_full_render() {
+        // Tall document with distinct colored bands so every scroll
+        // position is visually unique.
+        let mut html = String::from("<html><body style=\"margin:0\">");
+        for i in 0..12 {
+            let shade = 20 + i * 18;
+            html.push_str(&format!(
+                "<div style=\"width:100%;height:100px;background-color:rgb({shade}, {shade}, {shade})\"></div>"
+            ));
+        }
+        html.push_str("</body></html>");
+        let doc = parse_html(html.as_bytes());
+        let mut engine = LayoutEngine::new();
+        let (styles, layout) = engine.layout_document(
+            &doc.dom,
+            &[],
+            &MediaContext::default(),
+            Viewport {
+                width: 300.0,
+                height: 200.0,
+            },
+            &Default::default(),
+        );
+        let list = build_display_list(&doc.dom, &styles, &layout, &PaintInputs::default());
+        assert!(!list.has_fixed_or_sticky, "test page must be blit-eligible");
+
+        // Path A: incremental scroll via the SAME painter (blit path).
+        let mut a = Painter::new();
+        let opts = |scroll: f32| RenderOptions {
+            viewport_width: 300,
+            viewport_height: 200,
+            scroll_y: scroll,
+            scale: 1.0,
+            ..RenderOptions::default()
+        };
+        let f0 = a
+            .render(&list, opts(0.0), &mut engine.font_system)
+            .expect("frame 0");
+        let f1 = a
+            .render(&list, opts(120.0), &mut engine.font_system)
+            .expect("frame 1 (blit)");
+        let (blits, fulls) = a.scroll_stats();
+        assert!(blits >= 1, "the 120px scroll must have blitted");
+        assert_eq!(fulls, 1, "only the initial frame full-rasters");
+
+        // Path B: fresh painter, full raster directly at scroll 120.
+        let mut b = Painter::new();
+        let g1 = b
+            .render(&list, opts(120.0), &mut engine.font_system)
+            .expect("frame 1 (full)");
+        assert_eq!((f1.width, f1.height), (g1.width, g1.height));
+
+        // Compare: overlapping region = shifted old pixels (exact); the
+        // exposed band re-rasters the same commands (sub-pixel identical
+        // in theory; allow a tiny tolerance for float rounding).
+        let mut worst: i32 = 0;
+        let mut mismatched = 0usize;
+        for (p, q) in f1.pixels.iter().zip(g1.pixels.iter()) {
+            let d = (*p as i32 - *q as i32).abs();
+            if d > worst {
+                worst = d;
+            }
+            if d > 2 {
+                mismatched += 1;
+            }
+        }
+        assert!(
+            worst <= 2 && mismatched == 0,
+            "blit vs full render differ: worst={worst}, mismatched={mismatched}/{}",
+            g1.pixels.len()
+        );
+        let _ = f0;
+    }
+
+    /// Group E — pages with position:fixed content must NOT take the blit
+    /// path (fixed elements don't translate with the page scroll).
+    #[test]
+    fn scroll_blit_refuses_fixed_elements() {
+        let html = br#"<html><body style="margin:0">
+            <div style="height:2000px;background-color:#101010"></div>
+            <div style="position:fixed;top:0;left:0;width:50px;height:50px;background-color:#ff0000"></div>
+        </body></html>"#;
+        let doc = parse_html(html);
+        let mut engine = LayoutEngine::new();
+        let (styles, layout) = engine.layout_document(
+            &doc.dom,
+            &[],
+            &MediaContext::default(),
+            Viewport {
+                width: 300.0,
+                height: 200.0,
+            },
+            &Default::default(),
+        );
+        let list = build_display_list(&doc.dom, &styles, &layout, &PaintInputs::default());
+        assert!(
+            list.has_fixed_or_sticky,
+            "the fixed div must set the blit-refusal flag"
+        );
+        let mut painter = Painter::new();
+        let opts = |scroll: f32| RenderOptions {
+            viewport_width: 300,
+            viewport_height: 200,
+            scroll_y: scroll,
+            scale: 1.0,
+            ..RenderOptions::default()
+        };
+        let _ = painter
+            .render(&list, opts(0.0), &mut engine.font_system)
+            .expect("frame 0");
+        let _ = painter
+            .render(&list, opts(80.0), &mut engine.font_system)
+            .expect("frame 1");
+        let (blits, _) = painter.scroll_stats();
+        assert_eq!(blits, 0, "fixed elements must force full re-raster");
+    }
+
+    /// Group E — DrawCmd::Canvas resolves pixels LAZILY per raster: a
+    /// canvas redraw between two renders of the same list must show up in
+    /// the frame.
+    #[test]
+    fn canvas_command_pulls_fresh_pixels_per_raster() {
+        use crate::canvas2d::{new_registry, Canvas2D};
+        use crate::display_list::DrawCmd;
+        use crate::Rect;
+        use rowser_parsing::cascade::BorderRadius;
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let registry = new_registry();
+        let node = 7u32;
+        registry
+            .borrow_mut()
+            .insert(node, Rc::new(RefCell::new(Canvas2D::new(40, 40))));
+        // Paint the canvas red.
+        {
+            let reg = registry.borrow();
+            let canvas = reg.get(&node).cloned().unwrap();
+            let mut c = canvas.borrow_mut();
+            c.set_fill_color(crate::canvas2d::parse_color("#ff0000").unwrap());
+            c.begin_path();
+            c.rect(0.0, 0.0, 40.0, 40.0);
+            c.fill(false);
+        }
+
+        let list = crate::DisplayList {
+            commands: vec![DrawCmd::Canvas {
+                rect: Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    w: 40.0,
+                    h: 40.0,
+                },
+                radius: BorderRadius::default(),
+                node,
+            }],
+            ..Default::default()
+        };
+        let mut painter = Painter::new();
+        let mut engine = LayoutEngine::new();
+        let frame1 = painter
+            .render_ctx(
+                &list,
+                RenderOptions {
+                    viewport_width: 60,
+                    viewport_height: 60,
+                    ..RenderOptions::default()
+                },
+                &mut engine.font_system,
+                Some(&registry),
+            )
+            .expect("frame 1");
+        let i = (20 * frame1.width as usize + 20) * 4;
+        assert!(
+            frame1.pixels[i] > 150 && frame1.pixels[i + 1] < 90 && frame1.pixels[i + 3] == 255,
+            "canvas should paint red, got {:?}",
+            &frame1.pixels[i..i + 4]
+        );
+
+        // Redraw blue WITHOUT touching the display list.
+        {
+            let reg = registry.borrow();
+            let canvas = reg.get(&node).cloned().unwrap();
+            let mut c = canvas.borrow_mut();
+            c.set_fill_color(crate::canvas2d::parse_color("#0000ff").unwrap());
+            c.begin_path();
+            c.rect(0.0, 0.0, 40.0, 40.0);
+            c.fill(false);
+        }
+        let frame2 = painter
+            .render_ctx(
+                &list,
+                RenderOptions {
+                    viewport_width: 60,
+                    viewport_height: 60,
+                    ..RenderOptions::default()
+                },
+                &mut engine.font_system,
+                Some(&registry),
+            )
+            .expect("frame 2");
+        let i = (20 * frame2.width as usize + 20) * 4;
+        assert!(
+            frame2.pixels[i + 2] > 150 && frame2.pixels[i + 1] < 90,
+            "same list must paint the NEW canvas pixels (blue), got {:?}",
+            &frame2.pixels[i..i + 4]
+        );
+    }
 }
