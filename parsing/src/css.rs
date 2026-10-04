@@ -32,6 +32,7 @@ use lightningcss::rules::style::StyleRule;
 use lightningcss::rules::supports::SupportsCondition;
 use lightningcss::rules::CssRule;
 use lightningcss::stylesheet::{ParserOptions, PrinterOptions, StyleSheet};
+use cssparser::ToCss as _;
 use lightningcss::traits::ToCss;
 use lightningcss::values::color::{CssColor, LABColor, RGBA};
 use lightningcss::values::gradient::{
@@ -69,6 +70,9 @@ pub struct StyleRuleEntry {
     pub important: StyleProps,
     /// Source order for stable sorting.
     pub order: u32,
+    /// When set: this entry styles the element's ::before/::after (the
+    /// selector list ends with that pseudo-element).
+    pub pseudo: Option<crate::cascade::PseudoKind>,
 }
 
 /// A parsed stylesheet.
@@ -188,7 +192,7 @@ fn collect_rules(
 ) {
     for rule in rules {
         match rule {
-            CssRule::Style(style) => collect_style_rule(style, out, order),
+            CssRule::Style(style) => collect_style_rule(style, out, order, media),
             CssRule::Media(media_rule) => {
                 if media_matches(&media_rule.query, media) {
                     collect_rules(&media_rule.rules.0, media, out, order);
@@ -216,14 +220,18 @@ fn collect_rules(
                 collect_rules(&layer.rules.0, media, out, order);
             }
             CssRule::FontFace(font_face) => collect_font_face(font_face, out),
-            CssRule::Keyframes(keyframes) => collect_keyframes(keyframes, out),
+            CssRule::Keyframes(keyframes) => collect_keyframes(keyframes, out, media),
             _ => {}
         }
     }
 }
 
 /// Flattens one `@keyframes` rule: name + per-selector keyframes.
-fn collect_keyframes(rule: &KeyframesRule<'_>, out: &mut ParsedStylesheet) {
+fn collect_keyframes(
+    rule: &KeyframesRule<'_>,
+    out: &mut ParsedStylesheet,
+    media: &MediaContext,
+) {
     let name = match &rule.name {
         lightningcss::rules::keyframes::KeyframesName::Ident(custom) => custom.to_string(),
         lightningcss::rules::keyframes::KeyframesName::Custom(s) => s.to_string(),
@@ -239,7 +247,7 @@ fn collect_keyframes(rule: &KeyframesRule<'_>, out: &mut ParsedStylesheet) {
             };
             let mut props = StyleProps::default();
             for decl in &keyframe.declarations.declarations {
-                apply_property(&mut props, decl);
+                apply_property(&mut props, decl, media);
             }
             frames.push(KeyframeRaw { offset, props });
         }
@@ -275,7 +283,12 @@ fn declaration_supported(property: &str, value: &str) -> bool {
     matches!(parsed, Ok(block) if !(block.declarations.is_empty() && block.important_declarations.is_empty()))
 }
 
-fn collect_style_rule(rule: &StyleRule<'_>, out: &mut ParsedStylesheet, order: &mut u32) {
+fn collect_style_rule(
+    rule: &StyleRule<'_>,
+    out: &mut ParsedStylesheet,
+    order: &mut u32,
+    media: &MediaContext,
+) {
     let Ok(selector_text) = rule.selectors.to_css_string(PrinterOptions::default()) else {
         return;
     };
@@ -291,10 +304,10 @@ fn collect_style_rule(rule: &StyleRule<'_>, out: &mut ParsedStylesheet, order: &
     let mut props = StyleProps::default();
     let mut important = StyleProps::default();
     for decl in &rule.declarations.declarations {
-        apply_property(&mut props, decl);
+        apply_property(&mut props, decl, media);
     }
     for decl in &rule.declarations.important_declarations {
-        apply_property(&mut important, decl);
+        apply_property(&mut important, decl, media);
     }
     // Raw token capture: custom properties (`--name: value`) and
     // declarations referencing `var(...)` do not survive the typed Property
@@ -304,15 +317,60 @@ fn collect_style_rule(rule: &StyleRule<'_>, out: &mut ParsedStylesheet, order: &
     if let Ok(block_text) = rule.declarations.to_css_string(PrinterOptions::default()) {
         split_raw_declarations(&block_text, &mut props, &mut important);
     }
-    out.rules.push(StyleRuleEntry {
-        selector_text,
-        selectors,
-        specificity,
-        props,
-        important,
-        order: *order,
-    });
-    *order += 1;
+    // Split the selector list by pseudo-element kind: element rules and
+    // ::before/::after rules cascade into different buckets (a comma list
+    // like ".a, .b::before" splits into two entries).
+    use rowser_dom::selector::PseudoElement;
+    let mut normal: Vec<rowser_dom::Selector> = Vec::new();
+    let mut before: Vec<rowser_dom::Selector> = Vec::new();
+    let mut after: Vec<rowser_dom::Selector> = Vec::new();
+    for sel in selectors.slice() {
+        if sel.has_pseudo_element() {
+            match sel.pseudo_element() {
+                Some(PseudoElement::Before) => before.push(sel.clone()),
+                Some(PseudoElement::After) => after.push(sel.clone()),
+                // Other pseudo-elements (::first-line, ::selection…): not
+                // styled yet — drop those selectors (CSS error recovery).
+                _ => {}
+            }
+        } else {
+            normal.push(sel.clone());
+        }
+    }
+    let mut emit = |bucket: Vec<rowser_dom::Selector>,
+                    pseudo: Option<crate::cascade::PseudoKind>,
+                    order: &mut u32| {
+        if bucket.is_empty() {
+            return;
+        }
+        let list = SelectorList::from_iter(bucket.into_iter());
+        let text = list.to_css_string();
+        out.rules.push(StyleRuleEntry {
+            selector_text: text,
+            selectors: list,
+            specificity,
+            props: props.clone(),
+            important: important.clone(),
+            order: *order,
+            pseudo,
+        });
+        *order += 1;
+    };
+    emit(
+        normal,
+        None,
+        order,
+    );
+    emit(
+        before,
+        Some(crate::cascade::PseudoKind::Before),
+        order,
+    );
+    emit(
+        after,
+        Some(crate::cascade::PseudoKind::After),
+        order,
+    );
 }
 
 /// Flattens one `@font-face` rule: CSS family name + url() sources.
@@ -365,7 +423,7 @@ fn collect_font_face(rule: &FontFaceRuleDef<'_>, out: &mut ParsedStylesheet) {
 }
 
 /// Inline `style="..."` attribute parsing.
-pub fn parse_style_attribute(css: &str) -> StyleProps {
+pub fn parse_style_attribute(css: &str, media: &MediaContext) -> StyleProps {
     let mut props = StyleProps::default();
     let mut sink = StyleProps::default();
     if let Ok(block) = DeclarationBlock::parse_string(
@@ -376,11 +434,11 @@ pub fn parse_style_attribute(css: &str) -> StyleProps {
         },
     ) {
         for decl in &block.declarations {
-            apply_property(&mut props, decl);
+            apply_property(&mut props, decl, media);
         }
         // `!important` in inline styles behaves identically for our cascade.
         for decl in &block.important_declarations {
-            apply_property(&mut props, decl);
+            apply_property(&mut props, decl, media);
         }
         if let Ok(block_text) = block.to_css_string(PrinterOptions::default()) {
             split_raw_declarations(&block_text, &mut props, &mut sink);
@@ -441,10 +499,84 @@ fn split_raw_declarations(block: &str, normal: &mut StyleProps, important: &mut 
                         target.clear = Some(mode);
                     }
                 }
+                // `content` (pseudo-elements): lightningcss treats it as an
+                // unknown property, so it only survives via this raw path.
+                "content" => {
+                    if let Some(spec) = parse_content_spec(&value) {
+                        target.content = Some(spec);
+                    }
+                }
                 _ => {}
             }
         }
     }
+}
+
+/// `content` for pseudo-elements: strings, attr(), none/normal.
+fn parse_content_spec(value: &str) -> Option<crate::cascade::ContentSpec> {
+    use crate::cascade::ContentSpec;
+    let value = value.trim();
+    let lower = value.to_ascii_lowercase();
+    if lower == "none" {
+        return Some(ContentSpec::None);
+    }
+    if lower == "normal" {
+        return Some(ContentSpec::Normal);
+    }
+    // attr(name)
+    if lower.starts_with("attr(") && lower.ends_with(')') {
+        let name = value[5..value.len() - 1].trim();
+        if !name.is_empty() {
+            return Some(ContentSpec::Attr(name.to_string()));
+        }
+    }
+    // Quoted string(s): concatenate every quoted segment in the value.
+    let mut text = String::new();
+    let mut chars = value.char_indices().peekable();
+    while let Some((i, ch)) = chars.next() {
+        if ch == '"' || ch == '\'' {
+            let quote = ch;
+            let rest = &value[i + 1..];
+            if let Some(end) = rest.find(quote) {
+                let segment = &rest[..end];
+                // CSS string escapes: \n, \", \\ etc.
+                let mut unescaped = String::new();
+                let mut esc = segment.chars().peekable();
+                while let Some(c) = esc.next() {
+                    if c == '\\' {
+                        if let Some(&next) = esc.peek() {
+                            match next {
+                                'n' => {
+                                    unescaped.push('\n');
+                                    esc.next();
+                                }
+                                't' => {
+                                    unescaped.push('\t');
+                                    esc.next();
+                                }
+                                other => {
+                                    unescaped.push(other);
+                                    esc.next();
+                                }
+                            }
+                        }
+                    } else {
+                        unescaped.push(c);
+                    }
+                }
+                text.push_str(&unescaped);
+                // Skip past this string.
+                let consumed = i + 1 + end + 1;
+                while chars.next().is_some() && chars.peek().is_some_and(|&(j, _)| j < consumed) {}
+                let _ = consumed;
+                continue;
+            }
+        }
+    }
+    if !text.is_empty() {
+        return Some(ContentSpec::Text(text));
+    }
+    None
 }
 
 /// `float: left | right | none` (inline-start/end degrade to the physical
@@ -473,15 +605,89 @@ fn parse_clear_keyword(value: &str) -> Option<ClearMode> {
 // value conversions
 // ---------------------------------------------------------------------------
 
-fn convert_length(lp: &LengthPercentage) -> Length {
+fn convert_length(lp: &LengthPercentage, media: &MediaContext) -> Length {
     match lp {
-        LengthPercentage::Dimension(value) => convert_length_value(value),
+        LengthPercentage::Dimension(value) => convert_length_value(value, media),
         LengthPercentage::Percentage(p) => Length::Percent(p.0),
-        LengthPercentage::Calc(_) => Length::Px(0.0),
+        LengthPercentage::Calc(calc) => calc_to_length(calc, media),
     }
 }
 
-fn convert_length_value(value: &LengthValue) -> Length {
+/// Resolves a lightningcss calc tree into a linear (percent, px) pair.
+/// Pure-absolute min()/max()/clamp() resolve exactly; percentage-bearing
+/// forms degrade to their first argument's linear form (resolved by the
+/// layout two-pass against the containing block).
+fn calc_to_length(calc: &lightningcss::values::calc::Calc<LengthPercentage>, media: &MediaContext) -> Length {
+    let (pct, px) = calc_linear(calc, media);
+    if pct == 0.0 {
+        Length::Px(px)
+    } else {
+        Length::Calc { pct, px }
+    }
+}
+
+/// Walks a calc tree accumulating (percent fraction, px).
+fn calc_linear(
+    calc: &lightningcss::values::calc::Calc<LengthPercentage>,
+    media: &MediaContext,
+) -> (f32, f32) {
+    use lightningcss::values::calc::{Calc as C, MathFunction};
+    match calc {
+        C::Value(v) => match v.as_ref() {
+            LengthPercentage::Dimension(d) => match convert_length_value(d, media) {
+                Length::Px(n) => (0.0, n),
+                _ => (0.0, 0.0),
+            },
+            LengthPercentage::Percentage(p) => (p.0, 0.0),
+            LengthPercentage::Calc(_) => (0.0, 0.0),
+        },
+        C::Number(_) => (0.0, 0.0),
+        C::Sum(a, b) => {
+            let (pa, xa) = calc_linear(a, media);
+            let (pb, xb) = calc_linear(b, media);
+            (pa + pb, xa + xb)
+        }
+        C::Product(n, inner) => {
+            let (p, x) = calc_linear(inner, media);
+            (p * n, x * n)
+        }
+        C::Function(f) => match f.as_ref() {
+            MathFunction::Calc(inner) => calc_linear(inner, media),
+            MathFunction::Min(args) => {
+                let resolved: Vec<(f32, f32)> =
+                    args.iter().map(|a| calc_linear(a, media)).collect();
+                if resolved.iter().all(|(p, _)| p.abs() < 1e-6) {
+                    let px = resolved.iter().map(|(_, x)| *x).fold(f32::INFINITY, f32::min);
+                    (0.0, px)
+                } else {
+                    resolved.first().copied().unwrap_or((0.0, 0.0))
+                }
+            }
+            MathFunction::Max(args) => {
+                let resolved: Vec<(f32, f32)> =
+                    args.iter().map(|a| calc_linear(a, media)).collect();
+                if resolved.iter().all(|(p, _)| p.abs() < 1e-6) {
+                    let px = resolved.iter().map(|(_, x)| *x).fold(f32::NEG_INFINITY, f32::max);
+                    (0.0, px)
+                } else {
+                    resolved.first().copied().unwrap_or((0.0, 0.0))
+                }
+            }
+            MathFunction::Clamp(min, val, max) => {
+                let (p, x) = calc_linear(val, media);
+                if p.abs() < 1e-6 {
+                    let (_, min_x) = calc_linear(min, media);
+                    let (_, max_x) = calc_linear(max, media);
+                    return (0.0, x.min(max_x).max(min_x));
+                }
+                (p, x)
+            }
+            _ => (0.0, 0.0),
+        },
+    }
+}
+
+fn convert_length_value(value: &LengthValue, media: &MediaContext) -> Length {
     match value {
         LengthValue::Px(n) => Length::Px(*n),
         LengthValue::Em(n) => Length::Em(*n),
@@ -492,27 +698,44 @@ fn convert_length_value(value: &LengthValue) -> Length {
         LengthValue::In(n) => Length::Px(n * 96.0),
         LengthValue::Pt(n) => Length::Px(n * 96.0 / 72.0),
         LengthValue::Pc(n) => Length::Px(n * 16.0),
+        // Viewport units resolve at compute time against the media context.
+        LengthValue::Vw(n) | LengthValue::Svw(n) | LengthValue::Lvw(n) | LengthValue::Dvw(n) => {
+            Length::Px(n * media.width / 100.0)
+        }
+        LengthValue::Vh(n) | LengthValue::Svh(n) | LengthValue::Lvh(n) | LengthValue::Dvh(n) => {
+            Length::Px(n * media.height / 100.0)
+        }
+        LengthValue::Vmin(n)
+        | LengthValue::Svmin(n)
+        | LengthValue::Lvmin(n)
+        | LengthValue::Dvmin(n) => Length::Px(n * media.width.min(media.height) / 100.0),
+        LengthValue::Vmax(n)
+        | LengthValue::Svmax(n)
+        | LengthValue::Lvmax(n)
+        | LengthValue::Dvmax(n) => Length::Px(n * media.width.max(media.height) / 100.0),
         _ => Length::Px(0.0),
     }
 }
 
-fn convert_lpa(value: &LengthPercentageOrAuto) -> LengthOrAuto {
+fn convert_lpa(value: &LengthPercentageOrAuto, media: &MediaContext) -> LengthOrAuto {
     match value {
         LengthPercentageOrAuto::Auto => LengthOrAuto::Auto,
-        LengthPercentageOrAuto::LengthPercentage(lp) => LengthOrAuto::Length(convert_length(lp)),
+        LengthPercentageOrAuto::LengthPercentage(lp) => {
+            LengthOrAuto::Length(convert_length(lp, media))
+        }
     }
 }
 
-fn convert_size(value: &Size) -> LengthOrAuto {
+fn convert_size(value: &Size, media: &MediaContext) -> LengthOrAuto {
     match value {
-        Size::LengthPercentage(lp) => LengthOrAuto::Length(convert_length(lp)),
+        Size::LengthPercentage(lp) => LengthOrAuto::Length(convert_length(lp, media)),
         _ => LengthOrAuto::Auto,
     }
 }
 
-fn convert_max_size(value: &MaxSize) -> LengthOrAuto {
+fn convert_max_size(value: &MaxSize, media: &MediaContext) -> LengthOrAuto {
     match value {
-        MaxSize::LengthPercentage(lp) => LengthOrAuto::Length(convert_length(lp)),
+        MaxSize::LengthPercentage(lp) => LengthOrAuto::Length(convert_length(lp, media)),
         _ => LengthOrAuto::Auto,
     }
 }
@@ -590,14 +813,16 @@ fn oklab_to_rgba((l, a, b): (f32, f32, f32), alpha: f32) -> Rgba {
     )
 }
 
-fn convert_font_size(value: &LcFontSize) -> FontSizeRaw {
+fn convert_font_size(value: &LcFontSize, media: &MediaContext) -> FontSizeRaw {
     use lightningcss::properties::font::{AbsoluteFontSize, RelativeFontSize};
     match value {
-        LcFontSize::Length(lp) => match convert_length(lp) {
+        LcFontSize::Length(lp) => match convert_length(lp, media) {
             Length::Px(n) => FontSizeRaw::Px(n),
             Length::Em(n) => FontSizeRaw::Em(n),
             Length::Rem(n) => FontSizeRaw::Rem(n),
             Length::Percent(n) => FontSizeRaw::Percent(n),
+            // calc() font sizes: use the px component.
+            Length::Calc { px, .. } => FontSizeRaw::Px(px),
         },
         LcFontSize::Absolute(absolute) => {
             let px = match absolute {
@@ -669,7 +894,7 @@ fn convert_font_family(list: &[LcFontFamily<'_>]) -> Vec<String> {
 // property application
 // ---------------------------------------------------------------------------
 
-fn apply_property(props: &mut StyleProps, property: &Property<'_>) {
+fn apply_property(props: &mut StyleProps, property: &Property<'_>, media: &MediaContext) {
     use lightningcss::properties::Property as P;
     match property {
         P::BackgroundColor(value) => props.background_color = Some(convert_color(value)),
@@ -681,46 +906,46 @@ fn apply_property(props: &mut StyleProps, property: &Property<'_>) {
             if let Some(bg) = value.first() {
                 props.background_color = Some(convert_color(&bg.color));
             }
-            let layers = background_layers_from_shorthand(value);
+            let layers = background_layers_from_shorthand(value, media);
             if let Some(layers) = layers {
                 props.background_layers = Some(layers);
             }
         }
         P::Color(value) => props.color = Some(convert_color(value)),
         P::Display(value) => props.display = Some(convert_display(value)),
-        P::Width(value) => props.width = Some(convert_size(value)),
-        P::Height(value) => props.height = Some(convert_size(value)),
-        P::MinWidth(value) => props.min_width = Some(convert_size(value)),
-        P::MinHeight(value) => props.min_height = Some(convert_size(value)),
-        P::MaxWidth(value) => props.max_width = Some(convert_max_size(value)),
-        P::MaxHeight(value) => props.max_height = Some(convert_max_size(value)),
+        P::Width(value) => props.width = Some(convert_size(value, media)),
+        P::Height(value) => props.height = Some(convert_size(value, media)),
+        P::MinWidth(value) => props.min_width = Some(convert_size(value, media)),
+        P::MinHeight(value) => props.min_height = Some(convert_size(value, media)),
+        P::MaxWidth(value) => props.max_width = Some(convert_max_size(value, media)),
+        P::MaxHeight(value) => props.max_height = Some(convert_max_size(value, media)),
         P::Margin(value) => {
-            props.margin_top = Some(convert_lpa(&value.top));
-            props.margin_right = Some(convert_lpa(&value.right));
-            props.margin_bottom = Some(convert_lpa(&value.bottom));
-            props.margin_left = Some(convert_lpa(&value.left));
+            props.margin_top = Some(convert_lpa(&value.top, media));
+            props.margin_right = Some(convert_lpa(&value.right, media));
+            props.margin_bottom = Some(convert_lpa(&value.bottom, media));
+            props.margin_left = Some(convert_lpa(&value.left, media));
         }
-        P::MarginTop(value) => props.margin_top = Some(convert_lpa(value)),
-        P::MarginRight(value) => props.margin_right = Some(convert_lpa(value)),
-        P::MarginBottom(value) => props.margin_bottom = Some(convert_lpa(value)),
-        P::MarginLeft(value) => props.margin_left = Some(convert_lpa(value)),
+        P::MarginTop(value) => props.margin_top = Some(convert_lpa(value, media)),
+        P::MarginRight(value) => props.margin_right = Some(convert_lpa(value, media)),
+        P::MarginBottom(value) => props.margin_bottom = Some(convert_lpa(value, media)),
+        P::MarginLeft(value) => props.margin_left = Some(convert_lpa(value, media)),
         P::Padding(value) => {
-            props.padding_top = Some(convert_lpa(&value.top));
-            props.padding_right = Some(convert_lpa(&value.right));
-            props.padding_bottom = Some(convert_lpa(&value.bottom));
-            props.padding_left = Some(convert_lpa(&value.left));
+            props.padding_top = Some(convert_lpa(&value.top, media));
+            props.padding_right = Some(convert_lpa(&value.right, media));
+            props.padding_bottom = Some(convert_lpa(&value.bottom, media));
+            props.padding_left = Some(convert_lpa(&value.left, media));
         }
-        P::PaddingTop(value) => props.padding_top = Some(convert_lpa(value)),
-        P::PaddingRight(value) => props.padding_right = Some(convert_lpa(value)),
-        P::PaddingBottom(value) => props.padding_bottom = Some(convert_lpa(value)),
-        P::PaddingLeft(value) => props.padding_left = Some(convert_lpa(value)),
-        P::BorderTopWidth(value) => props.border_top = Some(border_from_width(value)),
-        P::BorderRightWidth(value) => props.border_right = Some(border_from_width(value)),
-        P::BorderBottomWidth(value) => props.border_bottom = Some(border_from_width(value)),
-        P::BorderLeftWidth(value) => props.border_left = Some(border_from_width(value)),
+        P::PaddingTop(value) => props.padding_top = Some(convert_lpa(value, media)),
+        P::PaddingRight(value) => props.padding_right = Some(convert_lpa(value, media)),
+        P::PaddingBottom(value) => props.padding_bottom = Some(convert_lpa(value, media)),
+        P::PaddingLeft(value) => props.padding_left = Some(convert_lpa(value, media)),
+        P::BorderTopWidth(value) => props.border_top = Some(border_from_width(value, media)),
+        P::BorderRightWidth(value) => props.border_right = Some(border_from_width(value, media)),
+        P::BorderBottomWidth(value) => props.border_bottom = Some(border_from_width(value, media)),
+        P::BorderLeftWidth(value) => props.border_left = Some(border_from_width(value, media)),
         // `border` shorthand: width/style/color on all four edges.
         P::Border(value) => {
-            let edge = border_shorthand_edge(&value.width, &value.style, &value.color);
+            let edge = border_shorthand_edge(&value.width, &value.style, &value.color, media);
             props.border_top = Some(edge);
             props.border_right = Some(edge);
             props.border_bottom = Some(edge);
@@ -732,6 +957,7 @@ fn apply_property(props: &mut StyleProps, property: &Property<'_>) {
                 &value.width,
                 &value.style,
                 &value.color,
+                media,
             ))
         }
         P::BorderRight(value) => {
@@ -739,6 +965,7 @@ fn apply_property(props: &mut StyleProps, property: &Property<'_>) {
                 &value.width,
                 &value.style,
                 &value.color,
+                media,
             ))
         }
         P::BorderBottom(value) => {
@@ -746,6 +973,7 @@ fn apply_property(props: &mut StyleProps, property: &Property<'_>) {
                 &value.width,
                 &value.style,
                 &value.color,
+                media,
             ))
         }
         P::BorderLeft(value) => {
@@ -753,6 +981,7 @@ fn apply_property(props: &mut StyleProps, property: &Property<'_>) {
                 &value.width,
                 &value.style,
                 &value.color,
+                media,
             ))
         }
         P::BorderTopColor(value) => set_border_color(props, Side::Top, convert_color(value)),
@@ -768,56 +997,58 @@ fn apply_property(props: &mut StyleProps, property: &Property<'_>) {
         }
         P::BorderLeftStyle(value) => set_border_style(props, Side::Left, convert_line_style(value)),
         P::FontFamily(value) => props.font_family = Some(convert_font_family(value)),
-        P::FontSize(value) => props.font_size = Some(convert_font_size(value)),
+        P::FontSize(value) => props.font_size = Some(convert_font_size(value, media)),
         P::FontWeight(value) => props.font_weight = Some(convert_font_weight(value)),
         P::FontStyle(value) => props.font_style = Some(convert_font_style(value)),
-        P::LineHeight(value) => props.line_height = Some(convert_line_height(value)),
+        P::LineHeight(value) => props.line_height = Some(convert_line_height(value, media)),
         P::TextAlign(value) => props.text_align = Some(convert_text_align(value)),
         P::Flex(value, _) => {
             props.flex_grow = Some(value.grow);
             props.flex_shrink = Some(value.shrink);
-            props.flex_basis = Some(convert_lpa(&value.basis));
+            props.flex_basis = Some(convert_lpa(&value.basis, media));
         }
         P::FlexDirection(value, _) => props.flex_direction = Some(convert_flex_direction(value)),
         P::FlexWrap(value, _) => props.flex_wrap = Some(convert_flex_wrap(value)),
         P::FlexGrow(value, _) => props.flex_grow = Some(*value),
         P::FlexShrink(value, _) => props.flex_shrink = Some(*value),
-        P::FlexBasis(value, _) => props.flex_basis = Some(convert_lpa(value)),
+        P::FlexBasis(value, _) => props.flex_basis = Some(convert_lpa(value, media)),
         P::JustifyContent(value, _) => props.justify_content = Some(convert_justify(value)),
         P::AlignItems(value, _) => props.align_items = Some(convert_align_items(value)),
         P::AlignContent(value, _) => props.align_content = Some(convert_align_content(value)),
         P::Gap(value) => {
-            props.row_gap = Some(convert_gap(&value.row));
-            props.column_gap = Some(convert_gap(&value.column));
+            props.row_gap = Some(convert_gap(&value.row, media));
+            props.column_gap = Some(convert_gap(&value.column, media));
         }
-        P::RowGap(value) => props.row_gap = Some(convert_gap(value)),
-        P::ColumnGap(value) => props.column_gap = Some(convert_gap(value)),
+        P::RowGap(value) => props.row_gap = Some(convert_gap(value, media)),
+        P::ColumnGap(value) => props.column_gap = Some(convert_gap(value, media)),
         // Grid templates: the backbone of modern page layout
         // (Wikipedia's Vector 2022 skin is a CSS grid). Without track
         // definitions every grid collapsed into a single column.
         P::GridTemplateColumns(value) => {
-            props.grid_template_columns = Some(convert_grid_tracks(value))
+            props.grid_template_columns = Some(convert_grid_tracks(value, media))
         }
-        P::GridTemplateRows(value) => props.grid_template_rows = Some(convert_grid_tracks(value)),
+        P::GridTemplateRows(value) => props.grid_template_rows = Some(convert_grid_tracks(value, media)),
         // `grid-template` shorthand ("rows / columns") — Wikipedia's Vector
         // 2022 skin and most modern sites define their page grids this way.
         P::GridTemplate(value) => {
-            props.grid_template_rows = Some(convert_grid_tracks(&value.rows));
-            props.grid_template_columns = Some(convert_grid_tracks(&value.columns));
+            props.grid_template_rows = Some(convert_grid_tracks(&value.rows, media));
+            props.grid_template_columns = Some(convert_grid_tracks(&value.columns, media));
             props.grid_template_areas = Some(convert_grid_areas(&value.areas));
         }
         // Named grid areas ("'a b' 'c d'") + per-item `grid-area: name`.
-        P::GridTemplateAreas(value) => props.grid_template_areas = Some(convert_grid_areas(value)),
+        P::GridTemplateAreas(value) => {
+            props.grid_template_areas = Some(convert_grid_areas(value))
+        }
         P::GridArea(value) => {
             props.grid_area = area_name_from(value);
             // 4-line form of grid-area: row-start / column-start / row-end /
             // column-end. The named form is handled above; line/span forms
             // map onto the row/column placements.
             if props.grid_area.is_none() {
-                let rs = grid_line_raw(&value.row_start);
-                let cs = grid_line_raw(&value.column_start);
-                let re = grid_line_raw(&value.row_end);
-                let ce = grid_line_raw(&value.column_end);
+                let rs = grid_line_raw(&value.row_start, media);
+                let cs = grid_line_raw(&value.column_start, media);
+                let re = grid_line_raw(&value.row_end, media);
+                let ce = grid_line_raw(&value.column_end, media);
                 if rs.is_some() || cs.is_some() || re.is_some() || ce.is_some() {
                     props.grid_row = Some(GridPlacementRaw {
                         start: rs.unwrap_or(GridLineRaw::Auto),
@@ -833,34 +1064,34 @@ fn apply_property(props: &mut StyleProps, property: &Property<'_>) {
         // Line-based grid item placement (the modern layout workhorse:
         // `grid-column: 1 / 3`, `grid-row: span 2`).
         P::GridColumn(value) => {
-            props.grid_column = Some(grid_placement_from(&value.start, &value.end));
+            props.grid_column = Some(grid_placement_from(&value.start, &value.end, media));
         }
         P::GridRow(value) => {
-            props.grid_row = Some(grid_placement_from(&value.start, &value.end));
+            props.grid_row = Some(grid_placement_from(&value.start, &value.end, media));
         }
         P::GridColumnStart(value) => {
             let mut p = props.grid_column.unwrap_or_default();
-            p.start = grid_line_raw(value).unwrap_or(GridLineRaw::Auto);
+            p.start = grid_line_raw(value, media).unwrap_or(GridLineRaw::Auto);
             props.grid_column = Some(p);
         }
         P::GridColumnEnd(value) => {
             let mut p = props.grid_column.unwrap_or_default();
-            p.end = grid_line_raw(value).unwrap_or(GridLineRaw::Auto);
+            p.end = grid_line_raw(value, media).unwrap_or(GridLineRaw::Auto);
             props.grid_column = Some(p);
         }
         P::GridRowStart(value) => {
             let mut p = props.grid_row.unwrap_or_default();
-            p.start = grid_line_raw(value).unwrap_or(GridLineRaw::Auto);
+            p.start = grid_line_raw(value, media).unwrap_or(GridLineRaw::Auto);
             props.grid_row = Some(p);
         }
         P::GridRowEnd(value) => {
             let mut p = props.grid_row.unwrap_or_default();
-            p.end = grid_line_raw(value).unwrap_or(GridLineRaw::Auto);
+            p.end = grid_line_raw(value, media).unwrap_or(GridLineRaw::Auto);
             props.grid_row = Some(p);
         }
         // Implicit track sizing.
-        P::GridAutoRows(value) => props.grid_auto_rows = Some(track_size_list(value)),
-        P::GridAutoColumns(value) => props.grid_auto_columns = Some(track_size_list(value)),
+        P::GridAutoRows(value) => props.grid_auto_rows = Some(track_size_list(value, media)),
+        P::GridAutoColumns(value) => props.grid_auto_columns = Some(track_size_list(value, media)),
         // overflow: hidden/auto/scroll/clip — the containment backbone of
         // dropdown panels, media viewers and sticky chrome.
         P::Overflow(value) => {
@@ -875,10 +1106,10 @@ fn apply_property(props: &mut StyleProps, property: &Property<'_>) {
         // Inset properties: anchor absolute elements and offset relative
         // ones. Previously unparsed — position:absolute navigation without
         // top/left stacked everything at the containing block origin.
-        P::Top(value) => props.top = Some(convert_lpa(value)),
-        P::Bottom(value) => props.bottom = Some(convert_lpa(value)),
-        P::Left(value) => props.left = Some(convert_lpa(value)),
-        P::Right(value) => props.right = Some(convert_lpa(value)),
+        P::Top(value) => props.top = Some(convert_lpa(value, media)),
+        P::Bottom(value) => props.bottom = Some(convert_lpa(value, media)),
+        P::Left(value) => props.left = Some(convert_lpa(value, media)),
+        P::Right(value) => props.right = Some(convert_lpa(value, media)),
         P::ZIndex(value) => match value {
             lightningcss::properties::position::ZIndex::Integer(n) => props.z_index = Some(*n),
             // `z-index: auto` — leave unset.
@@ -887,40 +1118,40 @@ fn apply_property(props: &mut StyleProps, property: &Property<'_>) {
         // ===== Group B: advanced CSS =====
         P::BorderRadius(value, _) => {
             props.border_radius = Some(BorderRadius {
-                top_left: radius_from(&value.top_left),
-                top_right: radius_from(&value.top_right),
-                bottom_right: radius_from(&value.bottom_right),
-                bottom_left: radius_from(&value.bottom_left),
+                top_left: radius_from(&value.top_left, media),
+                top_right: radius_from(&value.top_right, media),
+                bottom_right: radius_from(&value.bottom_right, media),
+                bottom_left: radius_from(&value.bottom_left, media),
             });
         }
         P::BorderTopLeftRadius(value, _) => {
             let mut r = props.border_radius.unwrap_or_default();
-            r.top_left = radius_from(&value);
+            r.top_left = radius_from(&value, media);
             props.border_radius = Some(r);
         }
         P::BorderTopRightRadius(value, _) => {
             let mut r = props.border_radius.unwrap_or_default();
-            r.top_right = radius_from(&value);
+            r.top_right = radius_from(&value, media);
             props.border_radius = Some(r);
         }
         P::BorderBottomRightRadius(value, _) => {
             let mut r = props.border_radius.unwrap_or_default();
-            r.bottom_right = radius_from(&value);
+            r.bottom_right = radius_from(&value, media);
             props.border_radius = Some(r);
         }
         P::BorderBottomLeftRadius(value, _) => {
             let mut r = props.border_radius.unwrap_or_default();
-            r.bottom_left = radius_from(&value);
+            r.bottom_left = radius_from(&value, media);
             props.border_radius = Some(r);
         }
         P::BoxShadow(list, _) => {
-            props.box_shadows = Some(list.iter().map(box_shadow_from).collect());
+            props.box_shadows = Some(list.iter().map(|s| box_shadow_from(s, media)).collect());
         }
         P::TextShadow(list) => {
-            props.text_shadows = Some(list.iter().map(text_shadow_from).collect());
+            props.text_shadows = Some(list.iter().map(|s| text_shadow_from(s, media)).collect());
         }
         P::BackgroundImage(list) => {
-            if let Some(layers) = background_layers_from(list) {
+            if let Some(layers) = background_layers_from(list, media) {
                 props.background_layers = Some(layers);
             }
         }
@@ -968,9 +1199,9 @@ enum Side {
     Left,
 }
 
-fn border_from_width(value: &BorderSideWidth) -> BorderEdgeRaw {
+fn border_from_width(value: &BorderSideWidth, media: &MediaContext) -> BorderEdgeRaw {
     let width = match value {
-        BorderSideWidth::Length(LcLength::Value(v)) => convert_length_value(v),
+        BorderSideWidth::Length(LcLength::Value(v)) => convert_length_value(v, media),
         BorderSideWidth::Length(_) => Length::Px(0.0),
         BorderSideWidth::Thin => Length::Px(1.0),
         BorderSideWidth::Medium => Length::Px(3.0),
@@ -1034,8 +1265,9 @@ fn border_shorthand_edge(
     width: &BorderSideWidth,
     style: &LineStyle,
     color: &CssColor,
+    media: &MediaContext,
 ) -> BorderEdgeRaw {
-    let mut edge = border_from_width(width);
+    let mut edge = border_from_width(width, media);
     edge.style = convert_line_style(style);
     edge.color = Some(convert_color(color));
     edge
@@ -1043,14 +1275,17 @@ fn border_shorthand_edge(
 
 /// Converts a lightningcss track list into flattened track pairs, expanding
 /// `repeat(n, ...)` by count (auto-fill/auto-fit degrade to a single copy).
-fn convert_grid_tracks(value: &lightningcss::properties::grid::TrackSizing<'_>) -> Vec<TrackRaw> {
+fn convert_grid_tracks(
+    value: &lightningcss::properties::grid::TrackSizing<'_>,
+    media: &MediaContext,
+) -> Vec<TrackRaw> {
     let lightningcss::properties::grid::TrackSizing::TrackList(list) = value else {
         return Vec::new();
     };
     let mut tracks = Vec::new();
     for item in &list.items {
         match item {
-            TrackListItem::TrackSize(size) => tracks.push(track_from_size(size)),
+            TrackListItem::TrackSize(size) => tracks.push(track_from_size(size, media)),
             TrackListItem::TrackRepeat(repeat) => {
                 let count = match repeat.count {
                     RepeatCount::Number(n) => n.clamp(0, 64) as usize,
@@ -1060,7 +1295,7 @@ fn convert_grid_tracks(value: &lightningcss::properties::grid::TrackSizing<'_>) 
                 };
                 for _ in 0..count {
                     for size in &repeat.track_sizes {
-                        tracks.push(track_from_size(size));
+                        tracks.push(track_from_size(size, media));
                     }
                 }
             }
@@ -1091,7 +1326,10 @@ fn area_name_from(value: &lightningcss::properties::grid::GridArea<'_>) -> Optio
 /// Converts one lightningcss GridLine (start or end side) into our raw form.
 /// Named lines/areas are not resolved here (template-areas handles the name
 /// form); numeric lines and spans are the placement backbone.
-fn grid_line_raw(line: &lightningcss::properties::grid::GridLine<'_>) -> Option<GridLineRaw> {
+fn grid_line_raw(
+    line: &lightningcss::properties::grid::GridLine<'_>,
+    _media: &MediaContext,
+) -> Option<GridLineRaw> {
     use lightningcss::properties::grid::GridLine;
     match line {
         GridLine::Auto => None,
@@ -1105,16 +1343,20 @@ fn grid_line_raw(line: &lightningcss::properties::grid::GridLine<'_>) -> Option<
 fn grid_placement_from(
     start: &lightningcss::properties::grid::GridLine<'_>,
     end: &lightningcss::properties::grid::GridLine<'_>,
+    media: &MediaContext,
 ) -> GridPlacementRaw {
     GridPlacementRaw {
-        start: grid_line_raw(start).unwrap_or(GridLineRaw::Auto),
-        end: grid_line_raw(end).unwrap_or(GridLineRaw::Auto),
+        start: grid_line_raw(start, media).unwrap_or(GridLineRaw::Auto),
+        end: grid_line_raw(end, media).unwrap_or(GridLineRaw::Auto),
     }
 }
 
 /// Converts a TrackSizeList (grid-auto-rows/columns value) into raw tracks.
-fn track_size_list(value: &lightningcss::properties::grid::TrackSizeList) -> Vec<TrackRaw> {
-    value.0.iter().map(track_from_size).collect()
+fn track_size_list(
+    value: &lightningcss::properties::grid::TrackSizeList,
+    media: &MediaContext,
+) -> Vec<TrackRaw> {
+    value.0.iter().map(|t| track_from_size(t, media)).collect()
 }
 
 /// Converts flattened lightningcss areas (row-major, `columns` wide) into
@@ -1150,25 +1392,25 @@ fn convert_grid_areas(
     out
 }
 
-fn track_from_size(size: &TrackSize) -> TrackRaw {
+fn track_from_size(size: &TrackSize, media: &MediaContext) -> TrackRaw {
     match size {
-        TrackSize::TrackBreadth(breadth) => track_from_breadth(breadth),
+        TrackSize::TrackBreadth(breadth) => track_from_breadth(breadth, media),
         TrackSize::MinMax { min, max } => TrackRaw {
-            min: bound_from_breadth_lp(min),
-            max: bound_from_breadth_lp(max),
+            min: bound_from_breadth_lp(min, media),
+            max: bound_from_breadth_lp(max, media),
         },
         // fit-content(lp) ≈ minmax(auto, lp)
         TrackSize::FitContent(lp) => TrackRaw {
             min: TrackBoundRaw::Auto,
-            max: bound_from_lp(lp),
+            max: bound_from_lp(lp, media),
         },
     }
 }
 
-fn track_from_breadth(breadth: &TrackBreadth) -> TrackRaw {
+fn track_from_breadth(breadth: &TrackBreadth, media: &MediaContext) -> TrackRaw {
     match breadth {
         TrackBreadth::Length(lp) => {
-            let bound = bound_from_lp(lp);
+            let bound = bound_from_lp(lp, media);
             TrackRaw {
                 min: bound,
                 max: bound,
@@ -1195,9 +1437,9 @@ fn track_from_breadth(breadth: &TrackBreadth) -> TrackRaw {
 
 /// A minmax() bound is a TrackBreadth: min-content/max-content/auto are
 /// valid mins; flex is only valid as a max (degrade to auto).
-fn bound_from_breadth_lp(breadth: &TrackBreadth) -> TrackBoundRaw {
+fn bound_from_breadth_lp(breadth: &TrackBreadth, media: &MediaContext) -> TrackBoundRaw {
     match breadth {
-        TrackBreadth::Length(lp) => bound_from_lp(lp),
+        TrackBreadth::Length(lp) => bound_from_lp(lp, media),
         TrackBreadth::MinContent => TrackBoundRaw::MinContent,
         TrackBreadth::MaxContent => TrackBoundRaw::MaxContent,
         TrackBreadth::Auto => TrackBoundRaw::Auto,
@@ -1205,10 +1447,10 @@ fn bound_from_breadth_lp(breadth: &TrackBreadth) -> TrackBoundRaw {
     }
 }
 
-fn bound_from_lp(lp: &LengthPercentage) -> TrackBoundRaw {
+fn bound_from_lp(lp: &LengthPercentage, media: &MediaContext) -> TrackBoundRaw {
     match lp {
         LengthPercentage::Dimension(value) => {
-            TrackBoundRaw::Px(convert_length_value(value).resolve(16.0))
+            TrackBoundRaw::Px(convert_length_value(value, media).resolve(16.0))
         }
         LengthPercentage::Percentage(p) => TrackBoundRaw::Percent(p.0),
         _ => TrackBoundRaw::Auto,
@@ -1255,16 +1497,21 @@ fn convert_font_style(value: &LcFontStyle) -> FontStyleMode {
     }
 }
 
-fn convert_line_height(value: &lightningcss::properties::font::LineHeight) -> LineHeightRaw {
+fn convert_line_height(
+    value: &lightningcss::properties::font::LineHeight,
+    media: &MediaContext,
+) -> LineHeightRaw {
     use lightningcss::properties::font::LineHeight as L;
     match value {
         L::Normal => LineHeightRaw::Normal,
         L::Number(n) => LineHeightRaw::Number(*n),
-        L::Length(lp) => match convert_length(lp) {
+        L::Length(lp) => match convert_length(lp, media) {
             Length::Px(n) => LineHeightRaw::Px(n),
             Length::Em(n) => LineHeightRaw::Em(n),
             Length::Rem(n) => LineHeightRaw::Rem(n),
             Length::Percent(n) => LineHeightRaw::Percent(n),
+            // calc() line heights: use the px component.
+            Length::Calc { px, .. } => LineHeightRaw::Px(px),
         },
     }
 }
@@ -1349,10 +1596,10 @@ fn convert_align_content(value: &AlignContent) -> AlignItemsMode {
     }
 }
 
-fn convert_gap(value: &GapValue) -> Length {
+fn convert_gap(value: &GapValue, media: &MediaContext) -> Length {
     match value {
         GapValue::Normal => Length::Px(0.0),
-        GapValue::LengthPercentage(lp) => convert_length(lp),
+        GapValue::LengthPercentage(lp) => convert_length(lp, media),
     }
 }
 
@@ -1634,11 +1881,14 @@ fn feature_matches(
 // ===========================================================================
 
 /// Converts one lightningcss `LengthPercentage` into a corner radius.
-fn radius_from(value: &lightningcss::values::size::Size2D<LengthPercentage>) -> RadiusLength {
+fn radius_from(
+    value: &lightningcss::values::size::Size2D<LengthPercentage>,
+    media: &MediaContext,
+) -> RadiusLength {
     // Horizontal radius only (circular corners).
     match &value.0 {
         LengthPercentage::Dimension(d) => RadiusLength {
-            px: match convert_length_value(d) {
+            px: match convert_length_value(d, media) {
                 Length::Px(n) => n,
                 _ => 0.0,
             },
@@ -1650,9 +1900,12 @@ fn radius_from(value: &lightningcss::values::size::Size2D<LengthPercentage>) -> 
 }
 
 /// Converts one lightningcss `BoxShadow`.
-fn box_shadow_from(value: &lightningcss::properties::box_shadow::BoxShadow) -> BoxShadowSpec {
+fn box_shadow_from(
+    value: &lightningcss::properties::box_shadow::BoxShadow,
+    media: &MediaContext,
+) -> BoxShadowSpec {
     let len = |l: &LcLength| match l {
-        LcLength::Value(v) => match convert_length_value(v) {
+        LcLength::Value(v) => match convert_length_value(v, media) {
             Length::Px(n) => n,
             _ => 0.0,
         },
@@ -1669,9 +1922,12 @@ fn box_shadow_from(value: &lightningcss::properties::box_shadow::BoxShadow) -> B
 }
 
 /// Converts one lightningcss `TextShadow`.
-fn text_shadow_from(value: &lightningcss::properties::text::TextShadow) -> TextShadowSpec {
+fn text_shadow_from(
+    value: &lightningcss::properties::text::TextShadow,
+    media: &MediaContext,
+) -> TextShadowSpec {
     let len = |l: &LcLength| match l {
-        LcLength::Value(v) => match convert_length_value(v) {
+        LcLength::Value(v) => match convert_length_value(v, media) {
             Length::Px(n) => n,
             _ => 0.0,
         },
@@ -1686,20 +1942,20 @@ fn text_shadow_from(value: &lightningcss::properties::text::TextShadow) -> TextS
 }
 
 /// Converts a lightningcss gradient into our paint-side spec.
-fn gradient_from(gradient: &LcGradient) -> Option<GradientSpec> {
+fn gradient_from(gradient: &LcGradient, media: &MediaContext) -> Option<GradientSpec> {
     match gradient {
         LcGradient::Linear(linear) => Some(GradientSpec {
             geometry: GradientGeometry::Linear {
                 angle_deg: line_direction_angle(&linear.direction),
             },
-            stops: gradient_stops(&linear.items),
+            stops: gradient_stops(&linear.items, media),
         }),
         LcGradient::Radial(radial) => Some(GradientSpec {
             geometry: GradientGeometry::Radial {
                 cx: horizontal_position_fraction(&radial.position.x),
                 cy: vertical_position_fraction(&radial.position.y),
             },
-            stops: gradient_stops(&radial.items),
+            stops: gradient_stops(&radial.items, media),
         }),
         // Conic gradients and legacy -webkit- gradients are not painted yet.
         _ => None,
@@ -1740,14 +1996,17 @@ fn line_direction_angle(direction: &LineDirection) -> f32 {
 }
 
 /// Extracts color stops (ignoring interpolation hints).
-fn gradient_stops(items: &[GradientItem<LengthPercentage>]) -> Vec<GradientStop> {
+fn gradient_stops(
+    items: &[GradientItem<LengthPercentage>],
+    media: &MediaContext,
+) -> Vec<GradientStop> {
     items
         .iter()
         .filter_map(|item| match item {
             GradientItem::ColorStop(stop) => {
                 let pos: Option<f32> = stop.position.as_ref().and_then(|p| match p {
                     LengthPercentage::Percentage(pct) => Some(pct.0),
-                    LengthPercentage::Dimension(d) => match convert_length_value(d) {
+                    LengthPercentage::Dimension(d) => match convert_length_value(d, media) {
                         Length::Px(n) => Some(n / 100.0),
                         _ => None,
                     },
@@ -1820,6 +2079,7 @@ fn vertical_position_fraction(pos: &lightningcss::values::position::VerticalPosi
 /// One background layer from a lightningcss image.
 fn background_layer_from(
     image: &LcImage<'_>,
+    media: &MediaContext,
     position: &lightningcss::properties::background::BackgroundPosition,
     size: &BackgroundSize,
     repeat: &lightningcss::properties::background::BackgroundRepeat,
@@ -1827,7 +2087,7 @@ fn background_layer_from(
     let image = match image {
         LcImage::None => return None,
         LcImage::Gradient(gradient) => {
-            BackgroundImageSpec::Gradient(gradient_from(gradient.as_ref())?)
+            BackgroundImageSpec::Gradient(gradient_from(gradient.as_ref(), media)?)
         }
         LcImage::Url(url) => BackgroundImageSpec::Url(url.url.to_string()),
         // image-set(): use the first candidate; unresolved sets are dropped.
@@ -1836,7 +2096,7 @@ fn background_layer_from(
             match &first.image {
                 LcImage::Url(url) => BackgroundImageSpec::Url(url.url.to_string()),
                 LcImage::Gradient(gradient) => {
-                    BackgroundImageSpec::Gradient(gradient_from(gradient.as_ref())?)
+                    BackgroundImageSpec::Gradient(gradient_from(gradient.as_ref(), media)?)
                 }
                 _ => return None,
             }
@@ -1849,7 +2109,7 @@ fn background_layer_from(
             let px = |v: &LengthPercentageOrAuto| match v {
                 LengthPercentageOrAuto::LengthPercentage(
                     LengthPercentage::Dimension(d),
-                ) => match convert_length_value(d) {
+                ) => match convert_length_value(d, media) {
                     Length::Px(n) => Some(n),
                     _ => None,
                 },
@@ -1885,12 +2145,16 @@ fn background_layer_from(
 }
 
 /// `background-image` longhand: image list only (default position/repeat/size).
-fn background_layers_from(list: &[LcImage<'_>]) -> Option<Vec<BackgroundLayer>> {
+fn background_layers_from(
+    list: &[LcImage<'_>],
+    media: &MediaContext,
+) -> Option<Vec<BackgroundLayer>> {
     let layers: Vec<BackgroundLayer> = list
         .iter()
         .filter_map(|image| {
             background_layer_from(
                 image,
+                media,
                 &lightningcss::properties::background::BackgroundPosition::default(),
                 &BackgroundSize::default(),
                 &lightningcss::properties::background::BackgroundRepeat::default(),
@@ -1901,11 +2165,14 @@ fn background_layers_from(list: &[LcImage<'_>]) -> Option<Vec<BackgroundLayer>> 
 }
 
 /// `background:` shorthand: image + position + size + repeat per layer.
-fn background_layers_from_shorthand(list: &[LcBackground<'_>]) -> Option<Vec<BackgroundLayer>> {
+fn background_layers_from_shorthand(
+    list: &[LcBackground<'_>],
+    media: &MediaContext,
+) -> Option<Vec<BackgroundLayer>> {
     let layers: Vec<BackgroundLayer> = list
         .iter()
         .filter_map(|bg| {
-            background_layer_from(&bg.image, &bg.position, &bg.size, &bg.repeat)
+            background_layer_from(&bg.image, media, &bg.position, &bg.size, &bg.repeat)
         })
         .collect();
     (!layers.is_empty()).then_some(layers)
@@ -1953,7 +2220,10 @@ fn merge_background_sizes(props: &mut StyleProps, list: &[BackgroundSize]) {
                         let px = |v: &LengthPercentageOrAuto| match v {
                             LengthPercentageOrAuto::LengthPercentage(
                                 LengthPercentage::Dimension(d),
-                            ) => match convert_length_value(d) {
+                            ) => match convert_length_value(
+                                d,
+                                &MediaContext::default(),
+                            ) {
                                 Length::Px(n) => Some(n),
                                 _ => None,
                             },
@@ -2031,7 +2301,10 @@ fn convert_transform_list(list: &lightningcss::properties::transform::TransformL
 /// LengthPercentage pair → translate op.
 fn lp_pair(x: &LengthPercentage, y: &LengthPercentage) -> TransformOp {
     let px = |lp: &LengthPercentage| match lp {
-        LengthPercentage::Dimension(d) => match convert_length_value(d) {
+        LengthPercentage::Dimension(d) => match convert_length_value(
+            d,
+            &MediaContext::default(),
+        ) {
             Length::Px(n) => n,
             _ => 0.0,
         },
@@ -2118,7 +2391,10 @@ fn convert_filters(list: &FilterList<'_>) -> Vec<FilterSpec> {
         .filter_map(|filter| match filter {
             LcFilterOp::Blur(l) => {
                 let px = match l {
-                    LcLength::Value(v) => match convert_length_value(v) {
+                    LcLength::Value(v) => match convert_length_value(
+                        v,
+                        &MediaContext::default(),
+                    ) {
                         Length::Px(n) => n,
                         _ => 0.0,
                     },

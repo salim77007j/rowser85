@@ -6,7 +6,7 @@
 use std::borrow::Borrow;
 use std::fmt;
 
-use cssparser::ToCss;
+use cssparser::{CowRcStr, ParseError, ToCss};
 use markup5ever::interface::QuirksMode as DomQuirksMode;
 use markup5ever::{LocalName, Namespace};
 use precomputed_hash::PrecomputedHash;
@@ -26,6 +26,9 @@ use crate::tree::{Dom, NodeId};
 
 /// A parsed selector list (comma-separated selectors).
 pub type SelectorList = InnerSelectorList<DomSelectorImpl>;
+
+/// One parsed complex selector.
+pub type Selector = selectors::parser::Selector<DomSelectorImpl>;
 
 /// Atom wrapper satisfying the `selectors` crate type bounds
 /// (`Clone + Eq + From<&str> + ToCss + PrecomputedHash + Borrow<str>`).
@@ -87,34 +90,104 @@ impl SelectorImpl for DomSelectorImpl {
     type PseudoElement = PseudoElement;
 }
 
-/// Pseudo-classes the engine understands. V1 intentionally supports none:
-/// rules using unsupported pseudo-classes are dropped, per CSS error
-/// recovery rules.
+/// Pseudo-classes the engine understands: user-interaction state plus
+/// form/structure state that needs external knowledge. Tree-structural
+/// pseudo-classes (:first-child, :nth-child(), …) are handled entirely by
+/// the `selectors` crate and need no engine support.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum PseudoClass {}
+pub enum PseudoClass {
+    /// The element under the pointer.
+    Hover,
+    /// The element being pressed.
+    Active,
+    /// The focused element.
+    Focus,
+    /// Focus with visible ring semantics.
+    FocusVisible,
+    /// An element whose subtree contains the focus.
+    FocusWithin,
+    /// A visited link.
+    Visited,
+    /// An anchor.
+    Link,
+    /// A disabled form control.
+    Disabled,
+    /// An enabled form control.
+    Enabled,
+    /// A checked form control.
+    Checked,
+    /// A form control in an indeterminate state.
+    Indeterminate,
+    /// Element with no children at all (matching :empty semantics needs
+    /// state only when JS mutates — handled by the crate directly).
+    PlaceholderShown,
+}
 
 impl ToCss for PseudoClass {
-    fn to_css<W: fmt::Write>(&self, _dest: &mut W) -> fmt::Result {
-        match *self {}
+    fn to_css<W: fmt::Write>(&self, dest: &mut W) -> fmt::Result {
+        let name = match self {
+            PseudoClass::Hover => "hover",
+            PseudoClass::Active => "active",
+            PseudoClass::Focus => "focus",
+            PseudoClass::FocusVisible => "focus-visible",
+            PseudoClass::FocusWithin => "focus-within",
+            PseudoClass::Visited => "visited",
+            PseudoClass::Link => "link",
+            PseudoClass::Disabled => "disabled",
+            PseudoClass::Enabled => "enabled",
+            PseudoClass::Checked => "checked",
+            PseudoClass::Indeterminate => "indeterminate",
+            PseudoClass::PlaceholderShown => "placeholder-shown",
+        };
+        dest.write_str(":")?;
+        dest.write_str(name)
     }
 }
 
 impl NonTSPseudoClass for PseudoClass {
     fn is_active_or_hover(&self) -> bool {
-        match *self {}
+        matches!(self, PseudoClass::Active | PseudoClass::Hover)
     }
     fn is_user_action_state(&self) -> bool {
-        match *self {}
+        matches!(
+            self,
+            PseudoClass::Hover | PseudoClass::Active | PseudoClass::Focus
+        )
     }
 }
 
-/// Pseudo-elements understood by the engine (none in v1).
+/// Pseudo-elements understood by the engine.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum PseudoElement {}
+pub enum PseudoElement {
+    /// ::before.
+    Before,
+    /// ::after.
+    After,
+    /// ::first-line (treated as an inline overlay; text only).
+    FirstLine,
+    /// ::first-letter (first-letter styling).
+    FirstLetter,
+    /// ::selection highlight.
+    Selection,
+    /// ::placeholder for form controls.
+    Placeholder,
+    /// ::marker for list bullets.
+    Marker,
+}
 
 impl ToCss for PseudoElement {
-    fn to_css<W: fmt::Write>(&self, _dest: &mut W) -> fmt::Result {
-        match *self {}
+    fn to_css<W: fmt::Write>(&self, dest: &mut W) -> fmt::Result {
+        let name = match self {
+            PseudoElement::Before => "before",
+            PseudoElement::After => "after",
+            PseudoElement::FirstLine => "first-line",
+            PseudoElement::FirstLetter => "first-letter",
+            PseudoElement::Selection => "selection",
+            PseudoElement::Placeholder => "placeholder",
+            PseudoElement::Marker => "marker",
+        };
+        dest.write_str("::")?;
+        dest.write_str(name)
     }
 }
 
@@ -127,6 +200,53 @@ pub struct DomSelectorParser;
 impl<'i> Parser<'i> for DomSelectorParser {
     type Impl = DomSelectorImpl;
     type Error = SelectorParseErrorKind;
+
+    fn parse_non_ts_pseudo_class(
+        &self,
+        name: CowRcStr<'i>,
+    ) -> Result<PseudoClass, ParseError<SelectorParseErrorKind>> {
+        let class = match name.as_ref().to_ascii_lowercase().as_str() {
+            "hover" => PseudoClass::Hover,
+            "active" => PseudoClass::Active,
+            "focus" => PseudoClass::Focus,
+            "focus-visible" => PseudoClass::FocusVisible,
+            "focus-within" => PseudoClass::FocusWithin,
+            "visited" => PseudoClass::Visited,
+            "link" => PseudoClass::Link,
+            "disabled" => PseudoClass::Disabled,
+            "enabled" => PseudoClass::Enabled,
+            "checked" => PseudoClass::Checked,
+            "indeterminate" => PseudoClass::Indeterminate,
+            "placeholder-shown" => PseudoClass::PlaceholderShown,
+            _ => {
+                return Err(ParseError::custom(
+                    SelectorParseErrorKind::UnsupportedPseudoClassOrElement,
+                ))
+            }
+        };
+        Ok(class)
+    }
+
+    fn parse_pseudo_element(
+        &self,
+        name: CowRcStr<'i>,
+    ) -> Result<PseudoElement, ParseError<SelectorParseErrorKind>> {
+        let element = match name.as_ref().to_ascii_lowercase().as_str() {
+            "before" => PseudoElement::Before,
+            "after" => PseudoElement::After,
+            "first-line" => PseudoElement::FirstLine,
+            "first-letter" => PseudoElement::FirstLetter,
+            "selection" => PseudoElement::Selection,
+            "placeholder" => PseudoElement::Placeholder,
+            "marker" => PseudoElement::Marker,
+            _ => {
+                return Err(ParseError::custom(
+                    SelectorParseErrorKind::UnsupportedPseudoClassOrElement,
+                ))
+            }
+        };
+        Ok(element)
+    }
 }
 
 /// Parses a comma-separated selector list. Returns `None` for invalid
@@ -281,7 +401,44 @@ impl<'a> Element for ElementRef<'a> {
         pc: &PseudoClass,
         _context: &mut MatchingContext<DomSelectorImpl>,
     ) -> bool {
-        match *pc {}
+        match pc {
+            PseudoClass::Hover => self.dom.is_hovered(self.node),
+            PseudoClass::Active => {
+                self.dom.interaction_state.borrow().active == Some(self.node)
+            }
+            PseudoClass::Focus => {
+                self.dom.interaction_state.borrow().focus == Some(self.node)
+            }
+            PseudoClass::FocusVisible => {
+                self.dom.interaction_state.borrow().focus == Some(self.node)
+            }
+            PseudoClass::FocusWithin => self.dom.is_focus_within(self.node),
+            PseudoClass::Visited => {
+                self.dom
+                    .interaction_state
+                    .borrow()
+                    .visited
+                    .contains(&self.node)
+            }
+            PseudoClass::Link => self.is_link(),
+            PseudoClass::Disabled => {
+                self.dom.get_attr(self.node, "disabled").is_some()
+            }
+            PseudoClass::Enabled => {
+                let form_control = self.has_local_name("input")
+                    || self.has_local_name("button")
+                    || self.has_local_name("select")
+                    || self.has_local_name("textarea")
+                    || self.has_local_name("option");
+                form_control && self.dom.get_attr(self.node, "disabled").is_none()
+            }
+            PseudoClass::Checked => {
+                self.dom.get_attr(self.node, "checked").is_some()
+                    || self.dom.get_attr(self.node, "selected").is_some()
+            }
+            PseudoClass::Indeterminate => false,
+            PseudoClass::PlaceholderShown => false,
+        }
     }
 
     fn match_pseudo_element(
@@ -289,7 +446,10 @@ impl<'a> Element for ElementRef<'a> {
         pe: &PseudoElement,
         _context: &mut MatchingContext<DomSelectorImpl>,
     ) -> bool {
-        match *pe {}
+        // Pseudo-element matching is handled structurally (the cascade
+        // strips and records them); a bare query never matches directly.
+        let _ = pe;
+        false
     }
 
     fn apply_selector_flags(&self, _flags: ElementSelectorFlags) {}
@@ -405,6 +565,24 @@ pub fn matches_with_caches(
 ) -> bool {
     let mut context = MatchingContext::new(
         MatchingMode::Normal,
+        None,
+        &mut caches.inner,
+        quirks(element.dom.quirks),
+        NeedsSelectorFlags::No,
+        MatchingForInvalidation::No,
+    );
+    matches_selector_list(list, element, &mut context)
+}
+
+/// Matches `element` against a pseudo-element rule's selector list (the
+/// trailing ::before/::after is ignored; the element part must match).
+pub fn matches_for_pseudo_with_caches(
+    list: &SelectorList,
+    element: &ElementRef<'_>,
+    caches: &mut CachesWrap,
+) -> bool {
+    let mut context = MatchingContext::new(
+        MatchingMode::ForStatelessPseudoElement,
         None,
         &mut caches.inner,
         quirks(element.dom.quirks),

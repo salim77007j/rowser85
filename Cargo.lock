@@ -5109,6 +5109,7 @@ dependencies = [
 name = "rowser-parsing"
 version = "0.1.0"
 dependencies = [
+ "cssparser 0.38.0",
  "encoding_rs",
  "html5ever",
  "lightningcss",

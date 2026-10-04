@@ -22,7 +22,7 @@ pub mod selector;
 pub mod tree;
 
 pub use selector::{
-    matches, matches_with_caches, parse_selector_list, CachesWrap, DomSelectorImpl, ElementRef,
-    SelectorList,
+    matches, matches_for_pseudo_with_caches, matches_with_caches, parse_selector_list, CachesWrap,
+    DomSelectorImpl, ElementRef, Selector, SelectorList,
 };
 pub use tree::{Attr, Dom, Element, NodeId, NodeKind};

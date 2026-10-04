@@ -259,8 +259,11 @@ pub(crate) fn run(state: Arc<PageState>, rx: Receiver<Message>) {
                 .last_raf
                 .map(|t| t.elapsed() >= Duration::from_millis(12))
                 .unwrap_or(true);
+        let anim_pace = page.animations_running();
         let timeout = if frame_pace {
             Duration::from_millis(4)
+        } else if anim_pace {
+            Duration::from_millis(16)
         } else if !page.pending_raf.is_empty() {
             Duration::from_millis(12)
         } else {
@@ -275,6 +278,9 @@ pub(crate) fn run(state: Arc<PageState>, rx: Receiver<Message>) {
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                 if frame_pace {
                     page.fire_raf();
+                }
+                if anim_pace {
+                    page.tick_animations();
                 }
                 page.idle();
             }
@@ -297,6 +303,130 @@ pub(crate) fn run(state: Arc<PageState>, rx: Receiver<Message>) {
         }
     }
     page.shutdown_report();
+}
+
+/// Interpolates one keyframes rule at `frac` (0..1) into a style patch.
+fn interpolate_keyframes(
+    frames: &[rowser_parsing::css::KeyframeRaw],
+    frac: f32,
+) -> Option<rowser_parsing::cascade::ComputedStyle> {
+    if frames.is_empty() {
+        return None;
+    }
+    // Find the bracketing keyframes.
+    let mut k0: Option<&rowser_parsing::css::KeyframeRaw> = None;
+    let mut k1: Option<&rowser_parsing::css::KeyframeRaw> = None;
+    let mut sorted: Vec<&rowser_parsing::css::KeyframeRaw> = frames.iter().collect();
+    sorted.sort_by(|a, b| a.offset.partial_cmp(&b.offset).unwrap_or(std::cmp::Ordering::Equal));
+    for f in &sorted {
+        if f.offset <= frac {
+            k0 = Some(f);
+        }
+        if f.offset >= frac && k1.is_none() {
+            k1 = Some(f);
+        }
+    }
+    let k0 = k0.or_else(|| sorted.first().copied())?;
+    let k1 = k1.or_else(|| sorted.last().copied())?;
+    let span = (k1.offset - k0.offset).max(1e-6);
+    let t = ((frac - k0.offset) / span).clamp(0.0, 1.0);
+    let mut style = rowser_parsing::cascade::ComputedStyle::default();
+    // opacity interpolation.
+    match (k0.props.opacity, k1.props.opacity) {
+        (Some(a), Some(b)) => style.opacity = a + (b - a) * t,
+        (Some(a), None) | (None, Some(a)) => style.opacity = a,
+        _ => {}
+    }
+    // transform: interpolate op-by-op when structurally equal, else snap.
+    match (&k0.props.transform, &k1.props.transform) {
+        (Some(a), Some(b)) => {
+            if a.len() == b.len() {
+                let ops = a
+                    .iter()
+                    .zip(b.iter())
+                    .map(|(x, y)| interp_transform(x, y, t))
+                    .collect();
+                style.transform = ops;
+            } else {
+                style.transform = (if t < 0.5 { a } else { b }).clone();
+            }
+        }
+        (Some(a), None) | (None, Some(a)) => style.transform = a.clone(),
+        _ => {}
+    }
+    Some(style)
+}
+
+/// Interpolates two transform ops (numeric lerp where kinds match).
+fn interp_transform(
+    a: &rowser_parsing::cascade::TransformOp,
+    b: &rowser_parsing::cascade::TransformOp,
+    t: f32,
+) -> rowser_parsing::cascade::TransformOp {
+    use rowser_parsing::cascade::TransformOp as T;
+    match (a, b) {
+        (T::Translate { px: (ax, ay), pct: (apx, apy) }, T::Translate { px: (bx, by), pct: (bpx, bpy) }) => T::Translate {
+            px: (ax + (bx - ax) * t, ay + (by - ay) * t),
+            pct: (apx + (bpx - apx) * t, apy + (bpy - apy) * t),
+        },
+        (T::Scale(ax, ay), T::Scale(bx, by)) => {
+            T::Scale(ax + (bx - ax) * t, ay + (by - ay) * t)
+        }
+        (T::Rotate(a), T::Rotate(b)) => T::Rotate(a + (b - a) * t),
+        (T::Skew(a1, a2), T::Skew(b1, b2)) => T::Skew(a1 + (b1 - a1) * t, a2 + (b2 - a2) * t),
+        _ => if t < 0.5 { *a } else { *b },
+    }
+}
+
+/// Applies a keyframe's declarations onto an override style.
+fn apply_keyframe_props(
+    style: &mut rowser_parsing::cascade::ComputedStyle,
+    props: &rowser_parsing::cascade::StyleProps,
+) {
+    if let Some(opacity) = props.opacity {
+        style.opacity = opacity.clamp(0.0, 1.0);
+    }
+    if let Some(ops) = &props.transform {
+        style.transform = ops.clone();
+    }
+    if let Some(filters) = &props.filters {
+        style.filters = filters.clone();
+    }
+}
+
+/// One running CSS animation.
+#[derive(Debug, Clone)]
+struct AnimationEntry {
+    /// Animated element.
+    node: NodeId,
+    /// The animation spec.
+    spec: rowser_parsing::cascade::AnimationSpec,
+    /// Start time.
+    start: std::time::Instant,
+}
+
+/// One running transition.
+#[derive(Debug, Clone)]
+struct TransitionEntry {
+    /// Transitioned element.
+    node: NodeId,
+    /// Property group being animated (paint-side subset).
+    prop: TransitionProp,
+    /// Start value.
+    from: f32,
+    /// End value.
+    to: f32,
+    /// Start time.
+    start: std::time::Instant,
+    /// Duration in seconds.
+    duration: f32,
+}
+
+/// Paint-side transitionable properties.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TransitionProp {
+    /// opacity.
+    Opacity,
 }
 
 /// One session-history entry: URL + serialized pushState state.
@@ -339,6 +469,19 @@ struct Page {
     bg_requested: std::collections::HashSet<String>,
     /// Per-element scroll offsets for overflow: scroll/auto containers.
     element_scroll: rowser_rendering::display_list::ElementScrollMap,
+    /// @keyframes rules by animation name (refreshed per render).
+    anim_keyframes: HashMap<String, Vec<rowser_parsing::css::KeyframeRaw>>,
+    /// Active CSS animations: (node, spec, start).
+    anim_active: Vec<AnimationEntry>,
+    /// Animation identities already started (restart control).
+    anim_seen: std::collections::HashSet<(NodeId, String, usize)>,
+    /// Style overrides from running animations (applied at repaint).
+    anim_overrides: HashMap<NodeId, rowser_parsing::cascade::ComputedStyle>,
+    /// Previous computed styles (transition diffing base).
+    prev_styles: Option<StyleMap>,
+    /// Transitions in flight: (node, property, from, to, start, duration).
+    transitions: Vec<TransitionEntry>,
+
     layout_engine: LayoutEngine,
     /// Parsed-stylesheet cache: (fingerprint of css_texts + media, sheets).
     /// Reparsing every stylesheet on every re-render is the dominant cost
@@ -441,6 +584,12 @@ impl Page {
             pending_bg: HashMap::new(),
             bg_requested: std::collections::HashSet::new(),
             element_scroll: HashMap::new(),
+            anim_keyframes: HashMap::new(),
+            anim_active: Vec::new(),
+            anim_seen: std::collections::HashSet::new(),
+            anim_overrides: HashMap::new(),
+            prev_styles: None,
+            transitions: Vec::new(),
             css_cache: None,
             layout_engine: LayoutEngine::new(),
             painter: Painter::new(),
@@ -1021,6 +1170,27 @@ impl Page {
                 self.start_navigation(href, true);
                 return;
             }
+            // :focus state — focusable targets (links, form controls,
+            // tabindex carriers) receive focus on click.
+            let focusable = dom
+                .element(node)
+                .map(|el| {
+                    matches!(
+                        &*el.name.local,
+                        "a" | "button" | "input" | "textarea" | "select" | "summary"
+                    ) || dom.get_attr(node, "tabindex").is_some()
+                })
+                .unwrap_or(false);
+            let changed = dom
+                .interaction_state
+                .borrow()
+                .focus
+                .map(|f| f != node)
+                .unwrap_or(focusable);
+            if focusable && changed {
+                dom.interaction_state.borrow_mut().focus = Some(node);
+                self.dirty = true;
+            }
         }
         if let Some(js) = &self.js {
             js.dispatch(rowser_js::EngineEvent::DomEvent {
@@ -1127,6 +1297,33 @@ impl Page {
     /// Reports what is under a document-space point (hover/status bar).
     fn hit_test(&mut self, x: f32, y: f32) {
         let node = self.hit_node(x, y);
+        // :hover chain maintenance — the hit node plus its ancestors. Only
+        // a CHANGED chain invalidates styles (recompute + repaint).
+        if let Some(dom) = self.dom.as_ref() {
+            let dom_rc = Rc::clone(dom);
+            let dom = dom_rc.borrow();
+            let chain: Vec<rowser_dom::NodeId> = match node {
+                Some(node) => {
+                    let mut chain = vec![node];
+                    let mut walk = dom.parent_element(node);
+                    while let Some(up) = walk {
+                        chain.push(up);
+                        walk = dom.parent_element(up);
+                    }
+                    chain
+                }
+                None => Vec::new(),
+            };
+            let changed = {
+                let state = dom.interaction_state.borrow();
+                state.hover != chain
+            };
+            if changed {
+                dom.interaction_state.borrow_mut().hover = chain;
+                drop(dom);
+                self.dirty = true;
+            }
+        }
         let mut tag = String::new();
         let mut href = None;
         let mut text = None;
@@ -1949,6 +2146,9 @@ impl Page {
         let _ = stage_t1;
         // Background images: request any URL layers not yet fetched.
         self.collect_background_images(&styles);
+        // CSS animations: refresh @keyframes + activate new animation
+        // declarations (paint-side subset: transform/opacity/filters).
+        self.refresh_animations(&styles, &sheets);
         self.style_map = Some(styles);
         self.layout = Some(layout);
         self.rendered_dom_version = dom.borrow().version;
@@ -2126,6 +2326,162 @@ impl Page {
         }
     }
 
+    /// Refreshes @keyframes rules and activates newly-declared animations.
+    fn refresh_animations(&mut self, styles: &StyleMap, sheets: &[ParsedStylesheet]) {
+        self.anim_keyframes.clear();
+        for sheet in sheets {
+            for rule in &sheet.keyframes {
+                self.anim_keyframes
+                    .entry(rule.name.clone())
+                    .or_insert_with(|| rule.frames.clone());
+            }
+        }
+        let now = std::time::Instant::now();
+        for (node, style) in &styles.styles {
+            for (i, spec) in style.animations.iter().enumerate() {
+                if spec.name.is_empty() || spec.paused {
+                    continue;
+                }
+                let key = (*node, spec.name.clone(), i);
+                if self.anim_seen.contains(&key) {
+                    continue;
+                }
+                self.anim_seen.insert(key);
+                self.anim_active.push(AnimationEntry {
+                    node: *node,
+                    spec: spec.clone(),
+                    start: now,
+                });
+            }
+        }
+        // Transitions: diff prev vs new paint props.
+        if let Some(prev) = &self.prev_styles {
+            let now = now;
+            for (node, style) in &styles.styles {
+                let Some(before) = prev.styles.get(node) else {
+                    continue;
+                };
+                let relevant: Vec<&rowser_parsing::cascade::TransitionSpec> = style
+                    .transitions
+                    .iter()
+                    .filter(|t| t.duration > 0.0 && (t.property == "all" || t.property == "opacity"))
+                    .collect();
+                if relevant.is_empty() {
+                    continue;
+                }
+                if (before.opacity - style.opacity).abs() > 1e-4 {
+                    let duration = relevant
+                        .iter()
+                        .map(|t| t.duration)
+                        .fold(f32::INFINITY, f32::min);
+                    // Replace any running transition on this property.
+                    self.transitions.retain(|t| {
+                        !(t.node == *node && t.prop == TransitionProp::Opacity)
+                    });
+                    self.transitions.push(TransitionEntry {
+                        node: *node,
+                        prop: TransitionProp::Opacity,
+                        from: before.opacity,
+                        to: style.opacity,
+                        start: now,
+                        duration,
+                    });
+                }
+            }
+        }
+        self.prev_styles = Some(styles.clone());
+    }
+
+    /// True while animations or transitions are running (loop pacing).
+    fn animations_running(&self) -> bool {
+        !self.anim_active.is_empty() || !self.transitions.is_empty()
+    }
+
+    /// Advances animation time: interpolates keyframes/transitions into
+    /// style overrides and repaints (no relayout — paint-side props only).
+    fn tick_animations(&mut self) {
+        if !self.animations_running() {
+            return;
+        }
+        let now = std::time::Instant::now();
+        // Animations: compute the override per node.
+        let mut overrides: HashMap<NodeId, rowser_parsing::cascade::ComputedStyle> =
+            HashMap::new();
+        self.anim_active.retain(|entry| {
+            let spec = &entry.spec;
+            let t = now.duration_since(entry.start).as_secs_f32() - spec.delay;
+            if t < 0.0 {
+                return true; // still in delay
+            }
+            let total = if spec.duration > 0.0 {
+                spec.duration
+            } else {
+                return true;
+            };
+            let finished = match spec.iteration_count {
+                n if n.is_finite() => t >= total * n,
+                _ => false,
+            };
+            if finished && !spec.paused {
+                // Apply the final state (fill forwards approximated) and end.
+                if let Some(frames) = self.anim_keyframes.get(&spec.name) {
+                    if let Some(last) = frames.iter().find(|f| f.offset >= 1.0) {
+                        let style = overrides.entry(entry.node).or_default();
+                        apply_keyframe_props(style, &last.props);
+                    }
+                }
+                return false;
+            }
+            // Map t into the current iteration + direction.
+            let progress = if spec.iteration_count.is_finite() {
+                t % (total * spec.iteration_count.max(1.0))
+            } else {
+                t % total
+            };
+            let mut frac = (progress / total).clamp(0.0, 1.0);
+            let iteration = if total > 0.0 {
+                (t / total).floor() as i64
+            } else {
+                0
+            };
+            use rowser_parsing::cascade::AnimationDirectionMode as D;
+            let forward = match spec.direction {
+                D::Normal => true,
+                D::Reverse => false,
+                D::Alternate => iteration % 2 == 0,
+                D::AlternateReverse => iteration % 2 == 1,
+            };
+            if !forward {
+                frac = 1.0 - frac;
+            }
+            if let Some(frames) = self.anim_keyframes.get(&spec.name) {
+                if let Some(style) = interpolate_keyframes(frames, frac) {
+                    let entry_style = overrides.entry(entry.node).or_default();
+                    *entry_style = style;
+                }
+            }
+            true
+        });
+        // Transitions: interpolate (easing: ease-out approximation).
+        self.transitions.retain(|t| {
+            let elapsed = now.duration_since(t.start).as_secs_f32() - 0.0;
+            if elapsed >= t.duration {
+                return false;
+            }
+            let raw = (elapsed / t.duration.max(1e-6)).clamp(0.0, 1.0);
+            // ease: quadratic out.
+            let eased = 1.0 - (1.0 - raw) * (1.0 - raw);
+            let value = t.from + (t.to - t.from) * eased;
+            let style = overrides.entry(t.node).or_default();
+            match t.prop {
+                TransitionProp::Opacity => style.opacity = value.clamp(0.0, 1.0),
+            }
+            true
+        });
+        self.anim_overrides = overrides;
+        self.repaint();
+    }
+
     fn repaint(&mut self) {
         if self.suspended || self.dom.is_none() {
             return;
@@ -2156,6 +2512,26 @@ impl Page {
                 },
             );
         }
+        // Animation overrides (paint-side props only — no relayout needed).
+        let styles = if self.anim_overrides.is_empty() {
+            styles
+        } else {
+            let mut patched = styles.clone();
+            for (node, override_style) in &self.anim_overrides {
+                if let Some(target) = patched.styles.get_mut(node) {
+                    if !override_style.transform.is_empty() {
+                        target.transform = override_style.transform.clone();
+                    }
+                    if (override_style.opacity - 1.0).abs() > 1e-6 {
+                        target.opacity = override_style.opacity;
+                    }
+                    if !override_style.filters.is_empty() {
+                        target.filters = override_style.filters.clone();
+                    }
+                }
+            }
+            patched
+        };
         let inputs = rowser_rendering::display_list::PaintInputs {
             images: &self.images,
             background_images: &self.background_images,

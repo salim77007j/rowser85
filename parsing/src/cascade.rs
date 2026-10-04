@@ -63,6 +63,14 @@ pub enum Length {
     Rem(f32),
     /// Percentage of the containing block (resolved by the layout engine).
     Percent(f32),
+    /// `calc(<percent>% + <px>px)` — a linear combination resolved against
+    /// the containing block at layout time (two-pass).
+    Calc {
+        /// Percent component as a 0..1 fraction.
+        pct: f32,
+        /// Absolute component in px.
+        px: f32,
+    },
 }
 
 /// Root (html) font size in pixels.
@@ -75,7 +83,16 @@ impl Length {
             Length::Px(n) => n,
             Length::Em(n) => n * font_size,
             Length::Rem(n) => n * ROOT_FONT_SIZE,
-            Length::Percent(_) => 0.0,
+            // Percentages resolve at layout time; 0 here means "unknown".
+            Length::Percent(_) | Length::Calc { .. } => 0.0,
+        }
+    }
+
+    /// Resolves against a containing-block size (for Calc).
+    pub fn resolve_against(self, font_size: f32, containing: f32) -> f32 {
+        match self {
+            Length::Calc { pct, px } => pct * containing + px,
+            other => other.resolve(font_size),
         }
     }
 }
@@ -328,6 +345,28 @@ pub struct TransitionSpec {
     pub duration: f32,
     /// Delay in seconds.
     pub delay: f32,
+}
+
+/// `content` for pseudo-elements (mined from raw declarations).
+#[derive(Debug, Clone, PartialEq)]
+pub enum ContentSpec {
+    /// `content: none` / absent.
+    None,
+    /// `content: normal`.
+    Normal,
+    /// `content: "text"`.
+    Text(String),
+    /// `content: attr(name)`.
+    Attr(String),
+}
+
+/// Which pseudo-element a rule styles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PseudoKind {
+    /// ::before
+    Before,
+    /// ::after
+    After,
 }
 
 /// Animation playback direction.
@@ -835,6 +874,8 @@ pub struct StyleProps {
     pub transitions: Option<Vec<TransitionSpec>>,
     /// `animation` list.
     pub animations: Option<Vec<AnimationSpec>>,
+    /// `content` (pseudo-elements).
+    pub content: Option<ContentSpec>,
 }
 
 /// Fully resolved style for one element.
@@ -963,6 +1004,8 @@ pub struct ComputedStyle {
     pub transitions: Vec<TransitionSpec>,
     /// `animation` list (empty = none).
     pub animations: Vec<AnimationSpec>,
+    /// `content` (pseudo-elements; None = no generated box).
+    pub content: Option<ContentSpec>,
 }
 
 impl Default for ComputedStyle {
@@ -1059,6 +1102,7 @@ impl Default for ComputedStyle {
             backdrop_filters: Vec::new(),
             transitions: Vec::new(),
             animations: Vec::new(),
+            content: None,
         }
     }
 }
@@ -1068,6 +1112,10 @@ impl Default for ComputedStyle {
 pub struct StyleMap {
     /// Node id → computed style.
     pub styles: HashMap<NodeId, ComputedStyle>,
+    /// Node id → ::before computed style (only entries that generate a box).
+    pub pseudo_before: HashMap<NodeId, ComputedStyle>,
+    /// Node id → ::after computed style (only entries that generate a box).
+    pub pseudo_after: HashMap<NodeId, ComputedStyle>,
 }
 
 impl StyleMap {
@@ -1110,6 +1158,7 @@ pub fn compute_styles(dom: &Dom, author: &[ParsedStylesheet], media: &MediaConte
     for (i, entry) in all_entries.iter_mut().enumerate() {
         entry.order = i as u32;
     }
+    let has_pseudo_rules = all_entries.iter().any(|entry| entry.pseudo.is_some());
     let rules = RuleSet::build(all_entries);
 
     let mut map = StyleMap::default();
@@ -1184,7 +1233,7 @@ pub fn compute_styles(dom: &Dom, author: &[ParsedStylesheet], media: &MediaConte
         let inline = if inline_css.is_empty() {
             None
         } else {
-            Some(parse_style_attribute(&inline_css))
+            Some(parse_style_attribute(&inline_css, media))
         };
         let style = cascade_element(
             dom,
@@ -1195,6 +1244,38 @@ pub fn compute_styles(dom: &Dom, author: &[ParsedStylesheet], media: &MediaConte
             &mut caches,
         );
         map.styles.insert(*node, style);
+        // Pseudo-element styles (::before / ::after) — only when the sheet
+        // set contains pseudo rules at all (cost gate: static pages skip).
+        if has_pseudo_rules {
+            for kind in [PseudoKind::Before, PseudoKind::After] {
+                let mut pseudo_style = cascade_element_kind(
+                    dom,
+                    *node,
+                    &rules,
+                    None,
+                    map.styles.get(node).unwrap_or(&parent_style),
+                    &mut caches,
+                    Some(kind),
+                );
+                // content: attr(...) resolves against the owner element.
+                if let Some(crate::cascade::ContentSpec::Attr(name)) = pseudo_style.content.clone() {
+                    let value = dom.get_attr(*node, &name).unwrap_or_default().to_owned();
+                    pseudo_style.content = Some(crate::cascade::ContentSpec::Text(value));
+                }
+                let generates_box = matches!(
+                    pseudo_style.content,
+                    Some(crate::cascade::ContentSpec::Text(_))
+                ) && pseudo_style.display != DisplayMode::None;
+                if generates_box {
+                    match kind {
+                        PseudoKind::Before => {
+                            map.pseudo_before.insert(*node, pseudo_style)
+                        }
+                        PseudoKind::After => map.pseudo_after.insert(*node, pseudo_style),
+                    };
+                }
+            }
+        }
     }
     map
 }
@@ -1286,6 +1367,9 @@ fn apply_props(style: &mut ComputedStyle, props: &StyleProps, parent: &ComputedS
     }
     if let Some(animations) = &props.animations {
         style.animations = animations.clone();
+    }
+    if let Some(content) = &props.content {
+        style.content = Some(content.clone());
     }
     if let Some(w) = props.width {
         style.width = w;
@@ -1439,6 +1523,21 @@ fn cascade_element(
     parent: &ComputedStyle,
     caches: &mut CachesWrap,
 ) -> ComputedStyle {
+    cascade_element_kind(dom, node, rules, inline, parent, caches, None)
+}
+
+/// Cascades one element (or one of its pseudo-elements when `pseudo` is
+/// set: only that pseudo's rules match, in ForStatelessPseudoElement mode).
+#[allow(clippy::too_many_arguments)]
+fn cascade_element_kind(
+    dom: &Dom,
+    node: NodeId,
+    rules: &RuleSet,
+    inline: Option<&StyleProps>,
+    parent: &ComputedStyle,
+    caches: &mut CachesWrap,
+    pseudo: Option<PseudoKind>,
+) -> ComputedStyle {
     let element = dom.element(node).expect("cascade on non-element");
     let tag = element.name.local.to_string();
     let indices = rules.index.lookup_indices(
@@ -1452,7 +1551,22 @@ fn cascade_element(
         .into_iter()
         .filter(|&i| {
             let entry = &rules.entries[i];
-            rowser_dom::selector::matches_with_caches(&entry.selectors, &element_ref, caches)
+            if entry.pseudo != pseudo {
+                return false;
+            }
+            if pseudo.is_some() {
+                rowser_dom::selector::matches_for_pseudo_with_caches(
+                    &entry.selectors,
+                    &element_ref,
+                    caches,
+                )
+            } else {
+                rowser_dom::selector::matches_with_caches(
+                    &entry.selectors,
+                    &element_ref,
+                    caches,
+                )
+            }
         })
         .collect();
 
@@ -1621,7 +1735,7 @@ fn cascade_element(
     for (name, raw) in var_winners {
         if let Some(substituted) = substitute_vars(&raw, &style.custom, 0) {
             let text = format!("{name}: {substituted}");
-            let props = crate::css::parse_style_attribute(&text);
+            let props = crate::css::parse_style_attribute(&text, &MediaContext::default());
             apply_props(&mut style, &props, parent);
         }
         // Unresolvable var() = "invalid at computed-value time" → the

@@ -80,6 +80,10 @@ pub struct LayoutResult {
     pub text: Vec<TextRun>,
     /// Full document content size (for scrolling).
     pub content_size: (f32, f32),
+    /// Pseudo-element boxes: owner element → (::before id, ::after id).
+    /// The ids index into `rects` and `text`; the display list maps them
+    /// back to the owner's pseudo styles.
+    pub pseudo_ids: HashMap<NodeId, (NodeId, NodeId)>,
 }
 
 /// One text leaf's data, owned by the taffy tree.
@@ -156,6 +160,7 @@ impl LayoutEngine {
         // cells and tables get their taffy grid styles.
         let tables = TableGrids::collect(dom, root);
 
+        let mut pseudo_alloc = PseudoAlloc::new();
         let taffy_root = build_box(
             dom,
             styles,
@@ -166,6 +171,7 @@ impl LayoutEngine {
             intrinsic,
             &[],
             &tables,
+            &mut pseudo_alloc,
         );
         let Some(taffy_root) = taffy_root else {
             return LayoutResult::default();
@@ -222,6 +228,7 @@ impl LayoutEngine {
         // margin offset (mirrors CSS: the body content box is inset by its
         // margins within the html canvas).
         let mut result = LayoutResult::default();
+        result.pseudo_ids = pseudo_alloc.ids.clone();
         let abs = (root_margin.0, root_margin.1);
         extract(
             dom,
@@ -233,8 +240,142 @@ impl LayoutEngine {
             &mut result,
             font_system,
         );
+        // Pass 2 (conditional): resolve calc(<%> + <px>) lengths against the
+        // ACTUAL containing-block sizes from pass 1, then re-layout. Only
+        // documents that use percentage calc pay the second pass.
+        let needs_calc_pass = styles
+            .styles
+            .values()
+            .any(|cs| style_has_calc(cs));
+        if needs_calc_pass {
+            for (node, taffy) in dom_to_taffy.iter() {
+                let Some(cs) = styles.get(*node) else { continue };
+                if !style_has_calc(cs) {
+                    continue;
+                }
+                // Containing block: the flat parent's content box.
+                let parent_content = dom
+                    .flat_parent_element(*node)
+                    .and_then(|p| result.rects.get(&p).copied())
+                    .map(|pr| {
+                        let ps = styles.get(dom.flat_parent_element(*node).unwrap_or(0));
+                        let (bw, bh, pw, ph) = ps
+                            .map(|p| {
+                                (
+                                    p.borders.left.width + p.borders.right.width,
+                                    p.borders.top.width + p.borders.bottom.width,
+                                    match p.paddings.left {
+                                        rowser_parsing::cascade::LengthOrAuto::Length(l) => {
+                                            l.resolve(p.font_size)
+                                        }
+                                        _ => 0.0,
+                                    },
+                                    match p.paddings.top {
+                                        rowser_parsing::cascade::LengthOrAuto::Length(l) => {
+                                            l.resolve(p.font_size)
+                                        }
+                                        _ => 0.0,
+                                    },
+                                )
+                            })
+                            .unwrap_or((0.0, 0.0, 0.0, 0.0));
+                        (pr.w - bw - pw, pr.h - bh - ph)
+                    })
+                    .unwrap_or((viewport.width, 0.0));
+                let Ok(style) = tree.style(*taffy) else { continue };
+                let mut style = (*style).clone();
+                let mut changed = false;
+                let resolve_dim = |l: &rowser_parsing::cascade::LengthOrAuto,
+                                   containing: f32|
+                 -> Option<taffy::style::Dimension> {
+                    match l {
+                        rowser_parsing::cascade::LengthOrAuto::Length(
+                            rowser_parsing::cascade::Length::Calc { pct, px },
+                        ) => Some(Dimension::length(
+                            (pct * containing + px).max(0.0),
+                        )),
+                        _ => None,
+                    }
+                };
+                if let Some(d) = resolve_dim(&cs.width, parent_content.0) {
+                    style.size.width = d;
+                    changed = true;
+                }
+                if let Some(d) = resolve_dim(&cs.height, parent_content.1) {
+                    style.size.height = d;
+                    changed = true;
+                }
+                let resolve_lpa =
+                    |l: &rowser_parsing::cascade::LengthOrAuto, containing: f32| {
+                        match l {
+                            rowser_parsing::cascade::LengthOrAuto::Length(
+                                rowser_parsing::cascade::Length::Calc { pct, px },
+                            ) => Some(LengthPercentageAuto::length(
+                                (pct * containing + px).max(0.0),
+                            )),
+                            _ => None,
+                        }
+                    };
+                if let Some(d) = resolve_lpa(&cs.min_width, parent_content.0) {
+                    style.min_size.width = d;
+                    changed = true;
+                }
+                if let Some(d) = resolve_lpa(&cs.min_height, parent_content.1) {
+                    style.min_size.height = d;
+                    changed = true;
+                }
+                if let Some(d) = resolve_lpa(&cs.max_width, parent_content.0) {
+                    style.max_size.width = d;
+                    changed = true;
+                }
+                if let Some(d) = resolve_lpa(&cs.max_height, parent_content.1) {
+                    style.max_size.height = d;
+                    changed = true;
+                }
+                if changed {
+                    let _ = tree.set_style(*taffy, style);
+                }
+            }
+            if needs_calc_pass {
+                tree.compute_layout_with_measure(
+                    taffy_root,
+                    available,
+                    |input, _node, context, _style| {
+                        measure_leaf(input, context, font_system)
+                    },
+                )
+                .ok();
+                let mut result2 = LayoutResult::default();
+                result2.pseudo_ids = pseudo_alloc.ids.clone();
+                extract(
+                    dom,
+                    &tree,
+                    taffy_root,
+                    root,
+                    &taffy_to_dom,
+                    abs,
+                    &mut result2,
+                    font_system,
+                );
+                result = result2;
+            }
+        }
         result
     }
+}
+
+/// True when the computed style carries any percentage calc() length.
+fn style_has_calc(cs: &ComputedStyle) -> bool {
+    use rowser_parsing::cascade::{Length, LengthOrAuto};
+    let any = |v: &LengthOrAuto| {
+        matches!(v, LengthOrAuto::Length(Length::Calc { .. }))
+    };
+    any(&cs.width)
+        || any(&cs.height)
+        || any(&cs.min_width)
+        || any(&cs.min_height)
+        || any(&cs.max_width)
+        || any(&cs.max_height)
 }
 
 /// One cell's placement in a table grid, computed by the CSS 2.1 §17.4.1
@@ -398,6 +539,12 @@ fn taffy_style(cs: &ComputedStyle) -> Style {
                 LengthPercentageAuto::length(n * rowser_parsing::cascade::ROOT_FONT_SIZE)
             }
             LengthOrAuto::Length(Length::Percent(n)) => LengthPercentageAuto::percent(n),
+            // calc(pct + px): pass 1 uses the percent component; the
+            // two-pass calc resolution replaces it with the exact px once
+            // the containing block is known.
+            LengthOrAuto::Length(Length::Calc { pct, .. }) => {
+                LengthPercentageAuto::percent(pct)
+            }
         }
     };
     let dim = |l: rowser_parsing::cascade::LengthOrAuto| -> Dimension {
@@ -679,12 +826,15 @@ fn length_pct(l: rowser_parsing::cascade::LengthOrAuto, font_size: f32) -> Lengt
             LengthPercentage::length(n * rowser_parsing::cascade::ROOT_FONT_SIZE)
         }
         LengthOrAuto::Length(Length::Percent(n)) => LengthPercentage::percent(n),
+        // calc: percent component for pass 1 (two-pass resolves exactly).
+        LengthOrAuto::Length(Length::Calc { pct, .. }) => LengthPercentage::percent(pct),
     }
 }
 
 /// Builds a taffy box for `node` (recursively). Returns the taffy node.
 /// `parent_areas` carries the parent grid's named areas for
 /// `grid-area: name` placement of this node.
+#[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_arguments)]
 fn build_box(
     dom: &Dom,
@@ -696,6 +846,7 @@ fn build_box(
     intrinsic: &HashMap<NodeId, (f32, f32)>,
     parent_areas: &[rowser_parsing::cascade::NamedAreaRaw],
     tables: &TableGrids,
+    pseudo_alloc: &mut PseudoAlloc,
 ) -> Option<TaffyNode> {
     let style = styles.get(node)?;
     if style.display == DisplayMode::None {
@@ -709,6 +860,42 @@ fn build_box(
     let mut spans: Vec<(std::ops::Range<usize>, SpanStyle)> = Vec::new();
     let defaults = SpanStyle::from_style(style);
     let ctx = defaults.clone();
+
+    // ::before / ::after generated content. Two forms:
+    // 1. inline text content → styled span prepended/appended to the
+    //    element's own inline text (icon prefixes, quote marks);
+    // 2. block/inline-block/flex boxes → separate taffy child boxes with
+    //    synthetic ids (registered in `pseudo_ids` for the display list).
+    let mut pseudo_before_box: Option<TaffyNode> = None;
+    let mut pseudo_after_box: Option<TaffyNode> = None;
+    if let Some(pb) = styles.pseudo_before.get(&node) {
+        if let Some(rowser_parsing::cascade::ContentSpec::Text(content)) = &pb.content {
+            let inline = matches!(
+                pb.display,
+                DisplayMode::Inline | DisplayMode::Contents
+            );
+            if inline {
+                if !content.is_empty() {
+                    let start = text.len();
+                    text.push_str(content);
+                    spans.push((start..text.len(), SpanStyle::from_style(pb)));
+                }
+            } else {
+                pseudo_before_box = build_pseudo_box(tree, node, pb, pseudo_alloc, true);
+            }
+        }
+    }
+    if let Some(pa) = styles.pseudo_after.get(&node) {
+        if let Some(rowser_parsing::cascade::ContentSpec::Text(_content)) = &pa.content {
+            if !matches!(
+                pa.display,
+                DisplayMode::Inline | DisplayMode::Contents
+            ) {
+                pseudo_after_box = build_pseudo_box(tree, node, pa, pseudo_alloc, false);
+            }
+            // Inline ::after text appends AFTER the children (below).
+        }
+    }
 
     collect_children(
         dom,
@@ -724,7 +911,28 @@ fn build_box(
         &mut text,
         &mut spans,
         &ctx,
+        pseudo_alloc,
     );
+
+    // ::after inline text appends AFTER the children's inline content.
+    if let Some(pa) = styles.pseudo_after.get(&node) {
+        if let Some(rowser_parsing::cascade::ContentSpec::Text(content)) = &pa.content {
+            if matches!(pa.display, DisplayMode::Inline | DisplayMode::Contents)
+                && !content.is_empty()
+            {
+                let start = text.len();
+                text.push_str(content);
+                spans.push((start..text.len(), SpanStyle::from_style(pa)));
+            }
+        }
+    }
+    // Pseudo boxes wrap the children: ::before first, ::after last.
+    if let Some(pb) = pseudo_before_box {
+        children.insert(0, pb);
+    }
+    if let Some(pa) = pseudo_after_box {
+        children.push(pa);
+    }
 
     // Text leaf: a taffy leaf carrying the flattened text. Every element
     // gets one (empty text for childless boxes): a childless taffy node
@@ -868,6 +1076,65 @@ fn build_box(
 /// the block boxes — `<td>Nested table:<table>…</table></td>` rendered the
 /// label BELOW the nested table, and `Rail<br>spans<br>three<br>rows`
 /// concatenated into a single line.
+/// Allocates synthetic node ids for pseudo-element boxes and records the
+/// owner → pseudo-id mapping.
+#[derive(Default)]
+pub struct PseudoAlloc {
+    next: NodeId,
+    /// owner element → (::before id, ::after id).
+    pub ids: HashMap<NodeId, (NodeId, NodeId)>,
+}
+
+impl PseudoAlloc {
+    fn new() -> Self {
+        PseudoAlloc {
+            // DOM arena ids are small; pseudo ids live in the high range.
+            next: 0x8000_0000,
+            ids: HashMap::new(),
+        }
+    }
+
+    fn alloc(&mut self, owner: NodeId, before: bool) -> NodeId {
+        let id = self.next;
+        self.next = self.next.wrapping_add(1);
+        let entry = self.ids.entry(owner).or_insert((0, 0));
+        if before {
+            entry.0 = id;
+        } else {
+            entry.1 = id;
+        }
+        id
+    }
+}
+
+/// Builds one pseudo-element box (block/inline-block display with text
+/// content): a taffy node styled from the pseudo ComputedStyle with a text
+/// leaf carrying the content string.
+fn build_pseudo_box(
+    tree: &mut TaffyTree<TextLeaf>,
+    owner: NodeId,
+    pseudo: &ComputedStyle,
+    pseudo_alloc: &mut PseudoAlloc,
+    before: bool,
+) -> Option<TaffyNode> {
+    let id = pseudo_alloc.alloc(owner, before);
+    let content = match &pseudo.content {
+        Some(rowser_parsing::cascade::ContentSpec::Text(t)) => t.clone(),
+        _ => String::new(),
+    };
+    let defaults = SpanStyle::from_style(pseudo);
+    let leaf = TextLeaf {
+        node: id,
+        text: content,
+        spans: Vec::new(),
+        defaults,
+        cache: None,
+    };
+    let style = taffy_style(pseudo);
+    let node = tree.new_leaf_with_context(style, leaf).ok()?;
+    Some(node)
+}
+
 fn flush_text_leaf(
     tree: &mut TaffyTree<TextLeaf>,
     owner: NodeId,
@@ -922,6 +1189,7 @@ fn flush_text_leaf(
 /// inline text accumulated so far into its own leaf first (CSS 2.1
 /// anonymous block boxes around runs of inline content).
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 fn collect_children(
     dom: &Dom,
     styles: &StyleMap,
@@ -936,6 +1204,7 @@ fn collect_children(
     text: &mut String,
     spans: &mut Vec<(std::ops::Range<usize>, SpanStyle)>,
     ctx: &SpanStyle,
+    pseudo_alloc: &mut PseudoAlloc,
 ) {
     for child in dom.flat_children(node) {
         match dom.kind(child) {
@@ -979,6 +1248,7 @@ fn collect_children(
                                 intrinsic,
                                 parent_areas,
                                 tables,
+                                pseudo_alloc,
                             ) {
                                 children.push(t);
                             }
@@ -1014,6 +1284,7 @@ fn collect_children(
                             text,
                             spans,
                             &inner,
+                            pseudo_alloc,
                         );
                     }
                     _ => {
@@ -1036,6 +1307,7 @@ fn collect_children(
                             intrinsic,
                             parent_areas,
                             tables,
+                            pseudo_alloc,
                         ) {
                             children.push(t);
                         }

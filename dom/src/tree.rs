@@ -138,6 +138,47 @@ pub struct Dom {
     shadow_roots: std::collections::HashMap<NodeId, NodeId>,
     /// Reverse map (shadow root → host) for flat-tree parent resolution.
     shadow_hosts: std::collections::HashMap<NodeId, NodeId>,
+    /// User-interaction pseudo-class state (:hover/:active/:focus), set by
+    /// the engine (input handling) and read during selector matching.
+    /// Interior mutability: matching holds an immutable DOM borrow.
+    pub interaction_state: std::cell::RefCell<InteractionState>,
+}
+
+/// Engine-tracked interaction state for pseudo-class matching.
+#[derive(Debug, Default, Clone)]
+pub struct InteractionState {
+    /// Node under the pointer (:hover chain — the node and its ancestors).
+    pub hover: Vec<NodeId>,
+    /// Node being pressed (:active).
+    pub active: Option<NodeId>,
+    /// Focused element (:focus).
+    pub focus: Option<NodeId>,
+    /// Visited links (url set once navigation completes).
+    pub visited: std::collections::HashSet<NodeId>,
+}
+
+impl Dom {
+    /// True when `node` is in the :hover chain.
+    pub fn is_hovered(&self, node: NodeId) -> bool {
+        self.interaction_state.borrow().hover.contains(&node)
+    }
+
+    /// True when `node` or a descendant holds focus (:focus-within).
+    pub fn is_focus_within(&self, node: NodeId) -> bool {
+        let focus = self.interaction_state.borrow().focus;
+        let Some(focus) = focus else { return false };
+        if focus == node {
+            return true;
+        }
+        let mut walk = self.parent(focus);
+        while let Some(up) = walk {
+            if up == node {
+                return true;
+            }
+            walk = self.parent(up);
+        }
+        false
+    }
 }
 
 /// Hard cap on live DOM nodes (real pages use 5–20k; heavy JS hydration
@@ -165,6 +206,7 @@ impl Dom {
             template_contents: std::collections::HashMap::new(),
             shadow_roots: std::collections::HashMap::new(),
             shadow_hosts: std::collections::HashMap::new(),
+            interaction_state: std::cell::RefCell::new(InteractionState::default()),
         };
         dom.document = dom.alloc(NodeKind::Document);
         dom.overflow = dom.create_html_element("rowser-overflow");

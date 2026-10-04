@@ -586,4 +586,197 @@ mod tests {
             assert_eq!((r, g, b), (0, 255, 0), "sticky header green at scroll {scroll}, got ({r},{g},{b})");
         }
     }
+
+    /// ::before/::after generated text content renders (styled spans).
+    #[test]
+    fn pseudo_before_after_content_renders() {
+        let html = br#"<html><head><style>
+            .item::before { content: "[icon] "; color: #00aa00; display: block; width: 60px; height: 14px; background-color: #00aa00; }
+            .item::after { content: " <<"; color: #aa0000; }
+        </style></head><body style="margin:0">
+            <p class="item">middle</p>
+        </body></html>"#;
+        let doc = parse_html(html);
+        let sheet = parse_stylesheet(
+            &doc.style_blocks().join("\n"),
+            &MediaContext::default(),
+        );
+        let mut engine = LayoutEngine::new();
+        let (styles, layout) = engine.layout_document(
+            &doc.dom,
+            &[sheet],
+            &MediaContext::default(),
+            Viewport { width: 300.0, height: 200.0 },
+            &Default::default(),
+        );
+        // The pseudo styles must exist and generate boxes with text runs.
+        let p = doc
+            .dom
+            .subtree_elements(doc.dom.document())
+            .find(|n| {
+                doc.dom
+                    .element(*n)
+                    .map(|e| &*e.name.local == "p")
+                    .unwrap_or(false)
+            })
+            .expect("p node");
+        assert!(styles.pseudo_before.contains_key(&p), "::before style missing");
+        assert!(styles.pseudo_after.contains_key(&p), "::after style missing");
+        // Block-display ::before generates a box + text run.
+        let (before_id, after_id) = layout
+            .pseudo_ids
+            .get(&p)
+            .copied()
+            .unwrap_or((0, 0));
+        assert_ne!(before_id, 0, "::before box not generated");
+        assert!(
+            layout.text.iter().any(|r| r.node == before_id),
+            "::before text run missing"
+        );
+        // Inline ::after content joins the element's own text (no box).
+        assert_eq!(after_id, 0, "inline ::after should not generate a box");
+        // The owner's own text run must contain the appended ::after text:
+        // shaped glyph count for the p node > "middle" alone.
+        let owner_glyphs: usize = layout
+            .text
+            .iter()
+            .filter(|r| r.node == p)
+            .map(|r| r.glyphs.len())
+            .sum();
+        assert!(owner_glyphs > 6, "inline ::after text not appended: {owner_glyphs} glyphs");
+        let list = build_display_list(&doc.dom, &styles, &layout, &PaintInputs::default());
+        let mut painter = Painter::new();
+        let options = RenderOptions {
+            viewport_width: 300,
+            viewport_height: 200,
+            ..Default::default()
+        };
+        let frame = painter.render(&list, options, &mut engine.font_system).expect("frame");
+        // Ink must exist (text drawn).
+        let mut ink = 0usize;
+        for px in frame.pixels.chunks_exact(4) {
+            if px[0] < 250 || px[1] < 250 || px[2] < 250 {
+                ink += 1;
+            }
+        }
+        assert!(ink > 100, "too little ink: {ink}");
+    }
+
+    /// :hover state changes the applied background color.
+    #[test]
+    fn hover_state_restyles() {
+        let html = br#"<html><head><style>
+            .btn { background-color: #0000ff; }
+            .btn:hover { background-color: #ff0000; }
+        </style></head><body style="margin:0">
+            <div class="btn" style="width: 80px; height: 40px"></div>
+        </body></html>"#;
+        let doc = parse_html(html);
+        let sheet = parse_stylesheet(
+            &doc.style_blocks().join("\n"),
+            &MediaContext::default(),
+        );
+        let mut engine = LayoutEngine::new();
+        let (styles, _) = engine.layout_document(
+            &doc.dom,
+            &[sheet.clone()],
+            &MediaContext::default(),
+            Viewport { width: 200.0, height: 200.0 },
+            &Default::default(),
+        );
+        // Find the .btn node.
+        let btn = doc
+            .dom
+            .subtree_elements(doc.dom.document())
+            .find(|n| {
+                doc.dom
+                    .element(*n)
+                    .map(|e| e.classes.iter().any(|c| c == "btn"))
+                    .unwrap_or(false)
+            })
+            .expect("btn node");
+        let color_before = styles.get(btn).unwrap().background_color;
+        assert_eq!((color_before.r, color_before.g, color_before.b), (0, 0, 255));
+        // Simulate :hover.
+        doc.dom
+            .interaction_state
+            .borrow_mut()
+            .hover
+            .push(btn);
+        let (styles2, _) = engine.layout_document(
+            &doc.dom,
+            &[sheet],
+            &MediaContext::default(),
+            Viewport { width: 200.0, height: 200.0 },
+            &Default::default(),
+        );
+        let color_after = styles2.get(btn).unwrap().background_color;
+        assert_eq!((color_after.r, color_after.g, color_after.b), (255, 0, 0));
+    }
+
+    /// calc() percentage + px resolves via the two-pass layout.
+    #[test]
+    fn calc_percent_px_resolves() {
+        let html = br#"<html><body style="margin:0; width: 500px">
+            <div style="width: calc(100% - 100px); height: 50px; background-color: #ff0000"></div>
+        </body></html>"#;
+        let doc = parse_html(html);
+        let author = parse_stylesheet("", &MediaContext::default());
+        let mut engine = LayoutEngine::new();
+        let (styles, layout) = engine.layout_document(
+            &doc.dom,
+            &[author],
+            &MediaContext::default(),
+            Viewport { width: 500.0, height: 200.0 },
+            &Default::default(),
+        );
+        let _ = styles;
+        // The body is 500 wide; calc(100% - 100px) = 400.
+        let div = doc
+            .dom
+            .subtree_elements(doc.dom.document())
+            .find(|n| {
+                doc.dom
+                    .element(*n)
+                    .map(|e| &*e.name.local == "div")
+                    .unwrap_or(false)
+            })
+            .expect("div");
+        let rect = layout.rects.get(&div).copied().expect("rect");
+        assert!(
+            (rect.w - 400.0).abs() < 2.0,
+            "calc width should be ~400, got {}",
+            rect.w
+        );
+    }
+
+    /// vw viewport units resolve at compute time.
+    #[test]
+    fn viewport_units_resolve() {
+        let html = br#"<html><body style="margin:0">
+            <div style="width: 50vw; height: 10px; background-color: #ff0000"></div>
+        </body></html>"#;
+        let doc = parse_html(html);
+        let author = parse_stylesheet("", &MediaContext { width: 800.0, height: 600.0, dark_mode: false });
+        let mut engine = LayoutEngine::new();
+        let (_, layout) = engine.layout_document(
+            &doc.dom,
+            &[author],
+            &MediaContext { width: 800.0, height: 600.0, dark_mode: false },
+            Viewport { width: 800.0, height: 600.0 },
+            &Default::default(),
+        );
+        let div = doc
+            .dom
+            .subtree_elements(doc.dom.document())
+            .find(|n| {
+                doc.dom
+                    .element(*n)
+                    .map(|e| &*e.name.local == "div")
+                    .unwrap_or(false)
+            })
+            .expect("div");
+        let rect = layout.rects.get(&div).copied().expect("rect");
+        assert!((rect.w - 400.0).abs() < 1.0, "50vw should be 400, got {}", rect.w);
+    }
 }

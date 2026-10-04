@@ -623,6 +623,8 @@ fn resolved_inset(
                 rowser_parsing::cascade::Length::Em(n) => Some(n * font),
                 rowser_parsing::cascade::Length::Rem(n) => Some(n * 16.0),
                 rowser_parsing::cascade::Length::Percent(_) => None,
+                // Sticky calc insets: px component (approximation).
+                rowser_parsing::cascade::Length::Calc { px, .. } => Some(px),
             }
         }
         rowser_parsing::cascade::LengthOrAuto::Auto => None,
@@ -815,10 +817,86 @@ fn paint_element(
         }
     }
 
+    // ::before box (block-level pseudo box): painted before the children.
+    if let Some((before_id, _)) = ctx.layout.pseudo_ids.get(&node) {
+        if *before_id != 0 {
+            if let Some(pseudo_style) = ctx.styles.pseudo_before.get(&node) {
+                paint_pseudo_box(ctx, *before_id, pseudo_style, rect, list);
+            }
+        }
+    }
+
     // Children (flat tree: shadow content composes in at its host).
     for child in dom.flat_children(node) {
         if dom.element(child).is_some() {
             walk(dom, ctx, child, list);
+        }
+    }
+
+    // ::after box: painted after the children.
+    if let Some((_, after_id)) = ctx.layout.pseudo_ids.get(&node) {
+        if *after_id != 0 {
+            if let Some(pseudo_style) = ctx.styles.pseudo_after.get(&node) {
+                paint_pseudo_box(ctx, *after_id, pseudo_style, rect, list);
+            }
+        }
+    }
+}
+
+/// Paints one pseudo-element box: background, border, text runs — using the
+/// synthetic id's layout rect and text runs.
+fn paint_pseudo_box(
+    ctx: &mut WalkCtx<'_>,
+    pseudo_id: NodeId,
+    style: &ComputedStyle,
+    owner_rect: Rect,
+    list: &mut DisplayList,
+) {
+    let Some(rect) = ctx.layout.rects.get(&pseudo_id) else {
+        return;
+    };
+    let rect = Rect {
+        x: rect.x,
+        y: rect.y,
+        w: rect.w,
+        h: rect.h,
+    };
+    let _ = owner_rect;
+    if style.background_color.a > 0 {
+        list.commands.push(DrawCmd::Rect {
+            rect,
+            color: style.background_color,
+            radius: style.border_radius,
+        });
+    }
+    if !style.background_layers.is_empty() {
+        for layer in style.background_layers.iter().rev() {
+            if let BackgroundImageSpec::Gradient(spec) = &layer.image {
+                list.commands.push(DrawCmd::Gradient {
+                    rect,
+                    radius: style.border_radius,
+                    spec: spec.clone(),
+                });
+            }
+        }
+    }
+    let b = &style.borders;
+    let has_border =
+        b.top.width > 0.0 || b.right.width > 0.0 || b.bottom.width > 0.0 || b.left.width > 0.0;
+    if has_border {
+        list.commands.push(DrawCmd::Border {
+            rect,
+            widths: [b.top.width, b.right.width, b.bottom.width, b.left.width],
+            colors: [b.top.color, b.right.color, b.bottom.color, b.left.color],
+            radius: style.border_radius,
+        });
+    }
+    if let Some(runs) = ctx.runs.get(&pseudo_id) {
+        for run in runs {
+            list.commands.push(DrawCmd::Text {
+                run: Arc::clone(run),
+                shadows: style.text_shadows.clone(),
+            });
         }
     }
 }
