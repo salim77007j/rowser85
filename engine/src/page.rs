@@ -8,7 +8,7 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::sync::Arc;
 use std::time::Duration;
 
-use rowser_dom::{Dom, NodeId};
+use rowser_dom::{ns, Dom, NodeId};
 use rowser_js::{
     prelude, EngineEvent as JsEngineEvent, JsCommand, JsConfig, JsRuntime, PageBridge,
 };
@@ -484,6 +484,12 @@ struct Page {
     pending_bg: HashMap<String, Vec<(NodeId, usize)>>,
     /// Background image URLs already requested (no re-request loops).
     bg_requested: std::collections::HashSet<String>,
+    /// Inline `<svg>` rasters keyed by element, re-rendered when the layout
+    /// rect or subtree signature changes (Group C: SVG at device-pixel size).
+    svg_rasters: HashMap<NodeId, SvgRasterEntry>,
+    /// Device pixel ratio for rasterization density (HiDPI; 1.0 default,
+    /// `ROWSER_DPR` env override).
+    device_pixel_ratio: f32,
     /// Per-element scroll offsets for overflow: scroll/auto containers.
     element_scroll: rowser_rendering::display_list::ElementScrollMap,
     /// @keyframes rules by animation name (refreshed per render).
@@ -597,6 +603,12 @@ impl Page {
             layout: None,
             display_list: None,
             images: ImageMap::new(),
+            svg_rasters: HashMap::new(),
+            device_pixel_ratio: std::env::var("ROWSER_DPR")
+                .ok()
+                .and_then(|v| v.parse::<f32>().ok())
+                .filter(|d| *d > 0.0 && *d <= 4.0)
+                .unwrap_or(1.0),
             background_images: HashMap::new(),
             pending_bg: HashMap::new(),
             bg_requested: std::collections::HashSet::new(),
@@ -1543,7 +1555,11 @@ impl Page {
             requests.push((resolved, SubresourceKind::Image));
         }
         for (node, i, url) in data_decodes {
-            if let Some(image) = DecodedImage::decode(extract_data_payload(&url).as_bytes()) {
+            if let Some(image) = DecodedImage::decode(extract_data_payload(&url).as_bytes())
+                .or_else(|| {
+                    rowser_rendering::decode_svg_bytes(extract_data_payload(&url).as_bytes())
+                })
+            {
                 let entry = self.background_images.entry(node).or_default();
                 while entry.len() <= i {
                     entry.push(None);
@@ -1764,7 +1780,9 @@ impl Page {
                 Some(SubresourceKind::Script)
             }
             SubresourceKind::Image => {
-                if let Some(image) = DecodedImage::decode(&body) {
+                if let Some(image) = DecodedImage::decode(&body)
+                    .or_else(|| rowser_rendering::decode_svg_bytes(&body))
+                {
                     // Attach to the img node that referenced it. The fetch
                     // used the RESOLVED url (protocol-relative "//host/..."
                     // became "https://host/..."), so match resolution-side
@@ -1806,7 +1824,9 @@ impl Page {
                 let layer_hits = self.pending_bg.remove(&url).unwrap_or_default();
                 let mut delivered_bg = !layer_hits.is_empty();
                 for (node, layer_index) in layer_hits {
-                    if let Some(image) = DecodedImage::decode(&body) {
+                    if let Some(image) = DecodedImage::decode(&body)
+                        .or_else(|| rowser_rendering::decode_svg_bytes(&body))
+                    {
                         let entry = self.background_images.entry(node).or_default();
                         while entry.len() <= layer_index {
                             entry.push(None);
@@ -1887,7 +1907,12 @@ impl Page {
                         if src.starts_with("data:") {
                             if let Some(image) = rowser_rendering::DecodedImage::decode(
                                 extract_data_payload(&src).as_bytes(),
-                            ) {
+                            )
+                            .or_else(|| {
+                                rowser_rendering::decode_svg_bytes(
+                                    extract_data_payload(&src).as_bytes(),
+                                )
+                            }) {
                                 self.images.insert(node, Arc::new(image));
                             }
                         } else {
@@ -2133,6 +2158,13 @@ impl Page {
                         NodeId::try_from(*node).unwrap_or(0),
                         (info.width as f32, info.height as f32),
                     );
+                }
+            }
+            // Decoded <img> natural sizes drive replaced-element sizing
+            // (auto-sized images get their intrinsic box, Chrome-style).
+            for (node, image) in &self.images {
+                if image.width > 0 && image.height > 0 {
+                    intrinsic.insert(*node, (image.width as f32, image.height as f32));
                 }
             }
             let (styles, layout) = self.layout_engine.layout_document(
@@ -2511,6 +2543,11 @@ impl Page {
             return;
         };
         let Some(dom) = self.dom.clone() else { return };
+        // Inline SVG raster pass (Group C): refresh device-pixel rasters
+        // for every laid-out <svg> element, then overlay them onto the
+        // <img> image map (the display list paints both via DrawCmd::Image).
+        self.rasterize_inline_svgs(&dom.borrow(), &layout);
+        let images = self.merged_images();
         let dl_t0 = std::time::Instant::now();
         let mut media_overlays = rowser_rendering::display_list::MediaOverlays::new();
         for (node, slot) in &self.media_slots {
@@ -2550,7 +2587,7 @@ impl Page {
             patched
         };
         let inputs = rowser_rendering::display_list::PaintInputs {
-            images: &self.images,
+            images: &images,
             background_images: &self.background_images,
             video_frames: &self.video_frames,
             media: &media_overlays,
@@ -2571,6 +2608,7 @@ impl Page {
             viewport_width: self.viewport.width as u32,
             viewport_height: self.viewport.height as u32,
             scroll_y: self.scroll_y,
+            scale: self.device_pixel_ratio,
             background,
             find_matches: self.find_matches.clone(),
             active_match: self.active_match,
@@ -2597,6 +2635,120 @@ impl Page {
             // Frame presented: rAF callbacks for this frame run now.
             self.fire_raf();
         }
+    }
+
+    /// Inline `<svg>` raster pass (Group C). Every svg element that has a
+    /// layout rect is re-rasterized only when its size or subtree signature
+    /// changed; results land in `svg_rasters` and are merged over the image
+    /// map in [`Self::merged_images`]. Rasterizing at the *layout rect* in
+    /// device pixels (rather than scaling a natural-size raster) is what
+    /// makes logos crisp — the Phase-B giant-blurry-logo class of bugs.
+    fn rasterize_inline_svgs(&mut self, dom: &Dom, layout: &LayoutResult) {
+        // Roots: light tree + every shadow root (icon SVGs frequently live
+        // inside component shadow trees).
+        let mut roots = vec![dom.document()];
+        roots.extend(dom.all_shadow_roots());
+        let mut wanted: Vec<NodeId> = Vec::new();
+        for root in roots {
+            for node in dom.subtree_elements(root) {
+                if dom
+                    .element(node)
+                    .is_some_and(|e| e.name.ns == ns!(svg) && &*e.name.local == "svg")
+                {
+                    wanted.push(node);
+                }
+            }
+        }
+        if wanted.is_empty() {
+            if !self.svg_rasters.is_empty() {
+                self.svg_rasters.clear();
+            }
+            return;
+        }
+        // Pass 1 (immutable): size + signature per svg element.
+        let mut targets: Vec<(NodeId, u32, u32, u64)> = Vec::new();
+        for node in wanted {
+            let Some(rect) = layout.rects.get(&node) else {
+                continue;
+            };
+            if rect.w <= 0.5 || rect.h <= 0.5 {
+                continue;
+            }
+            let w = (rect.w * self.device_pixel_ratio).round().max(1.0) as u32;
+            let h = (rect.h * self.device_pixel_ratio).round().max(1.0) as u32;
+            // Sanity cap: a layout explosion must not allocate a giant raster.
+            if w > 8192 || h > 8192 {
+                continue;
+            }
+            let sig = svg_subtree_signature(dom, node);
+            targets.push((node, w, h, sig));
+        }
+        let hits: Vec<NodeId> = targets
+            .iter()
+            .filter(|(node, w, h, sig)| {
+                self.svg_rasters
+                    .get(node)
+                    .is_some_and(|r| r.w == *w && r.h == *h && r.sig == *sig)
+            })
+            .map(|(node, ..)| *node)
+            .collect();
+        if hits.len() == self.svg_rasters.len() && targets.len() == hits.len() {
+            return; // nothing changed, keep the cache
+        }
+        // Pass 2 (mutable): drop stale entries, rasterize misses.
+        self.svg_rasters.retain(|node, r| {
+            targets
+                .iter()
+                .any(|(t, w, h, sig)| t == node && r.w == *w && r.h == *h && r.sig == *sig)
+        });
+        let t0 = std::time::Instant::now();
+        let mut rasterized = 0usize;
+        for (node, w, h, sig) in targets {
+            if self
+                .svg_rasters
+                .get(&node)
+                .is_some_and(|r| r.w == w && r.h == h && r.sig == sig)
+            {
+                continue;
+            }
+            let markup = dom.serialize_subtree(node);
+            // Root size = the layout rect (device px): usvg maps the viewBox
+            // into it honoring preserveAspectRatio — Chrome-equivalent.
+            if let Some(image) = rowser_rendering::rasterize_svg(&markup, w, h) {
+                self.svg_rasters.insert(
+                    node,
+                    SvgRasterEntry {
+                        w,
+                        h,
+                        sig,
+                        image: Arc::new(image),
+                    },
+                );
+                rasterized += 1;
+            }
+        }
+        if rasterized > 0 && std::env::var("ROWSER_UI_TRACE").is_ok() {
+            eprintln!(
+                "[page-{}] svg raster pass: {} new, {} cached, {}ms",
+                self.state.tab,
+                rasterized,
+                self.svg_rasters.len() - rasterized,
+                t0.elapsed().as_millis()
+            );
+        }
+    }
+
+    /// The image map the display list sees: decoded `<img>`s overlaid with
+    /// inline-SVG rasters (both paint through the same DrawCmd::Image path).
+    fn merged_images(&self) -> ImageMap {
+        if self.svg_rasters.is_empty() {
+            return self.images.clone();
+        }
+        let mut merged = self.images.clone();
+        for (node, raster) in &self.svg_rasters {
+            merged.insert(*node, Arc::clone(&raster.image));
+        }
+        merged
     }
 
     /// Dispatches pending rAF callbacks into JS. The page loop paces this
@@ -3414,6 +3566,43 @@ fn media_event_parts(event: &PipelineEvent) -> (String, String) {
             format!("{{\"message\":{}}}", serde_json::to_string(message).unwrap_or_default()),
         ),
     }
+}
+
+/// A cached inline-SVG raster (see `Page::rasterize_inline_svgs`).
+struct SvgRasterEntry {
+    /// Raster width in device pixels.
+    w: u32,
+    /// Raster height in device pixels.
+    h: u32,
+    /// Subtree signature when rasterized (mutation detection).
+    sig: u64,
+    /// The raster itself.
+    image: Arc<DecodedImage>,
+}
+
+/// Cheap content signature of an svg subtree: tag, attributes and text
+/// bytes hashed depth-first. Detects DOM mutations that change the art.
+fn svg_subtree_signature(dom: &Dom, node: NodeId) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    fn hash_node(h: &mut std::collections::hash_map::DefaultHasher, dom: &Dom, node: NodeId) {
+        match dom.kind(node) {
+            rowser_dom::NodeKind::Element(el) => {
+                el.name.local.hash(h);
+                for attr in &el.attrs {
+                    attr.name.hash(h);
+                    attr.value.hash(h);
+                }
+                for child in dom.children(node) {
+                    hash_node(h, dom, child);
+                }
+            }
+            rowser_dom::NodeKind::Text(t) => t.hash(h),
+            _ => {}
+        }
+    }
+    hash_node(&mut h, dom, node);
+    h.finish()
 }
 
 /// Decodes a `data:` URL (base64 or percent-encoded) into bytes.

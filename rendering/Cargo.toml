@@ -14,3 +14,13 @@ rowser-layout = { path = "../layout" }
 tiny-skia = "0.12.0"
 image = "0.25.9"
 cosmic-text = "0.17.0"
+# SVG rasterization (Group C). resvg 0.44 sits on tiny-skia 0.11.4 — a
+# SEPARATE instance from the painter's tiny-skia 0.12 (both live in the
+# graph; resvg re-exports its own, so no type confusion). system-fonts
+# enables fontdb/fs for SVG <text> font resolution.
+resvg = { version = "0.44.0", default-features = false, features = [
+    "raster-images",
+    "text",
+    "system-fonts",
+] }
+log = "0.4"

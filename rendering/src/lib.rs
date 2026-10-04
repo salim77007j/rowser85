@@ -146,13 +146,618 @@ pub fn to_skia_color(color: Rgba) -> tiny_skia::Color {
     tiny_skia::Color::from_rgba8(color.r, color.g, color.b, color.a)
 }
 
+// ---------------------------------------------------------------------------
+// SVG rasterization (Group C — rendering quality).
+//
+// resvg 0.44 shares the tiny-skia backend family with the painter (its own
+// 0.11.4 instance, re-exported as `resvg::tiny_skia`). The engine rasterizes
+// every inline `<svg>` element at its *layout rect* in device pixels (cache
+// keyed by node + size + subtree signature), so logos are pixel-exact rather
+// than upscaled rasters. `<img src="*.svg">` and CSS `url()` backgrounds use
+// the natural-size path at decode time.
+// ---------------------------------------------------------------------------
+
+// usvg through resvg's re-export — guarantees the exact tree types that
+// `resvg::render` consumes (same crate instance, no version drift).
+use resvg::usvg;
+
+/// System font database for SVG `<text>` elements (lazy, shared).
+static SVG_FONTS: std::sync::LazyLock<std::sync::Arc<usvg::fontdb::Database>> =
+    std::sync::LazyLock::new(|| {
+        let mut db = usvg::fontdb::Database::new();
+        db.load_system_fonts();
+        std::sync::Arc::new(db)
+    });
+
+/// Parses SVG markup into a usvg tree (system fonts available for `<text>`).
+pub fn parse_svg_tree(markup: &str) -> Option<usvg::Tree> {
+    if !markup.trim().starts_with('<') {
+        return None;
+    }
+    let opts = usvg::Options {
+        fontdb: std::sync::Arc::clone(&SVG_FONTS),
+        ..Default::default()
+    };
+    match usvg::Tree::from_str(markup, &opts) {
+        Ok(tree) => Some(tree),
+        Err(err) => {
+            log::debug!("svg parse failed: {err}");
+            None
+        }
+    }
+}
+
+/// Renders a parsed usvg tree (whose canvas is expected to be exactly
+/// `w` x `h` — see [`rasterize_svg`], which injects the root size) into a
+/// `DecodedImage`. Identity transform; `preserveAspectRatio` was already
+/// applied by usvg when mapping the viewBox into the root size.
+pub fn render_svg_tree(tree: &usvg::Tree, w: u32, h: u32) -> Option<DecodedImage> {
+    if w == 0 || h == 0 {
+        return None;
+    }
+    let mut pm = resvg::tiny_skia::Pixmap::new(w, h)?;
+    resvg::render(
+        tree,
+        resvg::tiny_skia::Transform::identity(),
+        &mut pm.as_mut(),
+    );
+    // tiny-skia pixels are premultiplied; DecodedImage is straight RGBA.
+    let mut rgba = pm.take();
+    for px in rgba.chunks_exact_mut(4) {
+        let a = px[3] as u32;
+        if a == 0 {
+            px[0] = 0;
+            px[1] = 0;
+            px[2] = 0;
+        } else if a < 255 {
+            px[0] = ((px[0] as u32 * 255 + a / 2) / a).min(255) as u8;
+            px[1] = ((px[1] as u32 * 255 + a / 2) / a).min(255) as u8;
+            px[2] = ((px[2] as u32 * 255 + a / 2) / a).min(255) as u8;
+        }
+    }
+    Some(DecodedImage {
+        width: w,
+        height: h,
+        rgba: std::sync::Arc::new(rgba),
+    })
+}
+
+/// One-shot helper: parse markup and rasterize at exactly `w` x `h` device
+/// pixels. The root element's `width`/`height` attributes are REPLACED with
+/// the target size, so usvg maps the viewBox into that box honoring
+/// `preserveAspectRatio` (meet/slice/none + alignment, full spec) — the
+/// Chrome-equivalent layout-box mapping. Inline `<svg>` elements call this
+/// with their layout rect; the result is pixel-exact, never upscaled.
+pub fn rasterize_svg(markup: &str, w: u32, h: u32) -> Option<DecodedImage> {
+    if w == 0 || h == 0 {
+        return None;
+    }
+    let sized = inject_root_size(markup, w as f32, h as f32);
+    let tree = parse_svg_tree(&sized)?;
+    render_svg_tree(&tree, w, h)
+}
+
+/// Natural (intrinsic) size of an SVG document in CSS pixels — Chrome
+/// semantics: width/height attrs when present; a missing dimension
+/// resolves through the viewBox ratio; fully-unspecified falls back to the
+/// 300x150 replaced-element default.
+pub fn svg_natural_size(markup: &str) -> Option<(f32, f32)> {
+    // Cheap pre-parse of the root tag: width/height/viewBox attributes.
+    let root_end = markup.find('>').unwrap_or(markup.len());
+    let root = &markup[..root_end];
+    let attr = |name: &str| -> Option<&str> {
+        let pat = format!("{name}=\"");
+        let i = root.find(&pat)?;
+        let rest = &root[i + pat.len()..];
+        let j = rest.find('"')?;
+        Some(&rest[..j])
+    };
+    let num = |v: &str| -> Option<f32> {
+        v.trim()
+            .chars()
+            .take_while(|c| c.is_ascii_digit() || *c == '.' || *c == '-' || *c == '+')
+            .collect::<String>()
+            .parse()
+            .ok()
+    };
+    let w = attr("width").and_then(num);
+    let h = attr("height").and_then(num);
+    // viewBox="minx miny w h" → (w, h).
+    let viewbox = attr("viewBox").and_then(|v| {
+        let mut it = v.split_whitespace().filter_map(|t| t.parse::<f32>().ok());
+        let _x = it.next()?;
+        let _y = it.next()?;
+        let vw = it.next()?;
+        let vh = it.next()?;
+        (vw > 0.0 && vh > 0.0).then_some((vw, vh))
+    });
+    match (w, h, viewbox) {
+        (Some(w), Some(h), _) => Some((w, h)),
+        (Some(w), None, Some((vw, vh))) => Some((w, w * vh / vw)),
+        (Some(w), None, None) => Some((w, 150.0)),
+        (None, Some(h), Some((vw, vh))) => Some((h * vw / vh, h)),
+        (None, Some(h), None) => Some((300.0, h)),
+        (None, None, Some((vw, vh))) => Some((vw, vh)),
+        (None, None, None) => Some((300.0, 150.0)),
+    }
+}
+
+/// Rasterizes SVG bytes (an `<img src>` or CSS background response) at their
+/// natural size — the entry point used by the engine's image decode path.
+/// Chrome semantics: one missing dimension resolves through the viewBox
+/// ratio (usvg alone would keep the raw viewBox extent instead).
+pub fn decode_svg_bytes(bytes: &[u8]) -> Option<DecodedImage> {
+    let markup = std::str::from_utf8(bytes).ok()?;
+    let (nw, nh) = svg_natural_size(markup)?;
+    let w = (nw.ceil() as u32).max(1);
+    let h = (nh.ceil() as u32).max(1);
+    let sized = inject_root_size(markup, nw, nh);
+    let tree = parse_svg_tree(&sized)?;
+    render_svg_tree(&tree, w, h)
+}
+
+/// Rewrites the root `<svg>` tag of `markup` so its `width`/`height`
+/// attributes equal exactly `(w, h)` (replacing whatever was there). XML
+/// prologs (`<?xml ...?>`, DOCTYPE, comments) are preserved. usvg then
+/// resolves the tree canvas to that size — and applies
+/// `preserveAspectRatio` when a viewBox exists.
+fn inject_root_size(markup: &str, w: f32, h: f32) -> String {
+    let s = markup.trim_start();
+    // Skip XML prolog nodes to reach the root element tag.
+    let mut idx = 0usize;
+    loop {
+        let rest = &s[idx..];
+        if rest.starts_with("<?") {
+            match rest.find("?>") {
+                Some(end) => idx += end + 2,
+                None => break,
+            }
+        } else if rest.starts_with("<!--") {
+            match rest.find("-->") {
+                Some(end) => idx += end + 3,
+                None => break,
+            }
+        } else if rest.starts_with("<!") {
+            match rest.find('>') {
+                Some(end) => idx += end + 1,
+                None => break,
+            }
+        } else {
+            break;
+        }
+        // Skip inter-prolog whitespace.
+        let rest = &s[idx..];
+        let ws = rest.len() - rest.trim_start().len();
+        idx += ws;
+    }
+    let root_start = idx + (s[idx..].len() - s[idx..].trim_start().len());
+    let Some(open_rel) = s[root_start..].find('>') else {
+        // Malformed root: append a sized root tag around the content.
+        return format!("<svg width=\"{w}\" height=\"{h}\">{s}</svg>");
+    };
+    let open_end = root_start + open_rel + 1;
+    let head = &s[root_start..open_end - 1]; // "<svg ... (maybe '/')" without '>'
+    let tail = &s[open_end..];
+    let self_closing = head.trim_end().ends_with('/');
+    let head_core = head.trim_end().trim_end_matches('/');
+    let rebuilt = strip_size_attrs(head_core);
+    let mut out = String::with_capacity(s.len() + 64);
+    out.push_str(&s[..root_start]);
+    out.push_str(&rebuilt);
+    // Inline SVG in HTML carries no xmlns (html5ever assigns the SVG
+    // namespace implicitly); usvg REQUIRES it on the root element.
+    if !rebuilt.contains("xmlns=") {
+        out.push_str(" xmlns=\"http://www.w3.org/2000/svg\"");
+    }
+    out.push_str(&format!(" width=\"{w}\" height=\"{h}\""));
+    if self_closing {
+        out.push('/');
+    }
+    out.push('>');
+    if !self_closing {
+        out.push_str(tail);
+    }
+    out
+}
+
+/// Removes `width`/`height` attributes from a root tag string of the form
+/// `<svg attr=... attr=...`, re-emitting the remaining attributes verbatim
+/// (unquoted values become quoted). Preserves quoted whitespace runs.
+fn strip_size_attrs(root_tag: &str) -> String {
+    let b = root_tag.as_bytes();
+    let mut out = String::with_capacity(root_tag.len() + 16);
+    out.push_str("<svg");
+    let mut i = 4usize;
+    while i < b.len() {
+        // Skip whitespace between attributes.
+        while i < b.len() && b[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if i >= b.len() {
+            break;
+        }
+        // Attribute name (up to '=' or whitespace).
+        let name_start = i;
+        while i < b.len() && !b[i].is_ascii_whitespace() && b[i] != b'=' {
+            i += 1;
+        }
+        let name = &root_tag[name_start..i];
+        // Optional '=' value.
+        let mut value: Option<(u8, usize, usize)> = None;
+        let mut j = i;
+        while j < b.len() && b[j].is_ascii_whitespace() {
+            j += 1;
+        }
+        if j < b.len() && b[j] == b'=' {
+            j += 1;
+            while j < b.len() && b[j].is_ascii_whitespace() {
+                j += 1;
+            }
+            if j < b.len() && (b[j] == b'"' || b[j] == b'\'') {
+                let q = b[j];
+                let vs = j + 1;
+                j += 1;
+                while j < b.len() && b[j] != q {
+                    j += 1;
+                }
+                value = Some((q, vs, j.min(b.len())));
+                j += 1;
+            } else {
+                let vs = j;
+                while j < b.len() && !b[j].is_ascii_whitespace() {
+                    j += 1;
+                }
+                value = Some((0, vs, j));
+            }
+            i = j;
+        }
+        let is_size = name.eq_ignore_ascii_case("width") || name.eq_ignore_ascii_case("height");
+        if !is_size {
+            out.push(' ');
+            out.push_str(name);
+            if let Some((q, vs, ve)) = value {
+                out.push('=');
+                if q == 0 {
+                    out.push('"');
+                    out.push_str(&root_tag[vs..ve]);
+                    out.push('"');
+                } else {
+                    out.push(q as char);
+                    out.push_str(&root_tag[vs..ve]);
+                    out.push(q as char);
+                }
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use crate::display_list::{build_display_list, PaintInputs};
     use crate::painter::{Painter, RenderOptions};
+    use rowser_dom::ns;
     use rowser_layout::{LayoutEngine, Viewport};
     use rowser_parsing::css::{parse_stylesheet, MediaContext};
     use rowser_parsing::html::parse_html;
+
+    #[test]
+    fn svg_raster_maps_viewbox_left_half() {
+        // viewBox 2x1, left unit square black → at 200x100 the LEFT half
+        // of the raster must be opaque (root size injected → usvg maps the
+        // viewBox with uniform scale, default xMidYMid meet).
+        let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 2 1">
+            <rect x="0" y="0" width="1" height="1" fill="black"/>
+        </svg>"#;
+        let img = crate::rasterize_svg(svg, 200, 100).expect("raster");
+        assert_eq!((img.width, img.height), (200, 100));
+        let px = |x: usize, y: usize| -> [u8; 4] {
+            let i = (y * 200 + x) * 4;
+            [
+                img.rgba[i],
+                img.rgba[i + 1],
+                img.rgba[i + 2],
+                img.rgba[i + 3],
+            ]
+        };
+        assert_eq!(px(50, 50)[3], 255, "left half must be opaque black");
+        assert_eq!(px(150, 50)[3], 0, "right half must be transparent");
+        assert_eq!(px(150, 50)[0], 0);
+    }
+
+    #[test]
+    fn svg_raster_meet_centers_wide_content() {
+        // Wide viewBox (2x1) into a square 100x100 canvas with meet: the
+        // content strip must be vertically centered (y 25..75).
+        let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 2 1">
+            <rect x="0" y="0" width="2" height="1" fill="black"/>
+        </svg>"#;
+        let img = crate::rasterize_svg(svg, 100, 100).expect("raster");
+        let alpha = |x: usize, y: usize| img.rgba[(y * 100 + x) * 4 + 3];
+        assert_eq!(alpha(50, 50), 255, "center row painted");
+        assert_eq!(alpha(50, 10), 0, "top margin transparent");
+        assert_eq!(alpha(50, 90), 0, "bottom margin transparent");
+    }
+
+    #[test]
+    fn svg_raster_stretch_fills() {
+        // preserveAspectRatio="none": non-uniform scale fills the canvas.
+        let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 2 1" preserveAspectRatio="none">
+            <rect x="0" y="0" width="2" height="1" fill="black"/>
+        </svg>"#;
+        let img = crate::rasterize_svg(svg, 100, 100).expect("raster");
+        for y in [0, 50, 99] {
+            assert_eq!(
+                img.rgba[(y * 100 + 50) * 4 + 3],
+                255,
+                "stretch fills all rows"
+            );
+        }
+    }
+
+    #[test]
+    fn svg_raster_replaces_existing_size_attrs() {
+        // Conflicting attrs on the root must be REPLACED, not doubled.
+        let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="5" height="5" viewBox="0 0 2 1">
+            <rect x="0" y="0" width="2" height="1" fill="black"/>
+        </svg>"#;
+        let img = crate::rasterize_svg(svg, 100, 50).expect("raster");
+        assert_eq!((img.width, img.height), (100, 50));
+        // Full-bleed rect: every center pixel opaque.
+        for y in [0, 25, 49] {
+            assert_eq!(img.rgba[(y * 100 + 50) * 4 + 3], 255);
+        }
+    }
+
+    #[test]
+    fn svg_natural_size_prefers_attrs_then_viewbox() {
+        let both = crate::svg_natural_size(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="64" height="32" viewBox="0 0 2 1"/>"#,
+        );
+        assert_eq!(both, Some((64.0, 32.0)));
+        let vb_only = crate::svg_natural_size(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 144 72"/>"#,
+        );
+        assert_eq!(vb_only, Some((144.0, 72.0)));
+        let w_only = crate::svg_natural_size(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="100" viewBox="0 0 2 1"/>"#,
+        );
+        assert_eq!(w_only, Some((100.0, 50.0)));
+    }
+
+    #[test]
+    fn svg_decode_bytes_roundtrip() {
+        let svg = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10">
+            <circle cx="5" cy="5" r="5" fill="#ff0000"/>
+        </svg>"##;
+        let img = crate::decode_svg_bytes(svg).expect("decode");
+        assert!((img.width as i32 - 10).abs() <= 1 && (img.height as i32 - 10).abs() <= 1);
+        // Center of the circle: red, opaque.
+        let i = ((img.height as usize / 2) * img.width as usize + img.width as usize / 2) * 4;
+        assert!(img.rgba[i] > 200, "red channel at center");
+        assert_eq!(img.rgba[i + 3], 255, "opaque");
+    }
+
+    #[test]
+    fn svg_layout_default_replaced_size() {
+        // Chrome: inline svg without dimensions → 300x150 replaced default.
+        let html = br#"<html><body><div><svg viewBox="0 0 16 16"><path d="M0 0h16v16H0z"/></svg></div></body></html>"#;
+        let doc = parse_html(html);
+        let mut engine = LayoutEngine::new();
+        let (_styles, layout) = engine.layout_document(
+            &doc.dom,
+            &[],
+            &MediaContext::default(),
+            Viewport {
+                width: 800.0,
+                height: 600.0,
+            },
+            &Default::default(),
+        );
+        let svg_rect = layout
+            .rects
+            .iter()
+            .find(|(id, _)| {
+                doc.dom
+                    .element(**id)
+                    .is_some_and(|e| &*e.name.local == "svg")
+            })
+            .map(|(_, r)| *r)
+            .expect("svg rect");
+        assert!((svg_rect.w - 300.0).abs() < 0.5, "w = {}", svg_rect.w);
+        assert!((svg_rect.h - 150.0).abs() < 0.5, "h = {}", svg_rect.h);
+    }
+
+    #[test]
+    fn svg_layout_attr_and_ratio_sizing() {
+        // width attr + viewBox ratio → height from ratio (Chrome).
+        let html = br#"<html><body><div><svg width="100" viewBox="0 0 2 1"><rect width="2" height="1"/></svg></div></body></html>"#;
+        let doc = parse_html(html);
+        let mut engine = LayoutEngine::new();
+        let (_styles, layout) = engine.layout_document(
+            &doc.dom,
+            &[],
+            &MediaContext::default(),
+            Viewport {
+                width: 800.0,
+                height: 600.0,
+            },
+            &Default::default(),
+        );
+        let svg_rect = layout
+            .rects
+            .iter()
+            .find(|(id, _)| {
+                doc.dom
+                    .element(**id)
+                    .is_some_and(|e| &*e.name.local == "svg")
+            })
+            .map(|(_, r)| *r)
+            .expect("svg rect");
+        assert!((svg_rect.w - 100.0).abs() < 0.5, "w = {}", svg_rect.w);
+        assert!((svg_rect.h - 50.0).abs() < 1.0, "h = {}", svg_rect.h);
+    }
+
+    #[test]
+    fn svg_layout_subtree_excluded_from_boxes() {
+        // Vector children must not create layout boxes (no double paint).
+        let html = br#"<html><body><div><svg width="40" height="40" viewBox="0 0 4 4"><g><path d="M0 0h4v4H0z"/><text>label</text></g></svg></div></body></html>"#;
+        let doc = parse_html(html);
+        let mut engine = LayoutEngine::new();
+        let (_styles, layout) = engine.layout_document(
+            &doc.dom,
+            &[],
+            &MediaContext::default(),
+            Viewport {
+                width: 800.0,
+                height: 600.0,
+            },
+            &Default::default(),
+        );
+        assert!(
+            layout.rects.keys().all(|id| doc
+                .dom
+                .element(*id)
+                .is_some_and(|e| { e.name.ns != ns!(svg) || &*e.name.local == "svg" })),
+            "svg descendants must not have boxes"
+        );
+        // And no text runs originate under the svg.
+        assert!(layout.text.iter().all(|run| doc
+            .dom
+            .element(run.node)
+            .is_some_and(|e| e.name.ns != ns!(svg))));
+    }
+
+    #[test]
+    fn inline_svg_paints_through_image_path() {
+        // Full pipeline: styled+ laid-out doc, svg raster merged into the
+        // image map, painted via DrawCmd::Image. The engine does the merge;
+        // this test reproduces it: rasterize the svg element at its layout
+        // rect and paint.
+        let html = br##"<html><body><div style="width: 90px; height: 90px;">
+            <svg width="90" height="90" viewBox="0 0 90 90" style="display: block;">
+                <circle cx="45" cy="45" r="40" fill="#cc0000"/>
+            </svg>
+        </div></body></html>"##;
+        let doc = parse_html(html);
+        let mut engine = LayoutEngine::new();
+        let (styles, layout) = engine.layout_document(
+            &doc.dom,
+            &[],
+            &MediaContext::default(),
+            Viewport {
+                width: 400.0,
+                height: 300.0,
+            },
+            &Default::default(),
+        );
+        // Find the svg node, serialize + rasterize at its layout rect (the
+        // engine's rasterize_inline_svgs does exactly this).
+        let svg_node = layout
+            .rects
+            .keys()
+            .copied()
+            .find(|id| {
+                doc.dom
+                    .element(*id)
+                    .is_some_and(|e| &*e.name.local == "svg")
+            })
+            .expect("svg node");
+        let rect = layout.rects[&svg_node];
+        let markup = doc.dom.serialize_subtree(svg_node);
+        let image = crate::rasterize_svg(&markup, rect.w.round() as u32, rect.h.round() as u32)
+            .expect("raster");
+        let mut images = crate::ImageMap::new();
+        images.insert(svg_node, std::sync::Arc::new(image));
+        let inputs = PaintInputs {
+            images: &images,
+            ..PaintInputs::default()
+        };
+        let list = build_display_list(&doc.dom, &styles, &layout, &inputs);
+        let mut painter = Painter::new();
+        let frame = painter
+            .render(&list, RenderOptions::default(), &mut engine.font_system)
+            .expect("frame");
+        // Center of the circle (layout coords = frame coords, scroll 0).
+        let cx = (rect.x + rect.w / 2.0).round() as usize;
+        let cy = (rect.y + rect.h / 2.0).round() as usize;
+        let i = (cy * frame.width as usize + cx) * 4;
+        let px = &frame.pixels[i..i + 4];
+        assert!(
+            px[0] > 150 && px[1] < 90 && px[2] < 90 && px[3] == 255,
+            "circle center should be red, got {:?}",
+            px
+        );
+    }
+
+    #[test]
+    fn hidpi_render_scales_geometry_and_text() {
+        // A CSS-px rect at (10,10,50,50) must cover device (20,20)-(120,120)
+        // at DPR 2, and text must rasterize without panic (glyph keys are
+        // re-binned at 2x font size).
+        let html = br#"<html><body>
+            <div style="position: absolute; left: 10px; top: 10px; width: 50px; height: 50px; background-color: #008000;"></div>
+            <p>HiDPI text at two times density</p>
+        </body></html>"#;
+        let doc = parse_html(html);
+        let mut engine = LayoutEngine::new();
+        let (styles, layout) = engine.layout_document(
+            &doc.dom,
+            &[],
+            &MediaContext::default(),
+            Viewport {
+                width: 400.0,
+                height: 300.0,
+            },
+            &Default::default(),
+        );
+        let list = build_display_list(&doc.dom, &styles, &layout, &PaintInputs::default());
+        let mut painter = Painter::new();
+        let frame = painter
+            .render(
+                &list,
+                RenderOptions {
+                    viewport_width: 400,
+                    viewport_height: 300,
+                    scale: 2.0,
+                    ..RenderOptions::default()
+                },
+                &mut engine.font_system,
+            )
+            .expect("frame");
+        assert_eq!((frame.width, frame.height), (800, 600), "device px dims");
+        // Deep inside the scaled rect (device 40..100 x 40..100): green.
+        let i = (60 * frame.width as usize + 60) * 4;
+        let px = &frame.pixels[i..i + 4];
+        assert!(
+            px[1] > 120 && px[0] < 60 && px[3] == 255,
+            "scaled rect green, got {px:?}"
+        );
+        // Outside the rect (device 140, 60): not green.
+        let j = (60 * frame.width as usize + 140) * 4;
+        let q = &frame.pixels[j..j + 4];
+        assert!(
+            !(q[1] > 120 && q[0] < 60 && q[3] == 255),
+            "outside rect must not be green, got {q:?}"
+        );
+        // Text painted (any non-white ink outside the green rect; the <p>
+        // sits at the top of the body, CSS y ~ 8..40 → device 16..80).
+        let mut text_ink = false;
+        'scan: for y in 0..frame.height as usize {
+            for x in 0..frame.width as usize {
+                if (40..100).contains(&y) && (40..100).contains(&x) {
+                    continue; // the green rect
+                }
+                let k = (y * frame.width as usize + x) * 4;
+                let p = &frame.pixels[k..k + 4];
+                if p[3] == 255 && (p[0] < 240 || p[1] < 240 || p[2] < 240) {
+                    text_ink = true;
+                    break 'scan;
+                }
+            }
+        }
+        assert!(text_ink, "text ink visible at DPR 2");
+    }
 
     #[test]
     fn renders_html_to_frame() {

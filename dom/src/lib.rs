@@ -21,6 +21,7 @@
 pub mod selector;
 pub mod tree;
 
+pub use markup5ever::ns;
 pub use selector::{
     matches, matches_for_pseudo_with_caches, matches_with_caches, parse_selector_list, CachesWrap,
     DomSelectorImpl, ElementRef, Selector, SelectorList,

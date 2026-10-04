@@ -15,7 +15,7 @@ pub mod text;
 
 use std::collections::HashMap;
 
-use rowser_dom::{Dom, NodeId};
+use rowser_dom::{ns, Dom, NodeId};
 use rowser_parsing::cascade::{compute_styles, ComputedStyle, DisplayMode, StyleMap};
 use rowser_parsing::css::{MediaContext, ParsedStylesheet};
 use taffy::geometry::Line;
@@ -829,6 +829,23 @@ fn length_pct(l: rowser_parsing::cascade::LengthOrAuto, font_size: f32) -> Lengt
 /// Builds a taffy box for `node` (recursively). Returns the taffy node.
 /// `parent_areas` carries the parent grid's named areas for
 /// `grid-area: name` placement of this node.
+/// Parses a `viewBox` attribute (`"0 0 16 16"`) into its (width, height)
+/// pair — the intrinsic aspect-ratio source for replaced-element svg sizing.
+fn parse_viewbox_ratio(value: &str) -> Option<(f32, f32)> {
+    let mut it = value
+        .split_whitespace()
+        .filter_map(|t| t.parse::<f32>().ok());
+    let _min_x = it.next()?;
+    let _min_y = it.next()?;
+    let w = it.next()?;
+    let h = it.next()?;
+    if w > 0.0 && h > 0.0 {
+        Some((w, h))
+    } else {
+        None
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_box(
     dom: &Dom,
@@ -1021,10 +1038,10 @@ fn build_box(
     // width is not a percentage (taffy 0.14 collapses percent-width +
     // aspect-ratio to the content size — a real replaced-element measure
     // function is the follow-up).
-    if dom
+    let is_video = dom
         .element(node)
-        .is_some_and(|el| matches!(&*el.name.local, "video" | "audio"))
-    {
+        .is_some_and(|el| matches!(&*el.name.local, "video" | "audio"));
+    if is_video {
         if let Some(cs) = styles.get(node) {
             use rowser_parsing::cascade::{Length, LengthOrAuto};
             let auto_w = matches!(cs.width, LengthOrAuto::Auto);
@@ -1038,6 +1055,54 @@ fn build_box(
                 {
                     style.aspect_ratio = Some(w / h.max(1.0));
                     if auto_w && auto_h {
+                        style.size.width = Dimension::length(w);
+                        style.size.height = Dimension::length(h);
+                    }
+                }
+            } else if auto_w && auto_h {
+                style.size.width = Dimension::length(300.0);
+                style.size.height = Dimension::length(150.0);
+            }
+        }
+    }
+    // Inline `<svg>` root: a replaced element (the engine rasterizes the
+    // subtree with resvg). Sizing discipline — the Phase-B giant-logo bug:
+    // a block svg with auto size stretched to the parent. Rules (Chrome):
+    //   - width/height attrs + CSS already resolved via presentational hints;
+    //   - viewBox → intrinsic aspect ratio (drives the auto axis);
+    //   - fully auto → 300x150 replaced-element default.
+    if dom
+        .element(node)
+        .is_some_and(|el| el.name.ns == ns!(svg) && &*el.name.local == "svg")
+    {
+        if let Some(cs) = styles.get(node) {
+            use rowser_parsing::cascade::LengthOrAuto;
+            let auto_w = matches!(cs.width, LengthOrAuto::Auto);
+            let auto_h = matches!(cs.height, LengthOrAuto::Auto);
+            if let Some((vw, vh)) = dom.get_attr(node, "viewBox").and_then(parse_viewbox_ratio) {
+                style.aspect_ratio = Some(vw / vh.max(1e-3));
+                if auto_w && auto_h {
+                    style.size.width = Dimension::length(300.0);
+                    style.size.height = Dimension::length(150.0);
+                }
+            } else if auto_w && auto_h {
+                style.size.width = Dimension::length(300.0);
+                style.size.height = Dimension::length(150.0);
+            }
+        }
+    }
+    // `<img>`: natural-size replaced sizing (decoded dimensions arrive via
+    // `intrinsic` from the engine — raster and SVG sources alike).
+    if dom.element(node).is_some_and(|el| &*el.name.local == "img") {
+        if let Some(cs) = styles.get(node) {
+            use rowser_parsing::cascade::{Length, LengthOrAuto};
+            let auto_w = matches!(cs.width, LengthOrAuto::Auto);
+            let auto_h = matches!(cs.height, LengthOrAuto::Auto);
+            let width_is_percent = matches!(cs.width, LengthOrAuto::Length(Length::Percent(_)));
+            if let Some(&(w, h)) = intrinsic.get(&node) {
+                if w > 0.0 && h > 0.0 {
+                    style.aspect_ratio = Some(w / h);
+                    if auto_w && auto_h && !width_is_percent {
                         style.size.width = Dimension::length(w);
                         style.size.height = Dimension::length(h);
                     }
@@ -1193,6 +1258,14 @@ fn collect_children(
     ctx: &SpanStyle,
     pseudo_alloc: &mut PseudoAlloc,
 ) {
+    // SVG subtrees do not participate in box layout: the root <svg> is a
+    // replaced element whose content the engine rasterizes with resvg
+    // (paths, gradients, nested svg). Collecting vector children as
+    // anonymous boxes would double-paint <text> content and burn layout
+    // time on zero-size path boxes.
+    if dom.element(node).is_some_and(|e| e.name.ns == ns!(svg)) {
+        return;
+    }
     for child in dom.flat_children(node) {
         match dom.kind(child) {
             rowser_dom::NodeKind::Text(t) => {

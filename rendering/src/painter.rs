@@ -20,12 +20,15 @@ use crate::{to_skia_color, DecodedImage, Rect};
 /// Options for one render pass.
 #[derive(Debug, Clone)]
 pub struct RenderOptions {
-    /// Viewport width.
+    /// Viewport width in CSS pixels.
     pub viewport_width: u32,
-    /// Viewport height.
+    /// Viewport height in CSS pixels.
     pub viewport_height: u32,
     /// Vertical scroll offset in document coordinates.
     pub scroll_y: f32,
+    /// Device pixel ratio: the frame is rasterized at viewport x scale
+    /// device pixels (HiDPI). 1.0 = CSS px == device px.
+    pub scale: f32,
     /// Page background (used for the initial clear).
     pub background: Rgba,
     /// Find-in-page match rectangles (document coordinates).
@@ -40,6 +43,7 @@ impl Default for RenderOptions {
             viewport_width: 1280,
             viewport_height: 800,
             scroll_y: 0.0,
+            scale: 1.0,
             background: Rgba::new_opaque(255, 255, 255),
             find_matches: Vec::new(),
             active_match: None,
@@ -92,14 +96,17 @@ struct PaintState {
     transform_stack: Vec<Affine>,
     /// Screen-space clip stack.
     clips: Vec<ClipShape>,
+    /// Device pixel ratio (glyph rasterization density).
+    scale: f32,
 }
 
 impl PaintState {
-    fn new(scroll_y: f32) -> Self {
+    fn new(scroll_y: f32, scale: f32) -> Self {
         PaintState {
-            transform: [1.0, 0.0, 0.0, 1.0, 0.0, -scroll_y],
+            transform: [scale, 0.0, 0.0, scale, 0.0, -scroll_y * scale],
             transform_stack: Vec::new(),
             clips: Vec::new(),
+            scale,
         }
     }
 
@@ -154,9 +161,16 @@ impl Painter {
         options: RenderOptions,
         font_system: &mut FontSystem,
     ) -> Option<crate::Frame> {
-        let mut pixmap = Pixmap::new(options.viewport_width, options.viewport_height)?;
+        let scale = if options.scale.is_finite() && options.scale > 0.0 {
+            options.scale
+        } else {
+            1.0
+        };
+        let w = (options.viewport_width as f32 * scale).ceil() as u32;
+        let h = (options.viewport_height as f32 * scale).ceil() as u32;
+        let mut pixmap = Pixmap::new(w, h)?;
         pixmap.fill(to_skia_color(options.background));
-        let mut state = PaintState::new(options.scroll_y);
+        let mut state = PaintState::new(options.scroll_y, scale);
         let viewport = (pixmap.width() as f32, pixmap.height() as f32);
         self.mask_cache = None;
         self.paint_commands(
@@ -182,6 +196,11 @@ impl Painter {
             return;
         }
         let viewport = (pixmap.width() as f32, pixmap.height() as f32);
+        let scale = if options.scale.is_finite() && options.scale > 0.0 {
+            options.scale
+        } else {
+            1.0
+        };
         let scroll = (0.0f32, -options.scroll_y);
         let normal = Rgba::new(255, 170, 0, 90);
         let active = Rgba::new(255, 140, 0, 130);
@@ -191,7 +210,15 @@ impl Painter {
             } else {
                 normal
             };
-            let rect = translate(rect, scroll).clipped(viewport);
+            // doc → device: scroll then scale.
+            let mut r = translate(rect, scroll);
+            r = Rect {
+                x: r.x * scale,
+                y: r.y * scale,
+                w: r.w * scale,
+                h: r.h * scale,
+            };
+            let rect = r.clipped(viewport);
             if rect.w <= 0.0 || rect.h <= 0.0 {
                 continue;
             }
@@ -247,7 +274,11 @@ impl Painter {
                 }
                 DrawCmd::PushSticky { info } => {
                     let sy = -state.transform[5];
-                    let offset = sticky_offset(*info, sy, viewport.1);
+                    // sticky_offset works in CSS px (rect/insets); the
+                    // accumulated translation and viewport are device px —
+                    // convert, then scale the offset back.
+                    let dpr = state.scale.max(1e-3);
+                    let offset = sticky_offset(*info, sy / dpr, viewport.1 / dpr) * dpr;
                     state.transform_stack.push(state.transform);
                     state.transform = mul([1.0, 0.0, 0.0, 1.0, 0.0, offset], state.transform);
                 }
@@ -534,10 +565,14 @@ impl Painter {
                 return;
             }
             // Emulate the clip by drawing through a bounding-rect-limited
-            // path: scale draw into the clipped sub-rect.
-            let src_w = screen.w / scale_x.max(1e-6);
-            let src_h = screen.h / scale_y.max(1e-6);
-            if let Some(mut sub) = Pixmap::new(src_w as u32, src_h as u32) {
+            // path: the visible region in DESTINATION pixels, content
+            // mapped from the source via scale + crop. (Sizing the layer
+            // in source pixels — screen.w / scale — cropped upscaled
+            // images to their top-left quadrant: logos drew as tiny
+            // slivers instead of filling their layout rect.)
+            let sub_w = (screen.w.ceil() as u32).max(1);
+            let sub_h = (screen.h.ceil() as u32).max(1);
+            if let Some(mut sub) = Pixmap::new(sub_w, sub_h) {
                 let crop_x =
                     (screen.x - (rect.x + state.transform[4])).max(0.0) / scale_x.max(1e-6);
                 let crop_y =
@@ -790,26 +825,46 @@ impl Painter {
     ) {
         let affine = state.transform;
         let clip = state.clip();
+        // HiDPI: rasterize glyphs at font_size x scale (a NEW cache entry —
+        // swash keys on the font size bits) so text is sharp at DPR > 1
+        // instead of an upscaled 1x raster. Positions/placements are already
+        // in device space via the affine transform.
+        let dpr = if state.scale.is_finite() && state.scale > 0.0 {
+            state.scale
+        } else {
+            1.0
+        };
+        let glyph_key = |glyph: &rowser_layout::text::PlacedGlyph| -> cosmic_text::CacheKey {
+            if (dpr - 1.0).abs() < 1e-6 {
+                return glyph.cache_key;
+            }
+            let mut key = glyph.cache_key;
+            let size = f32::from_bits(key.font_size_bits) * dpr;
+            key.font_size_bits = size.to_bits();
+            key.x_bin = cosmic_text::SubpixelBin::Zero;
+            key.y_bin = cosmic_text::SubpixelBin::Zero;
+            key
+        };
         // Shadow passes first.
         for shadow in shadows {
             for glyph in &run.glyphs {
                 let (gx, gy) = apply(affine, glyph.x as f32, glyph.y as f32);
-                let x = gx + shadow.x;
-                let y = gy + shadow.y;
+                let x = gx + shadow.x * dpr;
+                let y = gy + shadow.y * dpr;
                 if y < -300.0 || y > viewport.1 + 300.0 || x < -300.0 || x > viewport.0 + 300.0 {
                     continue;
                 }
-                let Some(image) = self.swash_cache.get_image(font_system, glyph.cache_key) else {
+                let Some(image) = self.swash_cache.get_image(font_system, glyph_key(glyph)) else {
                     continue;
                 };
                 // Blur approximation: 4 extra taps at reduced alpha.
                 let taps: [(f32, f32, u8); 5] = if shadow.blur > 0.5 {
                     [
                         (0.0, 0.0, 255),
-                        (1.0, 0.0, 96),
-                        (-1.0, 0.0, 96),
-                        (0.0, 1.0, 96),
-                        (0.0, -1.0, 96),
+                        (dpr, 0.0, 96),
+                        (-dpr, 0.0, 96),
+                        (0.0, dpr, 96),
+                        (0.0, -dpr, 96),
                     ]
                 } else {
                     [(0.0, 0.0, 255); 5]
@@ -819,8 +874,8 @@ impl Painter {
                         pixmap,
                         glyph,
                         image,
-                        (x + ox) as i32,
-                        (y + oy) as i32,
+                        (x + ox).round() as i32,
+                        (y + oy).round() as i32,
                         clip,
                         Some((shadow.color.r, shadow.color.g, shadow.color.b, alpha_scale)),
                     );
@@ -833,10 +888,18 @@ impl Painter {
             if y < -200.0 || y > viewport.1 + 200.0 || x < -200.0 || x > viewport.0 + 200.0 {
                 continue;
             }
-            let Some(image) = self.swash_cache.get_image(font_system, glyph.cache_key) else {
+            let Some(image) = self.swash_cache.get_image(font_system, glyph_key(glyph)) else {
                 continue;
             };
-            blit_glyph(pixmap, glyph, image, x as i32, y as i32, clip, None);
+            blit_glyph(
+                pixmap,
+                glyph,
+                image,
+                x.round() as i32,
+                y.round() as i32,
+                clip,
+                None,
+            );
         }
     }
 

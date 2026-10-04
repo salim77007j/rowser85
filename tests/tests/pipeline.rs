@@ -204,6 +204,67 @@ async fn data_url_navigation_renders() {
     browser.shutdown();
 }
 
+/// Group C: `<img src="*.svg">` fetches, decodes (resvg), lays out at the
+/// attribute size and paints — the Wikipedia-logo class of images.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn svg_img_fetches_and_renders() {
+    let svg = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40">
+        <circle cx="20" cy="20" r="18" fill="#0000cc"/>
+    </svg>"##;
+    let html = r##"<!DOCTYPE html><html><head><title>SVG Img</title></head><body>
+        <img alt="logo" src="/logo.svg" width="120" height="120">
+    </body></html>"##;
+    let mut routes: HashMap<String, (u16, String, Vec<u8>)> = HashMap::new();
+    routes.insert(
+        "/".to_owned(),
+        (200, "text/html".to_owned(), html.as_bytes().to_vec()),
+    );
+    routes.insert(
+        "/logo.svg".to_owned(),
+        (200, "image/svg+xml".to_owned(), svg.to_vec()),
+    );
+    let mut server = LocalServer::start(routes);
+    let url = server.url();
+    server.serve();
+
+    let browser = BrowserApi::start(test_config("svg-img")).expect("engine start");
+    let tab = browser.new_tab(Some(url.clone()));
+    let mut events = browser.events();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(wait_seconds());
+    loop {
+        let event = tokio::time::timeout_at(deadline, events.recv())
+            .await
+            .expect("timeout waiting for engine events")
+            .expect("event channel alive");
+        if matches!(event, EngineEvent::PageLoaded { .. }) {
+            break;
+        }
+    }
+    // Give the image fetch + decode + repaint a moment to land.
+    for _ in 0..wait_seconds() {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        if let Some(frame) = browser.frame(tab) {
+            let straight = frame.straight_rgba();
+            let blue = straight
+                .chunks_exact(4)
+                .filter(|px| px[2] >= 150 && px[0] < 40 && px[1] < 40 && px[3] > 0)
+                .count();
+            if blue > 1500 {
+                browser.shutdown();
+                return;
+            }
+        }
+    }
+    let frame = browser.frame(tab).expect("frame");
+    let straight = frame.straight_rgba();
+    let blue = straight
+        .chunks_exact(4)
+        .filter(|px| px[2] >= 150 && px[0] < 40 && px[1] < 40 && px[3] > 0)
+        .count();
+    assert!(blue > 1500, "svg img blue pixels: {blue}");
+    browser.shutdown();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tab_lifecycle_and_suspension() {
     let mut routes: HashMap<String, (u16, String, Vec<u8>)> = HashMap::new();
