@@ -69,6 +69,13 @@ pub enum EngineEvent {
         /// Fraction loaded.
         progress: f32,
     },
+    /// The engine changed the page scroll offset (wheel routing).
+    ScrollChanged {
+        /// Tab id.
+        tab: TabId,
+        /// New scroll offset.
+        scroll_y: f32,
+    },
     /// A new frame is available in the tab snapshot.
     FrameReady {
         /// Tab id.
@@ -186,6 +193,8 @@ pub enum Command {
     SetViewport(TabId, f32, f32),
     /// Scroll a tab (re-renders with the offset without re-layout).
     Scroll(TabId, f32),
+    /// Scroll wheel at a document-space point (element scroll routing).
+    Wheel(TabId, f32, f32, f32),
     /// Dispatch a UI event (click etc.) to a DOM node.
     UiEvent(TabId, u64, String),
     /// Update privacy settings (applies to future requests).
@@ -724,6 +733,11 @@ fn handle_user(state: &EngineLoop, command: Command) -> bool {
         Command::Scroll(tab, y) => {
             if let Some(handle) = state.tabs.lock().unwrap().get(&tab) {
                 let _ = handle.tx.send(page::Message::SetScroll(y));
+            }
+        }
+        Command::Wheel(tab, x, y, delta) => {
+            if let Some(handle) = state.tabs.lock().unwrap().get(&tab) {
+                let _ = handle.tx.send(page::Message::Wheel { x, y, delta });
             }
         }
         Command::UiEvent(tab, node, event_type) => {

@@ -1584,11 +1584,21 @@ impl Chrome {
                 );
                 let scale = zoom;
 
-                // Scroll wheel.
+                // Scroll wheel: route to the engine (element scrollables
+                // consume first, the page scrolls otherwise).
                 let scroll = ui.input(|i| i.raw_scroll_delta);
                 if response.hovered() && scroll.y.abs() > 0.0 {
                     let delta = -scroll.y * 2.4 * scale.max(1.0);
-                    app.scroll_active(delta);
+                    if let Some(pos) = response.hover_pos() {
+                        let doc_x = (pos.x - rect.left()) * scale;
+                        let doc_y =
+                            (pos.y - rect.top()) * scale + app.tabs[app.active].scroll_y;
+                        if let Some(id) = app.tabs.get(app.active).map(|t| t.id) {
+                            app.shell.browser().wheel(id, doc_x, doc_y, delta);
+                        }
+                    } else {
+                        app.scroll_active(delta);
+                    }
                 }
                 // Hover → hit-test (throttled).
                 if let Some(pos) = response.hover_pos() {

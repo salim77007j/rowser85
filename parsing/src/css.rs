@@ -7,8 +7,13 @@
 
 use lightningcss::declaration::DeclarationBlock;
 use lightningcss::properties::align::{AlignContent, AlignItems, GapValue, JustifyContent};
+use lightningcss::properties::animation::{
+    Animation as LcAnimation, AnimationIterationCount, AnimationName, AnimationPlayState,
+};
+use lightningcss::properties::background::{Background as LcBackground, BackgroundSize};
 use lightningcss::properties::border::{BorderSideWidth, LineStyle};
 use lightningcss::properties::display::{Display, DisplayInside, DisplayKeyword, DisplayOutside};
+use lightningcss::properties::effects::{Filter as LcFilterOp, FilterList};
 use lightningcss::properties::flex::{FlexDirection as LcFlexDirection, FlexWrap as LcFlexWrap};
 use lightningcss::properties::font::{
     AbsoluteFontWeight, FontFamily as LcFontFamily, FontSize as LcFontSize,
@@ -18,25 +23,35 @@ use lightningcss::properties::grid::{RepeatCount, TrackBreadth, TrackListItem, T
 use lightningcss::properties::position::Position;
 use lightningcss::properties::size::{MaxSize, Size};
 use lightningcss::properties::text::TextAlign as LcTextAlign;
+use lightningcss::properties::transition::Transition as LcTransition;
+use lightningcss::values::time::Time as LcTime;
 use lightningcss::properties::Property;
 use lightningcss::rules::font_face::{FontFaceProperty, FontFaceRule as FontFaceRuleDef, Source};
+use lightningcss::rules::keyframes::KeyframesRule;
 use lightningcss::rules::style::StyleRule;
 use lightningcss::rules::supports::SupportsCondition;
 use lightningcss::rules::CssRule;
 use lightningcss::stylesheet::{ParserOptions, PrinterOptions, StyleSheet};
 use lightningcss::traits::ToCss;
 use lightningcss::values::color::{CssColor, LABColor, RGBA};
+use lightningcss::values::gradient::{
+    Gradient as LcGradient, GradientItem, LineDirection,
+};
+use lightningcss::values::image::Image as LcImage;
 use lightningcss::values::length::{
     Length as LcLength, LengthPercentage, LengthPercentageOrAuto, LengthValue,
 };
+use lightningcss::values::percentage::NumberOrPercentage;
 use rowser_dom::{parse_selector_list, SelectorList};
 
 use crate::cascade::{
-    AlignItemsMode, BorderEdgeRaw, ClearMode, DisplayMode, FlexDirectionMode, FlexWrapMode,
-    FloatMode, FontSizeRaw, FontStyleMode, FontWeightRaw, GridLineRaw, GridPlacementRaw,
+    AlignItemsMode, AnimationDirectionMode, AnimationSpec, BackgroundImageSpec, BackgroundLayer,
+    BackgroundRepeatMode, BackgroundSizeMode, BorderEdgeRaw, BorderRadius, BoxShadowSpec, ClearMode,
+    DisplayMode, FilterSpec, FlexDirectionMode, FlexWrapMode, FloatMode, FontSizeRaw, FontStyleMode,
+    FontWeightRaw, GradientGeometry, GradientSpec, GradientStop, GridLineRaw, GridPlacementRaw,
     JustifyContentMode, Length, LengthOrAuto, LineHeightRaw, LineStyleMode, NamedAreaRaw,
-    OverflowMode, PositionMode, Rgba, StyleProps, TextAlignMode, TrackBoundRaw, TrackRaw,
-    VisibilityMode,
+    OverflowMode, PositionMode, RadiusLength, Rgba, StyleProps, TextAlignMode, TextShadowSpec,
+    TrackBoundRaw, TrackRaw, TransformOp, TransitionSpec, VisibilityMode,
 };
 
 /// One style rule ready for cascade.
@@ -63,6 +78,27 @@ pub struct ParsedStylesheet {
     pub rules: Vec<StyleRuleEntry>,
     /// `@font-face` rules in source order.
     pub font_faces: Vec<FontFaceRaw>,
+    /// `@keyframes` rules in source order.
+    pub keyframes: Vec<KeyframesRaw>,
+}
+
+/// One `@keyframes` rule, flattened: name + keyframe list.
+#[derive(Debug, Clone)]
+pub struct KeyframesRaw {
+    /// Animation name.
+    pub name: String,
+    /// Keyframes in rule order.
+    pub frames: Vec<KeyframeRaw>,
+}
+
+/// One keyframe inside a `@keyframes` rule.
+#[derive(Debug, Clone)]
+pub struct KeyframeRaw {
+    /// Offset(s) in 0..1 this keyframe covers (a rule like `0%, 50% { }`
+    /// emits one entry per selector).
+    pub offset: f32,
+    /// Flattened declarations.
+    pub props: StyleProps,
 }
 
 /// One `@font-face` rule, flattened: the CSS family name plus the url()
@@ -180,9 +216,35 @@ fn collect_rules(
                 collect_rules(&layer.rules.0, media, out, order);
             }
             CssRule::FontFace(font_face) => collect_font_face(font_face, out),
+            CssRule::Keyframes(keyframes) => collect_keyframes(keyframes, out),
             _ => {}
         }
     }
+}
+
+/// Flattens one `@keyframes` rule: name + per-selector keyframes.
+fn collect_keyframes(rule: &KeyframesRule<'_>, out: &mut ParsedStylesheet) {
+    let name = match &rule.name {
+        lightningcss::rules::keyframes::KeyframesName::Ident(custom) => custom.to_string(),
+        lightningcss::rules::keyframes::KeyframesName::Custom(s) => s.to_string(),
+    };
+    let mut frames = Vec::new();
+    for keyframe in &rule.keyframes {
+        for selector in &keyframe.selectors {
+            let offset = match selector {
+                lightningcss::rules::keyframes::KeyframeSelector::Percentage(p) => p.0 / 100.0,
+                lightningcss::rules::keyframes::KeyframeSelector::From => 0.0,
+                lightningcss::rules::keyframes::KeyframeSelector::To => 1.0,
+                _ => continue,
+            };
+            let mut props = StyleProps::default();
+            for decl in &keyframe.declarations.declarations {
+                apply_property(&mut props, decl);
+            }
+            frames.push(KeyframeRaw { offset, props });
+        }
+    }
+    out.keyframes.push(KeyframesRaw { name, frames });
 }
 
 /// Truthful `@supports` evaluation. A declaration condition counts as
@@ -614,10 +676,14 @@ fn apply_property(props: &mut StyleProps, property: &Property<'_>) {
         // `background` shorthand — THE workhorse of real-world CSS. Sites
         // write `background: #f6f6ef` a hundred times more often than the
         // longhand; dropping it painted pages on blank canvases. We take the
-        // color (first layer); gradients/images are a documented gap.
+        // color AND the image layers (gradients / url()) per layer.
         P::Background(value) => {
             if let Some(bg) = value.first() {
                 props.background_color = Some(convert_color(&bg.color));
+            }
+            let layers = background_layers_from_shorthand(value);
+            if let Some(layers) = layers {
+                props.background_layers = Some(layers);
             }
         }
         P::Color(value) => props.color = Some(convert_color(value)),
@@ -818,6 +884,79 @@ fn apply_property(props: &mut StyleProps, property: &Property<'_>) {
             // `z-index: auto` — leave unset.
             lightningcss::properties::position::ZIndex::Auto => {}
         },
+        // ===== Group B: advanced CSS =====
+        P::BorderRadius(value, _) => {
+            props.border_radius = Some(BorderRadius {
+                top_left: radius_from(&value.top_left),
+                top_right: radius_from(&value.top_right),
+                bottom_right: radius_from(&value.bottom_right),
+                bottom_left: radius_from(&value.bottom_left),
+            });
+        }
+        P::BorderTopLeftRadius(value, _) => {
+            let mut r = props.border_radius.unwrap_or_default();
+            r.top_left = radius_from(&value);
+            props.border_radius = Some(r);
+        }
+        P::BorderTopRightRadius(value, _) => {
+            let mut r = props.border_radius.unwrap_or_default();
+            r.top_right = radius_from(&value);
+            props.border_radius = Some(r);
+        }
+        P::BorderBottomRightRadius(value, _) => {
+            let mut r = props.border_radius.unwrap_or_default();
+            r.bottom_right = radius_from(&value);
+            props.border_radius = Some(r);
+        }
+        P::BorderBottomLeftRadius(value, _) => {
+            let mut r = props.border_radius.unwrap_or_default();
+            r.bottom_left = radius_from(&value);
+            props.border_radius = Some(r);
+        }
+        P::BoxShadow(list, _) => {
+            props.box_shadows = Some(list.iter().map(box_shadow_from).collect());
+        }
+        P::TextShadow(list) => {
+            props.text_shadows = Some(list.iter().map(text_shadow_from).collect());
+        }
+        P::BackgroundImage(list) => {
+            if let Some(layers) = background_layers_from(list) {
+                props.background_layers = Some(layers);
+            }
+        }
+        P::BackgroundPosition(list) => merge_background_positions(props, list),
+        P::BackgroundSize(list) => merge_background_sizes(props, list),
+        P::BackgroundRepeat(list) => merge_background_repeats(props, list),
+        P::Transform(value, _) => {
+            let ops = convert_transform_list(value);
+            if !ops.is_empty() {
+                props.transform = Some(ops);
+            }
+        }
+        P::Translate(value) => props.transform = Some(vec![translate_op(value)]),
+        P::Rotate(value) => props.transform = Some(vec![rotate_op(value)]),
+        P::Scale(value) => props.transform = Some(vec![scale_op(value)]),
+        P::TransformOrigin(value, _) => {
+            props.transform_origin = Some(convert_transform_origin(value));
+        }
+        P::Filter(list, _) => {
+            let filters = convert_filters(list);
+            if !filters.is_empty() {
+                props.filters = Some(filters);
+            }
+        }
+        P::BackdropFilter(list, _) => {
+            let filters = convert_filters(list);
+            if !filters.is_empty() {
+                props.backdrop_filters = Some(filters);
+            }
+        }
+        P::Transition(list, _) => {
+            props.transitions = Some(list.iter().map(transition_from).collect());
+        }
+        P::Animation(list, _) => {
+            props.animations = Some(list.iter().map(animation_from).collect());
+        }
         _ => {}
     }
 }
@@ -1221,8 +1360,9 @@ fn convert_overflow(value: &lightningcss::properties::overflow::OverflowKeyword)
     use lightningcss::properties::overflow::OverflowKeyword;
     match value {
         OverflowKeyword::Visible => OverflowMode::Visible,
-        // clip/scroll/auto all clip for painting purposes.
-        _ => OverflowMode::Hidden,
+        OverflowKeyword::Hidden | OverflowKeyword::Clip => OverflowMode::Hidden,
+        OverflowKeyword::Scroll => OverflowMode::Scroll,
+        OverflowKeyword::Auto => OverflowMode::Auto,
     }
 }
 
@@ -1238,8 +1378,9 @@ fn convert_position(value: &Position) -> PositionMode {
     match value {
         Position::Static => PositionMode::Static,
         Position::Relative => PositionMode::Relative,
-        Position::Absolute | Position::Fixed => PositionMode::Absolute,
-        Position::Sticky(_) => PositionMode::Relative,
+        Position::Absolute => PositionMode::Absolute,
+        Position::Fixed => PositionMode::Fixed,
+        Position::Sticky(_) => PositionMode::Sticky,
     }
 }
 
@@ -1484,5 +1625,569 @@ fn feature_matches(
             };
             start_ok && end_ok
         }
+    }
+}
+
+// ===========================================================================
+// Group B converters: border-radius, shadows, backgrounds, transforms,
+// filters, transitions, animations.
+// ===========================================================================
+
+/// Converts one lightningcss `LengthPercentage` into a corner radius.
+fn radius_from(value: &lightningcss::values::size::Size2D<LengthPercentage>) -> RadiusLength {
+    // Horizontal radius only (circular corners).
+    match &value.0 {
+        LengthPercentage::Dimension(d) => RadiusLength {
+            px: match convert_length_value(d) {
+                Length::Px(n) => n,
+                _ => 0.0,
+            },
+            pct: 0.0,
+        },
+        LengthPercentage::Percentage(p) => RadiusLength { px: 0.0, pct: p.0 },
+        LengthPercentage::Calc(_) => RadiusLength::default(),
+    }
+}
+
+/// Converts one lightningcss `BoxShadow`.
+fn box_shadow_from(value: &lightningcss::properties::box_shadow::BoxShadow) -> BoxShadowSpec {
+    let len = |l: &LcLength| match l {
+        LcLength::Value(v) => match convert_length_value(v) {
+            Length::Px(n) => n,
+            _ => 0.0,
+        },
+        LcLength::Calc(_) => 0.0,
+    };
+    BoxShadowSpec {
+        x: len(&value.x_offset),
+        y: len(&value.y_offset),
+        blur: len(&value.blur),
+        spread: len(&value.spread),
+        color: convert_color(&value.color),
+        inset: value.inset,
+    }
+}
+
+/// Converts one lightningcss `TextShadow`.
+fn text_shadow_from(value: &lightningcss::properties::text::TextShadow) -> TextShadowSpec {
+    let len = |l: &LcLength| match l {
+        LcLength::Value(v) => match convert_length_value(v) {
+            Length::Px(n) => n,
+            _ => 0.0,
+        },
+        LcLength::Calc(_) => 0.0,
+    };
+    TextShadowSpec {
+        x: len(&value.x_offset),
+        y: len(&value.y_offset),
+        blur: len(&value.blur),
+        color: convert_color(&value.color),
+    }
+}
+
+/// Converts a lightningcss gradient into our paint-side spec.
+fn gradient_from(gradient: &LcGradient) -> Option<GradientSpec> {
+    match gradient {
+        LcGradient::Linear(linear) => Some(GradientSpec {
+            geometry: GradientGeometry::Linear {
+                angle_deg: line_direction_angle(&linear.direction),
+            },
+            stops: gradient_stops(&linear.items),
+        }),
+        LcGradient::Radial(radial) => Some(GradientSpec {
+            geometry: GradientGeometry::Radial {
+                cx: horizontal_position_fraction(&radial.position.x),
+                cy: vertical_position_fraction(&radial.position.y),
+            },
+            stops: gradient_stops(&radial.items),
+        }),
+        // Conic gradients and legacy -webkit- gradients are not painted yet.
+        _ => None,
+    }
+}
+
+/// CSS gradient line direction → angle in degrees (0 = to top, 90 = to
+/// right — the CSS angle convention).
+fn line_direction_angle(direction: &LineDirection) -> f32 {
+    use lightningcss::values::position::{
+        HorizontalPositionKeyword, VerticalPositionKeyword,
+    };
+    match direction {
+        LineDirection::Angle(angle) => match angle {
+            lightningcss::values::angle::Angle::Deg(d) => *d,
+            lightningcss::values::angle::Angle::Rad(r) => r.to_degrees(),
+            lightningcss::values::angle::Angle::Grad(g) => g * 0.9,
+            lightningcss::values::angle::Angle::Turn(t) => t * 360.0,
+        },
+        LineDirection::Horizontal(HorizontalPositionKeyword::Left) => 270.0,
+        LineDirection::Horizontal(HorizontalPositionKeyword::Right) => 90.0,
+        LineDirection::Vertical(VerticalPositionKeyword::Top) => 0.0,
+        LineDirection::Vertical(VerticalPositionKeyword::Bottom) => 180.0,
+        LineDirection::Corner { horizontal, vertical } => {
+            let x: f32 = match horizontal {
+                HorizontalPositionKeyword::Left => -1.0,
+                HorizontalPositionKeyword::Right => 1.0,
+            };
+            let y: f32 = match vertical {
+                VerticalPositionKeyword::Top => -1.0,
+                VerticalPositionKeyword::Bottom => 1.0,
+            };
+            // atan2(dx, -dy): CSS 0deg points up.
+            let deg = y.atan2(x).to_degrees();
+            (deg + 360.0) % 360.0
+        }
+    }
+}
+
+/// Extracts color stops (ignoring interpolation hints).
+fn gradient_stops(items: &[GradientItem<LengthPercentage>]) -> Vec<GradientStop> {
+    items
+        .iter()
+        .filter_map(|item| match item {
+            GradientItem::ColorStop(stop) => {
+                let pos: Option<f32> = stop.position.as_ref().and_then(|p| match p {
+                    LengthPercentage::Percentage(pct) => Some(pct.0),
+                    LengthPercentage::Dimension(d) => match convert_length_value(d) {
+                        Length::Px(n) => Some(n / 100.0),
+                        _ => None,
+                    },
+                    LengthPercentage::Calc(_) => None,
+                });
+                Some(GradientStop {
+                    pos,
+                    color: convert_color(&stop.color),
+                })
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// background-position x component → 0..1 fraction.
+fn horizontal_position_fraction(pos: &lightningcss::values::position::HorizontalPosition) -> f32 {
+    use lightningcss::values::position::{HorizontalPosition, HorizontalPositionKeyword};
+    match pos {
+        HorizontalPosition::Center => 0.5,
+        HorizontalPosition::Length(lp) => match lp {
+            LengthPercentage::Percentage(p) => p.0,
+            _ => 0.0,
+        },
+        HorizontalPosition::Side { side, offset } => {
+            let base = match side {
+                HorizontalPositionKeyword::Left => 0.0,
+                HorizontalPositionKeyword::Right => 1.0,
+            };
+            let off = match offset {
+                Some(LengthPercentage::Percentage(p)) => p.0,
+                _ => 0.0,
+            };
+            if matches!(side, HorizontalPositionKeyword::Right) {
+                base - off
+            } else {
+                base + off
+            }
+        }
+    }
+}
+
+/// background-position y component → 0..1 fraction.
+fn vertical_position_fraction(pos: &lightningcss::values::position::VerticalPosition) -> f32 {
+    use lightningcss::values::position::{VerticalPosition, VerticalPositionKeyword};
+    match pos {
+        VerticalPosition::Center => 0.5,
+        VerticalPosition::Length(lp) => match lp {
+            LengthPercentage::Percentage(p) => p.0,
+            _ => 0.0,
+        },
+        VerticalPosition::Side { side, offset } => {
+            let base = match side {
+                VerticalPositionKeyword::Top => 0.0,
+                VerticalPositionKeyword::Bottom => 1.0,
+            };
+            let off = match offset {
+                Some(LengthPercentage::Percentage(p)) => p.0,
+                _ => 0.0,
+            };
+            if matches!(side, VerticalPositionKeyword::Bottom) {
+                base - off
+            } else {
+                base + off
+            }
+        }
+    }
+}
+
+/// One background layer from a lightningcss image.
+fn background_layer_from(
+    image: &LcImage<'_>,
+    position: &lightningcss::properties::background::BackgroundPosition,
+    size: &BackgroundSize,
+    repeat: &lightningcss::properties::background::BackgroundRepeat,
+) -> Option<BackgroundLayer> {
+    let image = match image {
+        LcImage::None => return None,
+        LcImage::Gradient(gradient) => {
+            BackgroundImageSpec::Gradient(gradient_from(gradient.as_ref())?)
+        }
+        LcImage::Url(url) => BackgroundImageSpec::Url(url.url.to_string()),
+        // image-set(): use the first candidate; unresolved sets are dropped.
+        LcImage::ImageSet(set) => {
+            let first = set.options.first()?;
+            match &first.image {
+                LcImage::Url(url) => BackgroundImageSpec::Url(url.url.to_string()),
+                LcImage::Gradient(gradient) => {
+                    BackgroundImageSpec::Gradient(gradient_from(gradient.as_ref())?)
+                }
+                _ => return None,
+            }
+        }
+    };
+    let size = match size {
+        BackgroundSize::Cover => BackgroundSizeMode::Cover,
+        BackgroundSize::Contain => BackgroundSizeMode::Contain,
+        BackgroundSize::Explicit { width, height } => {
+            let px = |v: &LengthPercentageOrAuto| match v {
+                LengthPercentageOrAuto::LengthPercentage(
+                    LengthPercentage::Dimension(d),
+                ) => match convert_length_value(d) {
+                    Length::Px(n) => Some(n),
+                    _ => None,
+                },
+                _ => None,
+            };
+            match (px(width), px(height)) {
+                (Some(w), Some(h)) => BackgroundSizeMode::Explicit(w, h),
+                (Some(w), None) => BackgroundSizeMode::Explicit(w, 0.0),
+                _ => BackgroundSizeMode::Auto,
+            }
+        }
+    };
+    let repeat = if matches!(
+        repeat.x,
+        lightningcss::properties::background::BackgroundRepeatKeyword::NoRepeat
+    ) || matches!(
+        repeat.y,
+        lightningcss::properties::background::BackgroundRepeatKeyword::NoRepeat
+    ) {
+        BackgroundRepeatMode::NoRepeat
+    } else {
+        BackgroundRepeatMode::Repeat
+    };
+    Some(BackgroundLayer {
+        image,
+        position: (
+            horizontal_position_fraction(&position.x),
+            vertical_position_fraction(&position.y),
+        ),
+        repeat,
+        size,
+    })
+}
+
+/// `background-image` longhand: image list only (default position/repeat/size).
+fn background_layers_from(list: &[LcImage<'_>]) -> Option<Vec<BackgroundLayer>> {
+    let layers: Vec<BackgroundLayer> = list
+        .iter()
+        .filter_map(|image| {
+            background_layer_from(
+                image,
+                &lightningcss::properties::background::BackgroundPosition::default(),
+                &BackgroundSize::default(),
+                &lightningcss::properties::background::BackgroundRepeat::default(),
+            )
+        })
+        .collect();
+    (!layers.is_empty()).then_some(layers)
+}
+
+/// `background:` shorthand: image + position + size + repeat per layer.
+fn background_layers_from_shorthand(list: &[LcBackground<'_>]) -> Option<Vec<BackgroundLayer>> {
+    let layers: Vec<BackgroundLayer> = list
+        .iter()
+        .filter_map(|bg| {
+            background_layer_from(&bg.image, &bg.position, &bg.size, &bg.repeat)
+        })
+        .collect();
+    (!layers.is_empty()).then_some(layers)
+}
+
+/// Merges `background-position` longhand into existing layers.
+fn merge_background_positions(
+    props: &mut StyleProps,
+    list: &[lightningcss::properties::background::BackgroundPosition],
+) {
+    if props.background_layers.is_none() {
+        // No layers yet: seed empty ones so later background-image merges.
+        props.background_layers = Some(
+            list.iter()
+                .map(|_| BackgroundLayer {
+                    image: BackgroundImageSpec::Url(String::new()),
+                    position: (0.0, 0.0),
+                    repeat: BackgroundRepeatMode::Repeat,
+                    size: BackgroundSizeMode::Auto,
+                })
+                .collect(),
+        );
+    }
+    if let Some(layers) = &mut props.background_layers {
+        for (i, pos) in list.iter().enumerate() {
+            if let Some(layer) = layers.get_mut(i) {
+                layer.position = (
+                    horizontal_position_fraction(&pos.x),
+                    vertical_position_fraction(&pos.y),
+                );
+            }
+        }
+    }
+}
+
+/// Merges `background-size` longhand into existing layers.
+fn merge_background_sizes(props: &mut StyleProps, list: &[BackgroundSize]) {
+    if let Some(layers) = &mut props.background_layers {
+        for (i, size) in list.iter().enumerate() {
+            if let Some(layer) = layers.get_mut(i) {
+                layer.size = match size {
+                    BackgroundSize::Cover => BackgroundSizeMode::Cover,
+                    BackgroundSize::Contain => BackgroundSizeMode::Contain,
+                    BackgroundSize::Explicit { width, height } => {
+                        let px = |v: &LengthPercentageOrAuto| match v {
+                            LengthPercentageOrAuto::LengthPercentage(
+                                LengthPercentage::Dimension(d),
+                            ) => match convert_length_value(d) {
+                                Length::Px(n) => Some(n),
+                                _ => None,
+                            },
+                            _ => None,
+                        };
+                        match (px(width), px(height)) {
+                            (Some(w), Some(h)) => BackgroundSizeMode::Explicit(w, h),
+                            _ => BackgroundSizeMode::Auto,
+                        }
+                    }
+                };
+            }
+        }
+    }
+}
+
+/// Merges `background-repeat` longhand into existing layers.
+fn merge_background_repeats(
+    props: &mut StyleProps,
+    list: &[lightningcss::properties::background::BackgroundRepeat],
+) {
+    if let Some(layers) = &mut props.background_layers {
+        for (i, repeat) in list.iter().enumerate() {
+            if let Some(layer) = layers.get_mut(i) {
+                layer.repeat = if matches!(
+                    repeat.x,
+                    lightningcss::properties::background::BackgroundRepeatKeyword::NoRepeat
+                ) || matches!(
+                    repeat.y,
+                    lightningcss::properties::background::BackgroundRepeatKeyword::NoRepeat
+                ) {
+                    BackgroundRepeatMode::NoRepeat
+                } else {
+                    BackgroundRepeatMode::Repeat
+                };
+            }
+        }
+    }
+}
+
+/// Converts a lightningcss transform list into paint ops (2D projection).
+fn convert_transform_list(list: &lightningcss::properties::transform::TransformList) -> Vec<TransformOp> {
+    use lightningcss::properties::transform::Transform as T;
+    list.0
+        .iter()
+        .filter_map(|op| match op {
+            T::Translate(x, y) => Some(lp_pair(x, y)),
+            T::TranslateX(x) => Some(lp_pair(
+                x,
+                &LengthPercentage::Dimension(LengthValue::Px(0.0)),
+            )),
+            T::TranslateY(y) => Some(lp_pair(
+                &LengthPercentage::Dimension(LengthValue::Px(0.0)),
+                y,
+            )),
+            T::Scale(x, y) => Some(TransformOp::Scale(nop(x), nop(y))),
+            T::ScaleX(x) => Some(TransformOp::Scale(nop(x), 1.0)),
+            T::ScaleY(y) => Some(TransformOp::Scale(1.0, nop(y))),
+            T::Rotate(angle) => Some(TransformOp::Rotate(angle_rad(angle))),
+            T::Skew(x, y) => Some(TransformOp::Skew(angle_rad(x), angle_rad(y))),
+            T::SkewX(x) => Some(TransformOp::Skew(angle_rad(x), 0.0)),
+            T::SkewY(y) => Some(TransformOp::Skew(0.0, angle_rad(y))),
+            T::Matrix(m) => Some(TransformOp::Matrix([m.a, m.b, m.c, m.d, m.e, m.f])),
+            // 3D forms project onto the 2D plane (z ignored, perspective
+            // approximated as identity).
+            T::Translate3d(x, y, _) => Some(lp_pair(x, y)),
+            T::Scale3d(x, y, _) => Some(TransformOp::Scale(nop(x), nop(y))),
+            T::Rotate3d(_, _, _, angle) => Some(TransformOp::Rotate(angle_rad(angle))),
+            T::RotateZ(angle) => Some(TransformOp::Rotate(angle_rad(angle))),
+            _ => None,
+        })
+        .collect()
+}
+
+/// LengthPercentage pair → translate op.
+fn lp_pair(x: &LengthPercentage, y: &LengthPercentage) -> TransformOp {
+    let px = |lp: &LengthPercentage| match lp {
+        LengthPercentage::Dimension(d) => match convert_length_value(d) {
+            Length::Px(n) => n,
+            _ => 0.0,
+        },
+        _ => 0.0,
+    };
+    let pct = |lp: &LengthPercentage| match lp {
+        LengthPercentage::Percentage(p) => p.0,
+        _ => 0.0,
+    };
+    TransformOp::Translate {
+        px: (px(x), px(y)),
+        pct: (pct(x), pct(y)),
+    }
+}
+
+/// NumberOrPercentage → f32 (percent as fraction).
+fn nop(value: &NumberOrPercentage) -> f32 {
+    match value {
+        NumberOrPercentage::Number(n) => *n,
+        NumberOrPercentage::Percentage(p) => p.0,
+    }
+}
+
+/// Angle → radians.
+fn angle_rad(angle: &lightningcss::values::angle::Angle) -> f32 {
+    use lightningcss::values::angle::Angle;
+    match angle {
+        Angle::Deg(d) => d.to_radians(),
+        Angle::Rad(r) => *r,
+        Angle::Grad(g) => g * std::f32::consts::PI / 200.0,
+        Angle::Turn(t) => t * std::f32::consts::TAU,
+    }
+}
+
+/// `translate:` property → op.
+fn translate_op(value: &lightningcss::properties::transform::Translate) -> TransformOp {
+    match value {
+        lightningcss::properties::transform::Translate::None => TransformOp::Translate {
+            px: (0.0, 0.0),
+            pct: (0.0, 0.0),
+        },
+        lightningcss::properties::transform::Translate::XYZ { x, y, .. } => lp_pair(x, y),
+    }
+}
+
+/// `rotate:` property → op.
+fn rotate_op(value: &lightningcss::properties::transform::Rotate) -> TransformOp {
+    match value {
+        lightningcss::properties::transform::Rotate::None => TransformOp::Rotate(0.0),
+        lightningcss::properties::transform::Rotate::XYZ { angle, .. } => {
+            TransformOp::Rotate(angle_rad(angle))
+        }
+    }
+}
+
+/// `scale:` property → op.
+fn scale_op(value: &lightningcss::properties::transform::Scale) -> TransformOp {
+    match value {
+        lightningcss::properties::transform::Scale::None => TransformOp::Scale(1.0, 1.0),
+        lightningcss::properties::transform::Scale::XYZ { x, y, .. } => {
+            TransformOp::Scale(nop(x), nop(y))
+        }
+    }
+}
+
+/// transform-origin → fractions of the border box.
+fn convert_transform_origin(
+    value: &lightningcss::values::position::Position,
+) -> (f32, f32) {
+    (
+        horizontal_position_fraction(&value.x),
+        vertical_position_fraction(&value.y),
+    )
+}
+
+/// Converts a lightningcss filter list into paint ops.
+fn convert_filters(list: &FilterList<'_>) -> Vec<FilterSpec> {
+    let filters = match list {
+        FilterList::Filters(filters) => filters,
+        FilterList::None => return Vec::new(),
+    };
+    filters
+        .iter()
+        .filter_map(|filter| match filter {
+            LcFilterOp::Blur(l) => {
+                let px = match l {
+                    LcLength::Value(v) => match convert_length_value(v) {
+                        Length::Px(n) => n,
+                        _ => 0.0,
+                    },
+                    LcLength::Calc(_) => 0.0,
+                };
+                Some(FilterSpec::Blur(px))
+            }
+            LcFilterOp::Brightness(v) => Some(FilterSpec::Brightness(nop(v))),
+            LcFilterOp::Contrast(v) => Some(FilterSpec::Contrast(nop(v))),
+            LcFilterOp::Grayscale(v) => Some(FilterSpec::Grayscale(nop(v))),
+            LcFilterOp::HueRotate(a) => match a {
+                lightningcss::values::angle::Angle::Deg(d) => Some(FilterSpec::HueRotate(*d)),
+                _ => Some(FilterSpec::HueRotate(0.0)),
+            },
+            LcFilterOp::Opacity(v) => Some(FilterSpec::Opacity(nop(v))),
+            LcFilterOp::Saturate(v) => Some(FilterSpec::Saturate(nop(v))),
+            LcFilterOp::Sepia(v) => Some(FilterSpec::Sepia(nop(v))),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Time → seconds.
+fn time_seconds(t: &LcTime) -> f32 {
+    match t {
+        LcTime::Seconds(s) => *s,
+        LcTime::Milliseconds(ms) => ms / 1000.0,
+    }
+}
+
+/// One lightningcss transition → engine spec.
+fn transition_from(value: &LcTransition<'_>) -> TransitionSpec {
+    use lightningcss::properties::PropertyId;
+    let property = match &value.property {
+        PropertyId::All => "all".to_owned(),
+        other => other.name().to_owned(),
+    };
+    TransitionSpec {
+        property,
+        duration: time_seconds(&value.duration),
+        delay: time_seconds(&value.delay),
+    }
+}
+
+/// One lightningcss animation → engine spec.
+fn animation_from(value: &LcAnimation<'_>) -> AnimationSpec {
+    use lightningcss::properties::animation::AnimationDirection as LcDirection;
+    let name = match &value.name {
+        AnimationName::None => String::new(),
+        AnimationName::Ident(ident) => ident.to_string(),
+        AnimationName::String(s) => s.to_string(),
+    };
+    let iteration_count = match &value.iteration_count {
+        AnimationIterationCount::Number(n) => *n,
+        AnimationIterationCount::Infinite => f32::INFINITY,
+    };
+    let direction = match &value.direction {
+        LcDirection::Normal => AnimationDirectionMode::Normal,
+        LcDirection::Reverse => AnimationDirectionMode::Reverse,
+        LcDirection::Alternate => AnimationDirectionMode::Alternate,
+        LcDirection::AlternateReverse => AnimationDirectionMode::AlternateReverse,
+    };
+    let paused = matches!(value.play_state, AnimationPlayState::Paused);
+    AnimationSpec {
+        name,
+        duration: time_seconds(&value.duration),
+        delay: time_seconds(&value.delay),
+        iteration_count,
+        direction,
+        paused,
     }
 }

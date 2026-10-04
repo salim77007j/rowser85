@@ -45,9 +45,7 @@ fn main() {
         &doc.dom,
         &styles,
         &layout,
-        &Default::default(),
-        &Default::default(),
-        &Default::default(),
+        &rowser_rendering::display_list::PaintInputs::default(),
     );
     let text_cmds = list
         .commands

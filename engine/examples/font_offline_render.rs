@@ -84,9 +84,7 @@ fn main() {
         &doc.dom,
         &styles,
         &layout,
-        &Default::default(),
-        &Default::default(),
-        &Default::default(),
+        &rowser_rendering::display_list::PaintInputs::default(),
     );
     println!(
         "display list: {} commands, {} text runs",
@@ -105,7 +103,7 @@ fn main() {
     }
 
     for cmd in list.commands.iter() {
-        if let rowser_rendering::DrawCmd::Text { run } = cmd {
+        if let rowser_rendering::DrawCmd::Text { run, .. } = cmd {
             let mut line_y: Option<i32> = None;
             let mut x0: i32 = i32::MAX;
             let mut x1: i32 = i32::MIN;

@@ -14,7 +14,10 @@
 pub mod display_list;
 pub mod painter;
 
-pub use display_list::{build_display_list, DisplayList, DrawCmd};
+pub use display_list::{
+    build_display_list, BackgroundImageMap, DisplayList, DrawCmd, ElementScrollMap, ImageMap,
+    PaintInputs,
+};
 pub use painter::{Painter, RenderOptions};
 
 use rowser_parsing::cascade::Rgba;
@@ -145,7 +148,7 @@ pub fn to_skia_color(color: Rgba) -> tiny_skia::Color {
 
 #[cfg(test)]
 mod tests {
-    use crate::display_list::build_display_list;
+    use crate::display_list::{build_display_list, PaintInputs};
     use crate::painter::{Painter, RenderOptions};
     use rowser_layout::{LayoutEngine, Viewport};
     use rowser_parsing::css::{parse_stylesheet, MediaContext};
@@ -175,9 +178,7 @@ mod tests {
             &doc.dom,
             &styles,
             &layout,
-            &Default::default(),
-            &Default::default(),
-            &Default::default(),
+            &PaintInputs::default(),
         );
         let mut painter = Painter::new();
         let frame = painter
@@ -229,9 +230,7 @@ mod tests {
             &doc.dom,
             &styles,
             &layout,
-            &Default::default(),
-            &Default::default(),
-            &Default::default(),
+            &PaintInputs::default(),
         );
         let mut painter = Painter::new();
         let options = RenderOptions {
@@ -285,9 +284,7 @@ mod tests {
             &doc.dom,
             &styles,
             &layout,
-            &Default::default(),
-            &Default::default(),
-            &Default::default(),
+            &PaintInputs::default(),
         );
         let mut painter = Painter::new();
         let options = RenderOptions {
@@ -304,6 +301,289 @@ mod tests {
                 !(rgb == (255, 0, 0) || rgb == (0, 255, 0)),
                 "hidden box painted: {rgb:?}"
             );
+        }
+    }
+
+    /// border-radius rounds the corners of a solid background.
+    #[test]
+    fn border_radius_rounds_corners() {
+        let html = br#"<html><body style="margin:0; background-color: #ffffff">
+            <div style="width: 100px; height: 100px; background-color: #ff0000; border-radius: 20px"></div>
+        </body></html>"#;
+        let doc = parse_html(html);
+        let author = parse_stylesheet("", &MediaContext::default());
+        let mut engine = LayoutEngine::new();
+        let (styles, layout) = engine.layout_document(
+            &doc.dom,
+            &[author],
+            &MediaContext::default(),
+            Viewport { width: 200.0, height: 200.0 },
+            &Default::default(),
+        );
+        let list = build_display_list(&doc.dom, &styles, &layout, &PaintInputs::default());
+        let mut painter = Painter::new();
+        let options = RenderOptions {
+            viewport_width: 200,
+            viewport_height: 200,
+            ..Default::default()
+        };
+        let frame = painter.render(&list, options, &mut engine.font_system).expect("frame");
+        let px = |x: usize, y: usize| {
+            let i = (y * frame.width as usize + x) * 4;
+            (frame.pixels[i], frame.pixels[i + 1], frame.pixels[i + 2])
+        };
+        // Center is red.
+        assert_eq!(px(50, 50), (255, 0, 0), "center should be red");
+        // The exact corner (0,0) is outside the 20px arc: white.
+        assert_eq!(px(2, 2), (255, 255, 255), "corner should be clipped white, got {:?}", px(2, 2));
+        // Midpoint on the top edge between the arcs is red.
+        assert_eq!(px(50, 2), (255, 0, 0), "top edge midpoint red");
+    }
+
+    /// linear-gradient paints a smooth color ramp.
+    #[test]
+    fn linear_gradient_paints_ramp() {
+        let html = br#"<html><body style="margin:0">
+            <div style="width: 200px; height: 100px; background: linear-gradient(to right, #000000, #ffffff)"></div>
+        </body></html>"#;
+        let doc = parse_html(html);
+        let author = parse_stylesheet("", &MediaContext::default());
+        let mut engine = LayoutEngine::new();
+        let (styles, layout) = engine.layout_document(
+            &doc.dom,
+            &[author],
+            &MediaContext::default(),
+            Viewport { width: 300.0, height: 200.0 },
+            &Default::default(),
+        );
+        let list = build_display_list(&doc.dom, &styles, &layout, &PaintInputs::default());
+        let mut painter = Painter::new();
+        let options = RenderOptions {
+            viewport_width: 300,
+            viewport_height: 200,
+            ..Default::default()
+        };
+        let frame = painter.render(&list, options, &mut engine.font_system).expect("frame");
+        let channel = |x: usize, y: usize| frame.pixels[(y * frame.width as usize + x) * 4];
+        let left = channel(5, 50);
+        let mid = channel(100, 50);
+        let right = channel(195, 50);
+        assert!(left < 40, "left should be near black, got {left}");
+        assert!(right > 215, "right should be near white, got {right}");
+        assert!(mid > 100 && mid < 160, "mid should be mid-gray, got {mid}");
+    }
+
+    /// box-shadow paints a blurred halo outside the border box.
+    #[test]
+    fn box_shadow_paints_halo() {
+        let html = br#"<html><body style="margin:20px; background-color: #ffffff">
+            <div style="width: 100px; height: 60px; background-color: #0000ff; box-shadow: 0 6px 12px rgba(0,0,0,0.6)"></div>
+        </body></html>"#;
+        let doc = parse_html(html);
+        let author = parse_stylesheet("", &MediaContext::default());
+        let mut engine = LayoutEngine::new();
+        let (styles, layout) = engine.layout_document(
+            &doc.dom,
+            &[author],
+            &MediaContext::default(),
+            Viewport { width: 300.0, height: 300.0 },
+            &Default::default(),
+        );
+        let list = build_display_list(&doc.dom, &styles, &layout, &PaintInputs::default());
+        let mut painter = Painter::new();
+        let options = RenderOptions {
+            viewport_width: 300,
+            viewport_height: 300,
+            ..Default::default()
+        };
+        let frame = painter.render(&list, options, &mut engine.font_system).expect("frame");
+        // A point 8px below the box bottom (box: y 20..80; shadow at ~88).
+        let i = (92usize * 300 + 70) * 4;
+        let (r, g, b) = (frame.pixels[i], frame.pixels[i + 1], frame.pixels[i + 2]);
+        assert!(r < 250 || g < 250, "shadow below box should darken, got ({r},{g},{b})");
+    }
+
+    /// transform: translate moves the painted box.
+    #[test]
+    fn transform_translate_moves_box() {
+        let html = br#"<html><body style="margin:0">
+            <div style="width: 60px; height: 40px; background-color: #ff0000; transform: translate(40px, 30px)"></div>
+        </body></html>"#;
+        let doc = parse_html(html);
+        let author = parse_stylesheet("", &MediaContext::default());
+        let mut engine = LayoutEngine::new();
+        let (styles, layout) = engine.layout_document(
+            &doc.dom,
+            &[author],
+            &MediaContext::default(),
+            Viewport { width: 200.0, height: 200.0 },
+            &Default::default(),
+        );
+        let list = build_display_list(&doc.dom, &styles, &layout, &PaintInputs::default());
+        let mut painter = Painter::new();
+        let options = RenderOptions {
+            viewport_width: 200,
+            viewport_height: 200,
+            ..Default::default()
+        };
+        let frame = painter.render(&list, options, &mut engine.font_system).expect("frame");
+        let px = |x: usize, y: usize| {
+            let i = (y * frame.width as usize + x) * 4;
+            (frame.pixels[i], frame.pixels[i + 1], frame.pixels[i + 2])
+        };
+        assert_eq!(px(70, 50), (255, 0, 0), "box center moved to (70,50)");
+        assert_eq!(px(10, 10), (255, 255, 255), "original position now white");
+    }
+
+    /// opacity: 0.5 blends the box against the background.
+    #[test]
+    fn opacity_half_blends() {
+        let html = br#"<html><body style="margin:0; background-color: #ffffff">
+            <div style="width: 100px; height: 100px; background-color: #000000; opacity: 0.5"></div>
+        </body></html>"#;
+        let doc = parse_html(html);
+        let author = parse_stylesheet("", &MediaContext::default());
+        let mut engine = LayoutEngine::new();
+        let (styles, layout) = engine.layout_document(
+            &doc.dom,
+            &[author],
+            &MediaContext::default(),
+            Viewport { width: 200.0, height: 200.0 },
+            &Default::default(),
+        );
+        let list = build_display_list(&doc.dom, &styles, &layout, &PaintInputs::default());
+        let mut painter = Painter::new();
+        let options = RenderOptions {
+            viewport_width: 200,
+            viewport_height: 200,
+            ..Default::default()
+        };
+        let frame = painter.render(&list, options, &mut engine.font_system).expect("frame");
+        let i = (50usize * 200 + 50) * 4;
+        let v = frame.pixels[i];
+        assert!((110.0..145.0).contains(&f32::from(v)), "half-opacity black on white should be ~127, got {v}");
+    }
+
+    /// position: fixed stays anchored under page scroll.
+    #[test]
+    fn fixed_element_ignores_page_scroll() {
+        let html = br#"<html><body style="margin:0">
+            <div style="height: 2000px"></div>
+            <div style="position: fixed; top: 0; left: 0; width: 100px; height: 40px; background-color: #ff0000; z-index: 10"></div>
+        </body></html>"#;
+        let doc = parse_html(html);
+        let author = parse_stylesheet("", &MediaContext::default());
+        let mut engine = LayoutEngine::new();
+        let (styles, layout) = engine.layout_document(
+            &doc.dom,
+            &[author],
+            &MediaContext::default(),
+            Viewport { width: 200.0, height: 400.0 },
+            &Default::default(),
+        );
+        let list = build_display_list(&doc.dom, &styles, &layout, &PaintInputs::default());
+        let mut painter = Painter::new();
+        for scroll in [0.0f32, 500.0] {
+            let options = RenderOptions {
+                viewport_width: 200,
+                viewport_height: 400,
+                scroll_y: scroll,
+                ..Default::default()
+            };
+            let frame = painter.render(&list, options, &mut engine.font_system).expect("frame");
+            let i = (20usize * 200 + 50) * 4;
+            let (r, g, b) = (frame.pixels[i], frame.pixels[i + 1], frame.pixels[i + 2]);
+            assert_eq!((r, g, b), (255, 0, 0), "fixed header visible at scroll {scroll}");
+        }
+    }
+
+    /// overflow: scroll containers translate content by the element scroll
+    /// offset (wired via PaintInputs.element_scroll).
+    #[test]
+    fn element_scroll_translates_content() {
+        let html = br#"<html><body style="margin:0; background-color: #ffffff">
+            <div style="width: 100px; height: 60px; overflow: scroll">
+                <div style="width: 80px; height: 400px; background-color: #ff0000"></div>
+            </div>
+        </body></html>"#;
+        let doc = parse_html(html);
+        let author = parse_stylesheet("", &MediaContext::default());
+        let mut engine = LayoutEngine::new();
+        let (styles, layout) = engine.layout_document(
+            &doc.dom,
+            &[author],
+            &MediaContext::default(),
+            Viewport { width: 200.0, height: 200.0 },
+            &Default::default(),
+        );
+        // Find the scrollable container node and scroll it by 100px.
+        let mut container = None;
+        for (node, style) in &styles.styles {
+            if style.overflow_y.scrollable() {
+                container = Some(*node);
+            }
+        }
+        let container = container.expect("scrollable container");
+        let scroll_map: std::collections::HashMap<_, (f32, f32)> =
+            std::collections::HashMap::from([(container, (0.0, 100.0))]);
+        let inputs = PaintInputs {
+            element_scroll: &scroll_map,
+            ..PaintInputs::default()
+        };
+        let list = build_display_list(&doc.dom, &styles, &layout, &inputs);
+        let mut painter = Painter::new();
+        let options = RenderOptions {
+            viewport_width: 200,
+            viewport_height: 200,
+            ..Default::default()
+        };
+        let frame = painter.render(&list, options, &mut engine.font_system).expect("frame");
+        let px = |x: usize, y: usize| {
+            let i = (y * frame.width as usize + x) * 4;
+            (frame.pixels[i], frame.pixels[i + 1], frame.pixels[i + 2])
+        };
+        // Content scrolled by 100: at viewport y=55 the content that was at
+        // y=155 now shows — still red (content is 400 tall). But the
+        // container clips at y=60.
+        assert_eq!(px(40, 30), (255, 0, 0), "inside container red after scroll");
+        assert_eq!(px(40, 70), (255, 255, 255), "below container clipped to white");
+    }
+
+    /// position: sticky sticks within its containing block while scrolling.
+    #[test]
+    fn sticky_header_sticks() {
+        let html = br#"<html><body style="margin:0">
+            <div style="height: 1500px">
+                <div style="position: sticky; top: 0; height: 30px; background-color: #00ff00; z-index: 5"></div>
+                <div style="height: 1400px; background-color: #dddddd"></div>
+            </div>
+        </body></html>"#;
+        let doc = parse_html(html);
+        let author = parse_stylesheet("", &MediaContext::default());
+        let mut engine = LayoutEngine::new();
+        let (styles, layout) = engine.layout_document(
+            &doc.dom,
+            &[author],
+            &MediaContext::default(),
+            Viewport { width: 200.0, height: 300.0 },
+            &Default::default(),
+        );
+        let list = build_display_list(&doc.dom, &styles, &layout, &PaintInputs::default());
+        let mut painter = Painter::new();
+        // At scroll 0 the header is at y=0 (in flow). At scroll 400 it must
+        // remain at viewport top (sticky top: 0).
+        for (scroll, expect_top) in [(0.0f32, 0.0f32), (400.0, 0.0)] {
+            let options = RenderOptions {
+                viewport_width: 200,
+                viewport_height: 300,
+                scroll_y: scroll,
+                ..Default::default()
+            };
+            let frame = painter.render(&list, options, &mut engine.font_system).expect("frame");
+            let y = (expect_top as usize + 15) * 200;
+            let i = (y + 100) * 4;
+            let (r, g, b) = (frame.pixels[i], frame.pixels[i + 1], frame.pixels[i + 2]);
+            assert_eq!((r, g, b), (0, 255, 0), "sticky header green at scroll {scroll}, got ({r},{g},{b})");
         }
     }
 }

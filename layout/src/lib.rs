@@ -424,7 +424,11 @@ fn taffy_style(cs: &ComputedStyle) -> Style {
     Style {
         display,
         position: match cs.position {
-            rowser_parsing::cascade::PositionMode::Absolute => TaffyPosition::Absolute,
+            // Fixed lays out like absolute (out-of-flow, inset-positioned);
+            // the display list anchors it against the page scroll at paint
+            // time (PushFixed).
+            rowser_parsing::cascade::PositionMode::Absolute
+            | rowser_parsing::cascade::PositionMode::Fixed => TaffyPosition::Absolute,
             _ => TaffyPosition::Relative,
         },
         // Floats (CSS 2.1 §9.5): taffy's `float_layout` block algorithm

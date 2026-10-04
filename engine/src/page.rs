@@ -83,7 +83,18 @@ pub enum Message {
     /// Viewport changed.
     SetViewport(Viewport),
     /// Scroll offset changed.
+    /// Sets the tab scroll offset (absolute, CSS px).
     SetScroll(f32),
+    /// Scroll wheel at a document-space point: routes to the innermost
+    /// scrollable element (overflow: scroll/auto) or the page.
+    Wheel {
+        /// Document-space x.
+        x: f32,
+        /// Document-space y.
+        y: f32,
+        /// Scroll delta (positive = down).
+        delta: f32,
+    },
     /// A UI event on a DOM node.
     UiEvent(u64, String),
     /// The DOM was mutated by script; re-render.
@@ -320,6 +331,14 @@ struct Page {
     layout: Option<LayoutResult>,
     display_list: Option<rowser_rendering::DisplayList>,
     images: ImageMap,
+    /// Decoded background-image layers per node (one slot per layer).
+    background_images: rowser_rendering::display_list::BackgroundImageMap,
+    /// URL → (node, layer) requests in flight for background images.
+    pending_bg: HashMap<String, Vec<(NodeId, usize)>>,
+    /// Background image URLs already requested (no re-request loops).
+    bg_requested: std::collections::HashSet<String>,
+    /// Per-element scroll offsets for overflow: scroll/auto containers.
+    element_scroll: rowser_rendering::display_list::ElementScrollMap,
     layout_engine: LayoutEngine,
     /// Parsed-stylesheet cache: (fingerprint of css_texts + media, sheets).
     /// Reparsing every stylesheet on every re-render is the dominant cost
@@ -418,6 +437,10 @@ impl Page {
             layout: None,
             display_list: None,
             images: ImageMap::new(),
+            background_images: HashMap::new(),
+            pending_bg: HashMap::new(),
+            bg_requested: std::collections::HashSet::new(),
+            element_scroll: HashMap::new(),
             css_cache: None,
             layout_engine: LayoutEngine::new(),
             painter: Painter::new(),
@@ -556,6 +579,7 @@ impl Page {
                 self.viewport_mirror.borrow_mut().0 = self.scroll_y;
                 self.repaint();
             }
+            Message::Wheel { x, y, delta } => self.wheel(x, y, delta),
             Message::UiEvent(node, event_type) => {
                 if let Some(js) = &self.js {
                     js.dispatch(JsEngineEvent::DomEvent { node, event_type });
@@ -1164,6 +1188,159 @@ impl Page {
         best.map(|(node, _, _)| node)
     }
 
+    /// Scroll-wheel routing: the innermost scrollable element under the
+    /// point consumes the delta first; unconsumed delta bubbles to outer
+    /// scrollables and finally the page.
+    fn wheel(&mut self, x: f32, y: f32, delta: f32) {
+        if delta == 0.0 {
+            return;
+        }
+        let Some(layout) = self.layout.clone() else { return };
+        let Some(styles) = self.style_map.clone() else { return };
+        let Some(dom_rc) = self.dom.clone() else { return };
+        let chain: Vec<NodeId> = {
+            let dom = dom_rc.borrow();
+            let mut chain = Vec::new();
+            let mut current = self.hit_node(x, y);
+            while let Some(node) = current {
+                chain.push(node);
+                current = dom.parent_element(node);
+            }
+            chain
+        };
+        // Try each scrollable ancestor, innermost first.
+        let mut remaining = delta;
+        let dom = dom_rc.borrow();
+        for node in &chain {
+            let Some(style) = styles.get(*node) else { continue };
+            if !(style.overflow_x.scrollable() || style.overflow_y.scrollable()) {
+                continue;
+            }
+            let Some(rect) = layout.rects.get(node) else { continue };
+            let b = &style.borders;
+            let clip_h = (rect.h - b.top.width - b.bottom.width).max(1.0);
+            // Content extent: max bottom over the subtree's rects.
+            let mut content_bottom = rect.y + rect.h;
+            for descendant in dom.descendants(*node) {
+                if let Some(dr) = layout.rects.get(&descendant) {
+                    content_bottom = content_bottom.max(dr.y + dr.h);
+                }
+            }
+            let content_h = (content_bottom - rect.y).max(clip_h);
+            let max_scroll = (content_h - clip_h).max(0.0);
+            if max_scroll <= 0.0 {
+                continue;
+            }
+            let current = self
+                .element_scroll
+                .get(node)
+                .map(|(_, sy)| *sy)
+                .unwrap_or(0.0);
+            let next = (current + remaining).clamp(0.0, max_scroll);
+            if (next - current).abs() < 0.5 {
+                continue; // at the rail's end: bubble outward
+            }
+            let consumed = next - current;
+            remaining -= consumed;
+            self.element_scroll
+                .entry(*node)
+                .or_insert((0.0, 0.0))
+                .1 = next;
+            self.repaint();
+            if remaining.abs() < 0.5 {
+                return; // fully consumed
+            }
+        }
+        // Page scroll fallback.
+        let max = self
+            .layout
+            .as_ref()
+            .map(|l| (l.content_size.1 - self.viewport.height).max(0.0))
+            .unwrap_or(0.0);
+        let next = (self.scroll_y + remaining).clamp(0.0, max);
+        if (next - self.scroll_y).abs() > 0.5 {
+            self.scroll_y = next;
+            self.viewport_mirror.borrow_mut().0 = self.scroll_y;
+            let _ = self.state.event_tx.send(EngineEvent::ScrollChanged {
+                tab: self.state.tab,
+                scroll_y: self.scroll_y,
+            });
+            self.repaint();
+        }
+    }
+
+    /// Collects background-image URLs from computed styles and requests
+    /// the not-yet-fetched ones (data: URLs decode synchronously).
+    fn collect_background_images(&mut self, styles: &StyleMap) {
+        let Some(dom_rc) = self.dom.clone() else { return };
+        let dom = dom_rc.borrow();
+        // Pass 1 (immutable): decide which (node, layer) need fetching.
+        let mut wanted: Vec<(NodeId, usize, String)> = Vec::new();
+        for (node, style) in &styles.styles {
+            if style.background_layers.is_empty() {
+                continue;
+            }
+            if dom.element(*node).is_none() {
+                continue;
+            }
+            let already = self.background_images.get(node);
+            for (i, layer) in style.background_layers.iter().enumerate() {
+                let rowser_parsing::cascade::BackgroundImageSpec::Url(url) = &layer.image else {
+                    continue;
+                };
+                if url.is_empty() {
+                    continue;
+                }
+                if already.is_some_and(|layers| {
+                    layers.get(i).is_some_and(|img| img.is_some())
+                }) {
+                    continue;
+                }
+                if self.bg_requested.contains(url) {
+                    continue;
+                }
+                wanted.push((*node, i, url.clone()));
+            }
+        }
+        if wanted.is_empty() {
+            return;
+        }
+        // Pass 2 (mutable): request / decode.
+        let mut requests: Vec<(String, SubresourceKind)> = Vec::new();
+        let mut data_decodes: Vec<(NodeId, usize, String)> = Vec::new();
+        for (node, i, url) in wanted {
+            self.bg_requested.insert(url.clone());
+            if url.starts_with("data:") {
+                data_decodes.push((node, i, url));
+                continue;
+            }
+            let resolved = self.resolve_url(&url);
+            self.pending_bg
+                .entry(resolved.clone())
+                .or_default()
+                .push((node, i));
+            requests.push((resolved, SubresourceKind::Image));
+        }
+        for (node, i, url) in data_decodes {
+            if let Some(image) = DecodedImage::decode(extract_data_payload(&url).as_bytes()) {
+                let entry = self
+                    .background_images
+                    .entry(node)
+                    .or_insert_with(Vec::new);
+                while entry.len() <= i {
+                    entry.push(None);
+                }
+                entry[i] = Some(Arc::new(image));
+            }
+        }
+        if !requests.is_empty() {
+            for (url, kind) in &requests {
+                self.pending.insert(url.clone(), *kind);
+            }
+            self.request_subresources(&requests);
+        }
+    }
+
     fn reset_page(&mut self) {
         self.css_bases.clear();
         self.fonts_done.clear();
@@ -1404,6 +1581,26 @@ impl Page {
                     if let Some(node) = owner {
                         self.images.insert(node, Arc::new(image));
                     }
+                    self.dirty = true;
+                }
+                // Background-image layer delivery: the fetch URL matches
+                // pending_bg entries recorded at style time.
+                let layer_hits = self.pending_bg.remove(&url).unwrap_or_default();
+                let mut delivered_bg = !layer_hits.is_empty();
+                for (node, layer_index) in layer_hits {
+                    if let Some(image) = DecodedImage::decode(&body) {
+                        let entry = self
+                            .background_images
+                            .entry(node)
+                            .or_insert_with(Vec::new);
+                        while entry.len() <= layer_index {
+                            entry.push(None);
+                        }
+                        entry[layer_index] = Some(Arc::new(image));
+                        delivered_bg = true;
+                    }
+                }
+                if delivered_bg {
                     self.dirty = true;
                 }
                 Some(SubresourceKind::Image)
@@ -1750,6 +1947,8 @@ impl Page {
         }
         let stage_t1 = std::time::Instant::now();
         let _ = stage_t1;
+        // Background images: request any URL layers not yet fetched.
+        self.collect_background_images(&styles);
         self.style_map = Some(styles);
         self.layout = Some(layout);
         self.rendered_dom_version = dom.borrow().version;
@@ -1957,14 +2156,14 @@ impl Page {
                 },
             );
         }
-        let list = build_display_list(
-            &dom.borrow(),
-            &styles,
-            &layout,
-            &self.images,
-            &self.video_frames,
-            &media_overlays,
-        );
+        let inputs = rowser_rendering::display_list::PaintInputs {
+            images: &self.images,
+            background_images: &self.background_images,
+            video_frames: &self.video_frames,
+            media: &media_overlays,
+            element_scroll: &self.element_scroll,
+        };
+        let list = build_display_list(&dom.borrow(), &styles, &layout, &inputs);
         if std::env::var("ROWSER_UI_TRACE").is_ok() {
             eprintln!(
                 "[page-{}] display_list took {}ms ({} cmds)",

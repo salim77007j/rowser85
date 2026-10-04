@@ -115,6 +115,11 @@ impl BrowserApi {
         self.engine.send(Command::Scroll(tab, y));
     }
 
+    /// Scroll wheel at a document-space point (routes to inner scrollables).
+    pub fn wheel(&self, tab: TabId, x: f32, y: f32, delta: f32) {
+        self.engine.send(Command::Wheel(tab, x, y, delta));
+    }
+
     /// Navigates back in the session history.
     pub fn go_back(&self, tab: TabId) {
         self.engine.send(Command::GoBack(tab));

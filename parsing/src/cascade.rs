@@ -118,6 +118,248 @@ pub enum DisplayMode {
     None,
 }
 
+// ---------------------------------------------------------------------------
+// Group B: advanced CSS value types.
+// ---------------------------------------------------------------------------
+
+/// One border corner radius: absolute px plus a percent fraction (of the
+/// smaller border-box dimension — the common pill/percent corners).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct RadiusLength {
+    /// Absolute component in px.
+    pub px: f32,
+    /// Percent component as a 0..1 fraction.
+    pub pct: f32,
+}
+
+impl RadiusLength {
+    /// Resolves the corner radius against a border box.
+    pub fn resolve(&self, w: f32, h: f32) -> f32 {
+        (self.px.max(0.0) + self.pct.max(0.0) * w.min(h.max(0.0))).max(0.0)
+    }
+
+    /// True when both components are zero.
+    pub fn is_zero(&self) -> bool {
+        self.px <= 0.0 && self.pct <= 0.0
+    }
+}
+
+/// The four `border-radius` corners (circular approximation: the horizontal
+/// and vertical radii of each corner share one resolved value).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct BorderRadius {
+    /// Top-left corner.
+    pub top_left: RadiusLength,
+    /// Top-right corner.
+    pub top_right: RadiusLength,
+    /// Bottom-right corner.
+    pub bottom_right: RadiusLength,
+    /// Bottom-left corner.
+    pub bottom_left: RadiusLength,
+}
+
+impl BorderRadius {
+    /// True when every corner is zero.
+    pub fn is_zero(&self) -> bool {
+        self.top_left.is_zero()
+            && self.top_right.is_zero()
+            && self.bottom_right.is_zero()
+            && self.bottom_left.is_zero()
+    }
+}
+
+/// One `box-shadow`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BoxShadowSpec {
+    /// Horizontal offset in px.
+    pub x: f32,
+    /// Vertical offset in px.
+    pub y: f32,
+    /// Gaussian blur radius in px.
+    pub blur: f32,
+    /// Spread (outset/inset) in px.
+    pub spread: f32,
+    /// Shadow color.
+    pub color: Rgba,
+    /// True for inset shadows.
+    pub inset: bool,
+}
+
+/// One `text-shadow`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TextShadowSpec {
+    /// Horizontal offset in px.
+    pub x: f32,
+    /// Vertical offset in px.
+    pub y: f32,
+    /// Blur radius in px.
+    pub blur: f32,
+    /// Shadow color.
+    pub color: Rgba,
+}
+
+/// One gradient color stop. `pos` is a 0..1 fraction (None = auto).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GradientStop {
+    /// Stop position as a fraction of the gradient line.
+    pub pos: Option<f32>,
+    /// Stop color.
+    pub color: Rgba,
+}
+
+/// Geometry of a gradient, resolved against the background box at paint time.
+#[derive(Debug, Clone, PartialEq)]
+pub enum GradientGeometry {
+    /// Linear gradient; CSS angle in degrees (0 = to top, 90 = to right).
+    Linear {
+        /// Angle in CSS degrees.
+        angle_deg: f32,
+    },
+    /// Radial gradient; center as fractions of the box, farthest-corner size.
+    Radial {
+        /// Center x as a fraction of box width.
+        cx: f32,
+        /// Center y as a fraction of box height.
+        cy: f32,
+    },
+}
+
+/// A fully-specified gradient background.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GradientSpec {
+    /// Geometry.
+    pub geometry: GradientGeometry,
+    /// Color stops in order.
+    pub stops: Vec<GradientStop>,
+}
+
+/// One background layer (image or gradient) with its sizing/placement.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BackgroundLayer {
+    /// The painted content.
+    pub image: BackgroundImageSpec,
+    /// background-position x/y as fractions of (box - image).
+    pub position: (f32, f32),
+    /// background-repeat behavior (simplified).
+    pub repeat: BackgroundRepeatMode,
+    /// background-size behavior.
+    pub size: BackgroundSizeMode,
+}
+
+/// Background layer content.
+#[derive(Debug, Clone, PartialEq)]
+pub enum BackgroundImageSpec {
+    /// A gradient.
+    Gradient(GradientSpec),
+    /// A raster image referenced by URL (engine resolves + fetches).
+    Url(String),
+}
+
+/// background-repeat (simplified: repeat vs no-repeat on both axes).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackgroundRepeatMode {
+    /// Tile both axes.
+    Repeat,
+    /// Draw once.
+    NoRepeat,
+}
+
+/// background-size keywords.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum BackgroundSizeMode {
+    /// Intrinsic size, intrinsic ratio.
+    Auto,
+    /// Scale to cover the box, preserving ratio.
+    Cover,
+    /// Scale to fit inside the box, preserving ratio.
+    Contain,
+    /// Explicit size in px.
+    Explicit(f32, f32),
+}
+
+/// One 2D transform operation. Percent translate resolves against the
+/// element's own border box at paint time.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TransformOp {
+    /// translate() with px and percent-of-own-box components.
+    Translate {
+        /// Absolute px offsets (x, y).
+        px: (f32, f32),
+        /// Percent-of-own-box offsets (x, y) as 0..1 fractions.
+        pct: (f32, f32),
+    },
+    /// rotate() in radians.
+    Rotate(f32),
+    /// scale().
+    Scale(f32, f32),
+    /// skew() in radians.
+    Skew(f32, f32),
+    /// matrix(a, b, c, d, e, f).
+    Matrix([f32; 6]),
+}
+
+/// One `filter` / `backdrop-filter` operation.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum FilterSpec {
+    /// Gaussian blur radius in px.
+    Blur(f32),
+    /// 0 = black, 1 = unchanged, > 1 = brighter.
+    Brightness(f32),
+    /// 0 = gray, 1 = unchanged, > 1 = more contrast.
+    Contrast(f32),
+    /// 0 = unchanged, 1 = fully grayscale.
+    Grayscale(f32),
+    /// 0 = desaturated, 1 = unchanged, > 1 = more saturated.
+    Saturate(f32),
+    /// 0 = unchanged, 1 = fully sepia.
+    Sepia(f32),
+    /// Hue rotation in degrees.
+    HueRotate(f32),
+    /// Opacity multiplier 0..1.
+    Opacity(f32),
+}
+
+/// One `transition` entry (the engine drives the interpolation).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TransitionSpec {
+    /// Property name ("all" or a single property).
+    pub property: String,
+    /// Duration in seconds.
+    pub duration: f32,
+    /// Delay in seconds.
+    pub delay: f32,
+}
+
+/// Animation playback direction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnimationDirectionMode {
+    /// 0% -> 100%.
+    Normal,
+    /// 100% -> 0%.
+    Reverse,
+    /// 0% -> 100% -> 0%.
+    Alternate,
+    /// 100% -> 0% -> 100%.
+    AlternateReverse,
+}
+
+/// One `animation` entry.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AnimationSpec {
+    /// @keyframes rule name.
+    pub name: String,
+    /// Duration in seconds.
+    pub duration: f32,
+    /// Delay in seconds.
+    pub delay: f32,
+    /// Iteration count (INFINITY = infinite).
+    pub iteration_count: f32,
+    /// Direction.
+    pub direction: AnimationDirectionMode,
+    /// Paused?
+    pub paused: bool,
+}
+
 /// The `position` property, resolved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PositionMode {
@@ -127,6 +369,11 @@ pub enum PositionMode {
     Relative,
     /// Out-of-flow, positioned against the containing block.
     Absolute,
+    /// Out-of-flow, positioned against the viewport (never scrolls).
+    Fixed,
+    /// In-flow, but offset-clamped to the scrollport while scrolling
+    /// within its containing block.
+    Sticky,
 }
 
 /// The `float` property, resolved (CSS 2.1 §9.5).
@@ -175,12 +422,21 @@ pub enum OverflowMode {
     Visible,
     /// Overflowing content is clipped to the padding box.
     Hidden,
+    /// Clipped to the padding box + a scrollable region (wheel scrolls it).
+    Scroll,
+    /// Like Scroll, but scrollbars appear only when content overflows.
+    Auto,
 }
 
 impl OverflowMode {
-    /// Hidden (covers hidden/clip/scroll/auto for clipping purposes).
+    /// Hidden/clip/scroll/auto all clip for painting purposes.
     pub fn clips(self) -> bool {
-        matches!(self, OverflowMode::Hidden)
+        !matches!(self, OverflowMode::Visible)
+    }
+
+    /// True when the element is an interactive scroll container.
+    pub fn scrollable(self) -> bool {
+        matches!(self, OverflowMode::Scroll | OverflowMode::Auto)
     }
 }
 
@@ -559,6 +815,26 @@ pub struct StyleProps {
     pub float: Option<FloatMode>,
     /// `clear` (mined from raw declarations; see css.rs).
     pub clear: Option<ClearMode>,
+    /// `border-radius`.
+    pub border_radius: Option<BorderRadius>,
+    /// `box-shadow` list.
+    pub box_shadows: Option<Vec<BoxShadowSpec>>,
+    /// `text-shadow` list.
+    pub text_shadows: Option<Vec<TextShadowSpec>>,
+    /// Background layers (gradients / images). `background-image`.
+    pub background_layers: Option<Vec<BackgroundLayer>>,
+    /// `transform` op list.
+    pub transform: Option<Vec<TransformOp>>,
+    /// `transform-origin` as fractions of the border box.
+    pub transform_origin: Option<(f32, f32)>,
+    /// `filter` op list.
+    pub filters: Option<Vec<FilterSpec>>,
+    /// `backdrop-filter` op list.
+    pub backdrop_filters: Option<Vec<FilterSpec>>,
+    /// `transition` list.
+    pub transitions: Option<Vec<TransitionSpec>>,
+    /// `animation` list.
+    pub animations: Option<Vec<AnimationSpec>>,
 }
 
 /// Fully resolved style for one element.
@@ -667,6 +943,26 @@ pub struct ComputedStyle {
     pub float: FloatMode,
     /// `clear` — not inherited.
     pub clear: ClearMode,
+    /// `border-radius`.
+    pub border_radius: BorderRadius,
+    /// `box-shadow` list (empty = none).
+    pub box_shadows: Vec<BoxShadowSpec>,
+    /// `text-shadow` list (empty = none).
+    pub text_shadows: Vec<TextShadowSpec>,
+    /// Background layers (gradients / images), first layer on top.
+    pub background_layers: Vec<BackgroundLayer>,
+    /// `transform` op list (empty = none).
+    pub transform: Vec<TransformOp>,
+    /// `transform-origin` as fractions of the border box.
+    pub transform_origin: (f32, f32),
+    /// `filter` op list (empty = none).
+    pub filters: Vec<FilterSpec>,
+    /// `backdrop-filter` op list (empty = none).
+    pub backdrop_filters: Vec<FilterSpec>,
+    /// `transition` list (empty = none).
+    pub transitions: Vec<TransitionSpec>,
+    /// `animation` list (empty = none).
+    pub animations: Vec<AnimationSpec>,
 }
 
 impl Default for ComputedStyle {
@@ -753,6 +1049,16 @@ impl Default for ComputedStyle {
             visibility: VisibilityMode::Visible,
             float: FloatMode::None,
             clear: ClearMode::None,
+            border_radius: BorderRadius::default(),
+            box_shadows: Vec::new(),
+            text_shadows: Vec::new(),
+            background_layers: Vec::new(),
+            transform: Vec::new(),
+            transform_origin: (0.5, 0.5),
+            filters: Vec::new(),
+            backdrop_filters: Vec::new(),
+            transitions: Vec::new(),
+            animations: Vec::new(),
         }
     }
 }
@@ -949,6 +1255,37 @@ fn apply_props(style: &mut ComputedStyle, props: &StyleProps, parent: &ComputedS
     }
     if let Some(clear) = props.clear {
         style.clear = clear;
+    }
+    // Group B paint properties — non-inherited, applied directly.
+    if let Some(radius) = props.border_radius {
+        style.border_radius = radius;
+    }
+    if let Some(shadows) = &props.box_shadows {
+        style.box_shadows = shadows.clone();
+    }
+    if let Some(shadows) = &props.text_shadows {
+        style.text_shadows = shadows.clone();
+    }
+    if let Some(layers) = &props.background_layers {
+        style.background_layers = layers.clone();
+    }
+    if let Some(ops) = &props.transform {
+        style.transform = ops.clone();
+    }
+    if let Some(origin) = props.transform_origin {
+        style.transform_origin = origin;
+    }
+    if let Some(filters) = &props.filters {
+        style.filters = filters.clone();
+    }
+    if let Some(filters) = &props.backdrop_filters {
+        style.backdrop_filters = filters.clone();
+    }
+    if let Some(transitions) = &props.transitions {
+        style.transitions = transitions.clone();
+    }
+    if let Some(animations) = &props.animations {
+        style.animations = animations.clone();
     }
     if let Some(w) = props.width {
         style.width = w;

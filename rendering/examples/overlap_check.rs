@@ -51,9 +51,7 @@ fn main() {
         &doc.dom,
         &styles,
         &layout,
-        &Default::default(),
-        &Default::default(),
-        &Default::default(),
+        &rowser_rendering::display_list::PaintInputs::default(),
     );
 
     // Collect text-run bounding boxes: (x0, y0, x1, y1, sample_text, node)
@@ -70,7 +68,7 @@ fn main() {
     // Reconstruct sample text from glyphs? We don't keep chars; use run count only.
     // Instead: dump per-run first/last glyph positions.
     for c in &list.commands {
-        if let DrawCmd::Text { run } = c {
+        if let DrawCmd::Text { run, .. } = c {
             if run.glyphs.is_empty() {
                 continue;
             }
