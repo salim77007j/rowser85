@@ -1591,8 +1591,7 @@ impl Chrome {
                     let delta = -scroll.y * 2.4 * scale.max(1.0);
                     if let Some(pos) = response.hover_pos() {
                         let doc_x = (pos.x - rect.left()) * scale;
-                        let doc_y =
-                            (pos.y - rect.top()) * scale + app.tabs[app.active].scroll_y;
+                        let doc_y = (pos.y - rect.top()) * scale + app.tabs[app.active].scroll_y;
                         if let Some(id) = app.tabs.get(app.active).map(|t| t.id) {
                             app.shell.browser().wheel(id, doc_x, doc_y, delta);
                         }

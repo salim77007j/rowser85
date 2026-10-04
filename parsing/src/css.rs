@@ -5,6 +5,7 @@
 //! `selectors` engine bound to our DOM, and its declarations are flattened
 //! into [`StyleProps`] — a copy-cheap intermediate that the cascade resolves.
 
+use cssparser::ToCss as _;
 use lightningcss::declaration::DeclarationBlock;
 use lightningcss::properties::align::{AlignContent, AlignItems, GapValue, JustifyContent};
 use lightningcss::properties::animation::{
@@ -24,7 +25,6 @@ use lightningcss::properties::position::Position;
 use lightningcss::properties::size::{MaxSize, Size};
 use lightningcss::properties::text::TextAlign as LcTextAlign;
 use lightningcss::properties::transition::Transition as LcTransition;
-use lightningcss::values::time::Time as LcTime;
 use lightningcss::properties::Property;
 use lightningcss::rules::font_face::{FontFaceProperty, FontFaceRule as FontFaceRuleDef, Source};
 use lightningcss::rules::keyframes::KeyframesRule;
@@ -32,27 +32,25 @@ use lightningcss::rules::style::StyleRule;
 use lightningcss::rules::supports::SupportsCondition;
 use lightningcss::rules::CssRule;
 use lightningcss::stylesheet::{ParserOptions, PrinterOptions, StyleSheet};
-use cssparser::ToCss as _;
 use lightningcss::traits::ToCss;
 use lightningcss::values::color::{CssColor, LABColor, RGBA};
-use lightningcss::values::gradient::{
-    Gradient as LcGradient, GradientItem, LineDirection,
-};
+use lightningcss::values::gradient::{Gradient as LcGradient, GradientItem, LineDirection};
 use lightningcss::values::image::Image as LcImage;
 use lightningcss::values::length::{
     Length as LcLength, LengthPercentage, LengthPercentageOrAuto, LengthValue,
 };
 use lightningcss::values::percentage::NumberOrPercentage;
+use lightningcss::values::time::Time as LcTime;
 use rowser_dom::{parse_selector_list, SelectorList};
 
 use crate::cascade::{
     AlignItemsMode, AnimationDirectionMode, AnimationSpec, BackgroundImageSpec, BackgroundLayer,
-    BackgroundRepeatMode, BackgroundSizeMode, BorderEdgeRaw, BorderRadius, BoxShadowSpec, ClearMode,
-    DisplayMode, FilterSpec, FlexDirectionMode, FlexWrapMode, FloatMode, FontSizeRaw, FontStyleMode,
-    FontWeightRaw, GradientGeometry, GradientSpec, GradientStop, GridLineRaw, GridPlacementRaw,
-    JustifyContentMode, Length, LengthOrAuto, LineHeightRaw, LineStyleMode, NamedAreaRaw,
-    OverflowMode, PositionMode, RadiusLength, Rgba, StyleProps, TextAlignMode, TextShadowSpec,
-    TrackBoundRaw, TrackRaw, TransformOp, TransitionSpec, VisibilityMode,
+    BackgroundRepeatMode, BackgroundSizeMode, BorderEdgeRaw, BorderRadius, BoxShadowSpec,
+    ClearMode, DisplayMode, FilterSpec, FlexDirectionMode, FlexWrapMode, FloatMode, FontSizeRaw,
+    FontStyleMode, FontWeightRaw, GradientGeometry, GradientSpec, GradientStop, GridLineRaw,
+    GridPlacementRaw, JustifyContentMode, Length, LengthOrAuto, LineHeightRaw, LineStyleMode,
+    NamedAreaRaw, OverflowMode, PositionMode, RadiusLength, Rgba, StyleProps, TextAlignMode,
+    TextShadowSpec, TrackBoundRaw, TrackRaw, TransformOp, TransitionSpec, VisibilityMode,
 };
 
 /// One style rule ready for cascade.
@@ -227,11 +225,7 @@ fn collect_rules(
 }
 
 /// Flattens one `@keyframes` rule: name + per-selector keyframes.
-fn collect_keyframes(
-    rule: &KeyframesRule<'_>,
-    out: &mut ParsedStylesheet,
-    media: &MediaContext,
-) {
+fn collect_keyframes(rule: &KeyframesRule<'_>, out: &mut ParsedStylesheet, media: &MediaContext) {
     let name = match &rule.name {
         lightningcss::rules::keyframes::KeyframesName::Ident(custom) => custom.to_string(),
         lightningcss::rules::keyframes::KeyframesName::Custom(s) => s.to_string(),
@@ -356,21 +350,9 @@ fn collect_style_rule(
         });
         *order += 1;
     };
-    emit(
-        normal,
-        None,
-        order,
-    );
-    emit(
-        before,
-        Some(crate::cascade::PseudoKind::Before),
-        order,
-    );
-    emit(
-        after,
-        Some(crate::cascade::PseudoKind::After),
-        order,
-    );
+    emit(normal, None, order);
+    emit(before, Some(crate::cascade::PseudoKind::Before), order);
+    emit(after, Some(crate::cascade::PseudoKind::After), order);
 }
 
 /// Flattens one `@font-face` rule: CSS family name + url() sources.
@@ -617,7 +599,10 @@ fn convert_length(lp: &LengthPercentage, media: &MediaContext) -> Length {
 /// Pure-absolute min()/max()/clamp() resolve exactly; percentage-bearing
 /// forms degrade to their first argument's linear form (resolved by the
 /// layout two-pass against the containing block).
-fn calc_to_length(calc: &lightningcss::values::calc::Calc<LengthPercentage>, media: &MediaContext) -> Length {
+fn calc_to_length(
+    calc: &lightningcss::values::calc::Calc<LengthPercentage>,
+    media: &MediaContext,
+) -> Length {
     let (pct, px) = calc_linear(calc, media);
     if pct == 0.0 {
         Length::Px(px)
@@ -657,7 +642,10 @@ fn calc_linear(
                 let resolved: Vec<(f32, f32)> =
                     args.iter().map(|a| calc_linear(a, media)).collect();
                 if resolved.iter().all(|(p, _)| p.abs() < 1e-6) {
-                    let px = resolved.iter().map(|(_, x)| *x).fold(f32::INFINITY, f32::min);
+                    let px = resolved
+                        .iter()
+                        .map(|(_, x)| *x)
+                        .fold(f32::INFINITY, f32::min);
                     (0.0, px)
                 } else {
                     resolved.first().copied().unwrap_or((0.0, 0.0))
@@ -667,7 +655,10 @@ fn calc_linear(
                 let resolved: Vec<(f32, f32)> =
                     args.iter().map(|a| calc_linear(a, media)).collect();
                 if resolved.iter().all(|(p, _)| p.abs() < 1e-6) {
-                    let px = resolved.iter().map(|(_, x)| *x).fold(f32::NEG_INFINITY, f32::max);
+                    let px = resolved
+                        .iter()
+                        .map(|(_, x)| *x)
+                        .fold(f32::NEG_INFINITY, f32::max);
                     (0.0, px)
                 } else {
                     resolved.first().copied().unwrap_or((0.0, 0.0))
@@ -1027,7 +1018,9 @@ fn apply_property(props: &mut StyleProps, property: &Property<'_>, media: &Media
         P::GridTemplateColumns(value) => {
             props.grid_template_columns = Some(convert_grid_tracks(value, media))
         }
-        P::GridTemplateRows(value) => props.grid_template_rows = Some(convert_grid_tracks(value, media)),
+        P::GridTemplateRows(value) => {
+            props.grid_template_rows = Some(convert_grid_tracks(value, media))
+        }
         // `grid-template` shorthand ("rows / columns") — Wikipedia's Vector
         // 2022 skin and most modern sites define their page grids this way.
         P::GridTemplate(value) => {
@@ -1036,9 +1029,7 @@ fn apply_property(props: &mut StyleProps, property: &Property<'_>, media: &Media
             props.grid_template_areas = Some(convert_grid_areas(&value.areas));
         }
         // Named grid areas ("'a b' 'c d'") + per-item `grid-area: name`.
-        P::GridTemplateAreas(value) => {
-            props.grid_template_areas = Some(convert_grid_areas(value))
-        }
+        P::GridTemplateAreas(value) => props.grid_template_areas = Some(convert_grid_areas(value)),
         P::GridArea(value) => {
             props.grid_area = area_name_from(value);
             // 4-line form of grid-area: row-start / column-start / row-end /
@@ -1126,22 +1117,22 @@ fn apply_property(props: &mut StyleProps, property: &Property<'_>, media: &Media
         }
         P::BorderTopLeftRadius(value, _) => {
             let mut r = props.border_radius.unwrap_or_default();
-            r.top_left = radius_from(&value, media);
+            r.top_left = radius_from(value, media);
             props.border_radius = Some(r);
         }
         P::BorderTopRightRadius(value, _) => {
             let mut r = props.border_radius.unwrap_or_default();
-            r.top_right = radius_from(&value, media);
+            r.top_right = radius_from(value, media);
             props.border_radius = Some(r);
         }
         P::BorderBottomRightRadius(value, _) => {
             let mut r = props.border_radius.unwrap_or_default();
-            r.bottom_right = radius_from(&value, media);
+            r.bottom_right = radius_from(value, media);
             props.border_radius = Some(r);
         }
         P::BorderBottomLeftRadius(value, _) => {
             let mut r = props.border_radius.unwrap_or_default();
-            r.bottom_left = radius_from(&value, media);
+            r.bottom_left = radius_from(value, media);
             props.border_radius = Some(r);
         }
         P::BoxShadow(list, _) => {
@@ -1965,9 +1956,7 @@ fn gradient_from(gradient: &LcGradient, media: &MediaContext) -> Option<Gradient
 /// CSS gradient line direction → angle in degrees (0 = to top, 90 = to
 /// right — the CSS angle convention).
 fn line_direction_angle(direction: &LineDirection) -> f32 {
-    use lightningcss::values::position::{
-        HorizontalPositionKeyword, VerticalPositionKeyword,
-    };
+    use lightningcss::values::position::{HorizontalPositionKeyword, VerticalPositionKeyword};
     match direction {
         LineDirection::Angle(angle) => match angle {
             lightningcss::values::angle::Angle::Deg(d) => *d,
@@ -1979,7 +1968,10 @@ fn line_direction_angle(direction: &LineDirection) -> f32 {
         LineDirection::Horizontal(HorizontalPositionKeyword::Right) => 90.0,
         LineDirection::Vertical(VerticalPositionKeyword::Top) => 0.0,
         LineDirection::Vertical(VerticalPositionKeyword::Bottom) => 180.0,
-        LineDirection::Corner { horizontal, vertical } => {
+        LineDirection::Corner {
+            horizontal,
+            vertical,
+        } => {
             let x: f32 = match horizontal {
                 HorizontalPositionKeyword::Left => -1.0,
                 HorizontalPositionKeyword::Right => 1.0,
@@ -2107,12 +2099,12 @@ fn background_layer_from(
         BackgroundSize::Contain => BackgroundSizeMode::Contain,
         BackgroundSize::Explicit { width, height } => {
             let px = |v: &LengthPercentageOrAuto| match v {
-                LengthPercentageOrAuto::LengthPercentage(
-                    LengthPercentage::Dimension(d),
-                ) => match convert_length_value(d, media) {
-                    Length::Px(n) => Some(n),
-                    _ => None,
-                },
+                LengthPercentageOrAuto::LengthPercentage(LengthPercentage::Dimension(d)) => {
+                    match convert_length_value(d, media) {
+                        Length::Px(n) => Some(n),
+                        _ => None,
+                    }
+                }
                 _ => None,
             };
             match (px(width), px(height)) {
@@ -2220,10 +2212,7 @@ fn merge_background_sizes(props: &mut StyleProps, list: &[BackgroundSize]) {
                         let px = |v: &LengthPercentageOrAuto| match v {
                             LengthPercentageOrAuto::LengthPercentage(
                                 LengthPercentage::Dimension(d),
-                            ) => match convert_length_value(
-                                d,
-                                &MediaContext::default(),
-                            ) {
+                            ) => match convert_length_value(d, &MediaContext::default()) {
                                 Length::Px(n) => Some(n),
                                 _ => None,
                             },
@@ -2265,7 +2254,9 @@ fn merge_background_repeats(
 }
 
 /// Converts a lightningcss transform list into paint ops (2D projection).
-fn convert_transform_list(list: &lightningcss::properties::transform::TransformList) -> Vec<TransformOp> {
+fn convert_transform_list(
+    list: &lightningcss::properties::transform::TransformList,
+) -> Vec<TransformOp> {
     use lightningcss::properties::transform::Transform as T;
     list.0
         .iter()
@@ -2301,10 +2292,7 @@ fn convert_transform_list(list: &lightningcss::properties::transform::TransformL
 /// LengthPercentage pair → translate op.
 fn lp_pair(x: &LengthPercentage, y: &LengthPercentage) -> TransformOp {
     let px = |lp: &LengthPercentage| match lp {
-        LengthPercentage::Dimension(d) => match convert_length_value(
-            d,
-            &MediaContext::default(),
-        ) {
+        LengthPercentage::Dimension(d) => match convert_length_value(d, &MediaContext::default()) {
             Length::Px(n) => n,
             _ => 0.0,
         },
@@ -2371,9 +2359,7 @@ fn scale_op(value: &lightningcss::properties::transform::Scale) -> TransformOp {
 }
 
 /// transform-origin → fractions of the border box.
-fn convert_transform_origin(
-    value: &lightningcss::values::position::Position,
-) -> (f32, f32) {
+fn convert_transform_origin(value: &lightningcss::values::position::Position) -> (f32, f32) {
     (
         horizontal_position_fraction(&value.x),
         vertical_position_fraction(&value.y),
@@ -2391,10 +2377,7 @@ fn convert_filters(list: &FilterList<'_>) -> Vec<FilterSpec> {
         .filter_map(|filter| match filter {
             LcFilterOp::Blur(l) => {
                 let px = match l {
-                    LcLength::Value(v) => match convert_length_value(
-                        v,
-                        &MediaContext::default(),
-                    ) {
+                    LcLength::Value(v) => match convert_length_value(v, &MediaContext::default()) {
                         Length::Px(n) => n,
                         _ => 0.0,
                     },

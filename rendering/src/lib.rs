@@ -174,12 +174,7 @@ mod tests {
             },
             &Default::default(),
         );
-        let list = build_display_list(
-            &doc.dom,
-            &styles,
-            &layout,
-            &PaintInputs::default(),
-        );
+        let list = build_display_list(&doc.dom, &styles, &layout, &PaintInputs::default());
         let mut painter = Painter::new();
         let frame = painter
             .render(&list, RenderOptions::default(), &mut engine.font_system)
@@ -226,12 +221,7 @@ mod tests {
             },
             &Default::default(),
         );
-        let list = build_display_list(
-            &doc.dom,
-            &styles,
-            &layout,
-            &PaintInputs::default(),
-        );
+        let list = build_display_list(&doc.dom, &styles, &layout, &PaintInputs::default());
         let mut painter = Painter::new();
         let options = RenderOptions {
             viewport_width: 400,
@@ -280,12 +270,7 @@ mod tests {
             },
             &Default::default(),
         );
-        let list = build_display_list(
-            &doc.dom,
-            &styles,
-            &layout,
-            &PaintInputs::default(),
-        );
+        let list = build_display_list(&doc.dom, &styles, &layout, &PaintInputs::default());
         let mut painter = Painter::new();
         let options = RenderOptions {
             viewport_width: 200,
@@ -317,7 +302,10 @@ mod tests {
             &doc.dom,
             &[author],
             &MediaContext::default(),
-            Viewport { width: 200.0, height: 200.0 },
+            Viewport {
+                width: 200.0,
+                height: 200.0,
+            },
             &Default::default(),
         );
         let list = build_display_list(&doc.dom, &styles, &layout, &PaintInputs::default());
@@ -327,7 +315,9 @@ mod tests {
             viewport_height: 200,
             ..Default::default()
         };
-        let frame = painter.render(&list, options, &mut engine.font_system).expect("frame");
+        let frame = painter
+            .render(&list, options, &mut engine.font_system)
+            .expect("frame");
         let px = |x: usize, y: usize| {
             let i = (y * frame.width as usize + x) * 4;
             (frame.pixels[i], frame.pixels[i + 1], frame.pixels[i + 2])
@@ -335,7 +325,12 @@ mod tests {
         // Center is red.
         assert_eq!(px(50, 50), (255, 0, 0), "center should be red");
         // The exact corner (0,0) is outside the 20px arc: white.
-        assert_eq!(px(2, 2), (255, 255, 255), "corner should be clipped white, got {:?}", px(2, 2));
+        assert_eq!(
+            px(2, 2),
+            (255, 255, 255),
+            "corner should be clipped white, got {:?}",
+            px(2, 2)
+        );
         // Midpoint on the top edge between the arcs is red.
         assert_eq!(px(50, 2), (255, 0, 0), "top edge midpoint red");
     }
@@ -353,7 +348,10 @@ mod tests {
             &doc.dom,
             &[author],
             &MediaContext::default(),
-            Viewport { width: 300.0, height: 200.0 },
+            Viewport {
+                width: 300.0,
+                height: 200.0,
+            },
             &Default::default(),
         );
         let list = build_display_list(&doc.dom, &styles, &layout, &PaintInputs::default());
@@ -363,7 +361,9 @@ mod tests {
             viewport_height: 200,
             ..Default::default()
         };
-        let frame = painter.render(&list, options, &mut engine.font_system).expect("frame");
+        let frame = painter
+            .render(&list, options, &mut engine.font_system)
+            .expect("frame");
         let channel = |x: usize, y: usize| frame.pixels[(y * frame.width as usize + x) * 4];
         let left = channel(5, 50);
         let mid = channel(100, 50);
@@ -386,7 +386,10 @@ mod tests {
             &doc.dom,
             &[author],
             &MediaContext::default(),
-            Viewport { width: 300.0, height: 300.0 },
+            Viewport {
+                width: 300.0,
+                height: 300.0,
+            },
             &Default::default(),
         );
         let list = build_display_list(&doc.dom, &styles, &layout, &PaintInputs::default());
@@ -396,11 +399,16 @@ mod tests {
             viewport_height: 300,
             ..Default::default()
         };
-        let frame = painter.render(&list, options, &mut engine.font_system).expect("frame");
+        let frame = painter
+            .render(&list, options, &mut engine.font_system)
+            .expect("frame");
         // A point 8px below the box bottom (box: y 20..80; shadow at ~88).
         let i = (92usize * 300 + 70) * 4;
         let (r, g, b) = (frame.pixels[i], frame.pixels[i + 1], frame.pixels[i + 2]);
-        assert!(r < 250 || g < 250, "shadow below box should darken, got ({r},{g},{b})");
+        assert!(
+            r < 250 || g < 250,
+            "shadow below box should darken, got ({r},{g},{b})"
+        );
     }
 
     /// transform: translate moves the painted box.
@@ -416,7 +424,10 @@ mod tests {
             &doc.dom,
             &[author],
             &MediaContext::default(),
-            Viewport { width: 200.0, height: 200.0 },
+            Viewport {
+                width: 200.0,
+                height: 200.0,
+            },
             &Default::default(),
         );
         let list = build_display_list(&doc.dom, &styles, &layout, &PaintInputs::default());
@@ -426,7 +437,9 @@ mod tests {
             viewport_height: 200,
             ..Default::default()
         };
-        let frame = painter.render(&list, options, &mut engine.font_system).expect("frame");
+        let frame = painter
+            .render(&list, options, &mut engine.font_system)
+            .expect("frame");
         let px = |x: usize, y: usize| {
             let i = (y * frame.width as usize + x) * 4;
             (frame.pixels[i], frame.pixels[i + 1], frame.pixels[i + 2])
@@ -448,7 +461,10 @@ mod tests {
             &doc.dom,
             &[author],
             &MediaContext::default(),
-            Viewport { width: 200.0, height: 200.0 },
+            Viewport {
+                width: 200.0,
+                height: 200.0,
+            },
             &Default::default(),
         );
         let list = build_display_list(&doc.dom, &styles, &layout, &PaintInputs::default());
@@ -458,10 +474,15 @@ mod tests {
             viewport_height: 200,
             ..Default::default()
         };
-        let frame = painter.render(&list, options, &mut engine.font_system).expect("frame");
+        let frame = painter
+            .render(&list, options, &mut engine.font_system)
+            .expect("frame");
         let i = (50usize * 200 + 50) * 4;
         let v = frame.pixels[i];
-        assert!((110.0..145.0).contains(&f32::from(v)), "half-opacity black on white should be ~127, got {v}");
+        assert!(
+            (110.0..145.0).contains(&f32::from(v)),
+            "half-opacity black on white should be ~127, got {v}"
+        );
     }
 
     /// position: fixed stays anchored under page scroll.
@@ -478,7 +499,10 @@ mod tests {
             &doc.dom,
             &[author],
             &MediaContext::default(),
-            Viewport { width: 200.0, height: 400.0 },
+            Viewport {
+                width: 200.0,
+                height: 400.0,
+            },
             &Default::default(),
         );
         let list = build_display_list(&doc.dom, &styles, &layout, &PaintInputs::default());
@@ -490,10 +514,16 @@ mod tests {
                 scroll_y: scroll,
                 ..Default::default()
             };
-            let frame = painter.render(&list, options, &mut engine.font_system).expect("frame");
+            let frame = painter
+                .render(&list, options, &mut engine.font_system)
+                .expect("frame");
             let i = (20usize * 200 + 50) * 4;
             let (r, g, b) = (frame.pixels[i], frame.pixels[i + 1], frame.pixels[i + 2]);
-            assert_eq!((r, g, b), (255, 0, 0), "fixed header visible at scroll {scroll}");
+            assert_eq!(
+                (r, g, b),
+                (255, 0, 0),
+                "fixed header visible at scroll {scroll}"
+            );
         }
     }
 
@@ -513,7 +543,10 @@ mod tests {
             &doc.dom,
             &[author],
             &MediaContext::default(),
-            Viewport { width: 200.0, height: 200.0 },
+            Viewport {
+                width: 200.0,
+                height: 200.0,
+            },
             &Default::default(),
         );
         // Find the scrollable container node and scroll it by 100px.
@@ -537,7 +570,9 @@ mod tests {
             viewport_height: 200,
             ..Default::default()
         };
-        let frame = painter.render(&list, options, &mut engine.font_system).expect("frame");
+        let frame = painter
+            .render(&list, options, &mut engine.font_system)
+            .expect("frame");
         let px = |x: usize, y: usize| {
             let i = (y * frame.width as usize + x) * 4;
             (frame.pixels[i], frame.pixels[i + 1], frame.pixels[i + 2])
@@ -546,7 +581,11 @@ mod tests {
         // y=155 now shows — still red (content is 400 tall). But the
         // container clips at y=60.
         assert_eq!(px(40, 30), (255, 0, 0), "inside container red after scroll");
-        assert_eq!(px(40, 70), (255, 255, 255), "below container clipped to white");
+        assert_eq!(
+            px(40, 70),
+            (255, 255, 255),
+            "below container clipped to white"
+        );
     }
 
     /// position: sticky sticks within its containing block while scrolling.
@@ -565,7 +604,10 @@ mod tests {
             &doc.dom,
             &[author],
             &MediaContext::default(),
-            Viewport { width: 200.0, height: 300.0 },
+            Viewport {
+                width: 200.0,
+                height: 300.0,
+            },
             &Default::default(),
         );
         let list = build_display_list(&doc.dom, &styles, &layout, &PaintInputs::default());
@@ -579,11 +621,17 @@ mod tests {
                 scroll_y: scroll,
                 ..Default::default()
             };
-            let frame = painter.render(&list, options, &mut engine.font_system).expect("frame");
+            let frame = painter
+                .render(&list, options, &mut engine.font_system)
+                .expect("frame");
             let y = (expect_top as usize + 15) * 200;
             let i = (y + 100) * 4;
             let (r, g, b) = (frame.pixels[i], frame.pixels[i + 1], frame.pixels[i + 2]);
-            assert_eq!((r, g, b), (0, 255, 0), "sticky header green at scroll {scroll}, got ({r},{g},{b})");
+            assert_eq!(
+                (r, g, b),
+                (0, 255, 0),
+                "sticky header green at scroll {scroll}, got ({r},{g},{b})"
+            );
         }
     }
 
@@ -597,16 +645,16 @@ mod tests {
             <p class="item">middle</p>
         </body></html>"#;
         let doc = parse_html(html);
-        let sheet = parse_stylesheet(
-            &doc.style_blocks().join("\n"),
-            &MediaContext::default(),
-        );
+        let sheet = parse_stylesheet(&doc.style_blocks().join("\n"), &MediaContext::default());
         let mut engine = LayoutEngine::new();
         let (styles, layout) = engine.layout_document(
             &doc.dom,
             &[sheet],
             &MediaContext::default(),
-            Viewport { width: 300.0, height: 200.0 },
+            Viewport {
+                width: 300.0,
+                height: 200.0,
+            },
             &Default::default(),
         );
         // The pseudo styles must exist and generate boxes with text runs.
@@ -620,14 +668,16 @@ mod tests {
                     .unwrap_or(false)
             })
             .expect("p node");
-        assert!(styles.pseudo_before.contains_key(&p), "::before style missing");
-        assert!(styles.pseudo_after.contains_key(&p), "::after style missing");
+        assert!(
+            styles.pseudo_before.contains_key(&p),
+            "::before style missing"
+        );
+        assert!(
+            styles.pseudo_after.contains_key(&p),
+            "::after style missing"
+        );
         // Block-display ::before generates a box + text run.
-        let (before_id, after_id) = layout
-            .pseudo_ids
-            .get(&p)
-            .copied()
-            .unwrap_or((0, 0));
+        let (before_id, after_id) = layout.pseudo_ids.get(&p).copied().unwrap_or((0, 0));
         assert_ne!(before_id, 0, "::before box not generated");
         assert!(
             layout.text.iter().any(|r| r.node == before_id),
@@ -643,7 +693,10 @@ mod tests {
             .filter(|r| r.node == p)
             .map(|r| r.glyphs.len())
             .sum();
-        assert!(owner_glyphs > 6, "inline ::after text not appended: {owner_glyphs} glyphs");
+        assert!(
+            owner_glyphs > 6,
+            "inline ::after text not appended: {owner_glyphs} glyphs"
+        );
         let list = build_display_list(&doc.dom, &styles, &layout, &PaintInputs::default());
         let mut painter = Painter::new();
         let options = RenderOptions {
@@ -651,7 +704,9 @@ mod tests {
             viewport_height: 200,
             ..Default::default()
         };
-        let frame = painter.render(&list, options, &mut engine.font_system).expect("frame");
+        let frame = painter
+            .render(&list, options, &mut engine.font_system)
+            .expect("frame");
         // Ink must exist (text drawn).
         let mut ink = 0usize;
         for px in frame.pixels.chunks_exact(4) {
@@ -672,16 +727,16 @@ mod tests {
             <div class="btn" style="width: 80px; height: 40px"></div>
         </body></html>"#;
         let doc = parse_html(html);
-        let sheet = parse_stylesheet(
-            &doc.style_blocks().join("\n"),
-            &MediaContext::default(),
-        );
+        let sheet = parse_stylesheet(&doc.style_blocks().join("\n"), &MediaContext::default());
         let mut engine = LayoutEngine::new();
         let (styles, _) = engine.layout_document(
             &doc.dom,
-            &[sheet.clone()],
+            std::slice::from_ref(&sheet),
             &MediaContext::default(),
-            Viewport { width: 200.0, height: 200.0 },
+            Viewport {
+                width: 200.0,
+                height: 200.0,
+            },
             &Default::default(),
         );
         // Find the .btn node.
@@ -696,18 +751,20 @@ mod tests {
             })
             .expect("btn node");
         let color_before = styles.get(btn).unwrap().background_color;
-        assert_eq!((color_before.r, color_before.g, color_before.b), (0, 0, 255));
+        assert_eq!(
+            (color_before.r, color_before.g, color_before.b),
+            (0, 0, 255)
+        );
         // Simulate :hover.
-        doc.dom
-            .interaction_state
-            .borrow_mut()
-            .hover
-            .push(btn);
+        doc.dom.interaction_state.borrow_mut().hover.push(btn);
         let (styles2, _) = engine.layout_document(
             &doc.dom,
             &[sheet],
             &MediaContext::default(),
-            Viewport { width: 200.0, height: 200.0 },
+            Viewport {
+                width: 200.0,
+                height: 200.0,
+            },
             &Default::default(),
         );
         let color_after = styles2.get(btn).unwrap().background_color;
@@ -727,7 +784,10 @@ mod tests {
             &doc.dom,
             &[author],
             &MediaContext::default(),
-            Viewport { width: 500.0, height: 200.0 },
+            Viewport {
+                width: 500.0,
+                height: 200.0,
+            },
             &Default::default(),
         );
         let _ = styles;
@@ -757,13 +817,27 @@ mod tests {
             <div style="width: 50vw; height: 10px; background-color: #ff0000"></div>
         </body></html>"#;
         let doc = parse_html(html);
-        let author = parse_stylesheet("", &MediaContext { width: 800.0, height: 600.0, dark_mode: false });
+        let author = parse_stylesheet(
+            "",
+            &MediaContext {
+                width: 800.0,
+                height: 600.0,
+                dark_mode: false,
+            },
+        );
         let mut engine = LayoutEngine::new();
         let (_, layout) = engine.layout_document(
             &doc.dom,
             &[author],
-            &MediaContext { width: 800.0, height: 600.0, dark_mode: false },
-            Viewport { width: 800.0, height: 600.0 },
+            &MediaContext {
+                width: 800.0,
+                height: 600.0,
+                dark_mode: false,
+            },
+            Viewport {
+                width: 800.0,
+                height: 600.0,
+            },
             &Default::default(),
         );
         let div = doc
@@ -777,6 +851,10 @@ mod tests {
             })
             .expect("div");
         let rect = layout.rects.get(&div).copied().expect("rect");
-        assert!((rect.w - 400.0).abs() < 1.0, "50vw should be 400, got {}", rect.w);
+        assert!(
+            (rect.w - 400.0).abs() < 1.0,
+            "50vw should be 400, got {}",
+            rect.w
+        );
     }
 }

@@ -575,11 +575,11 @@ impl BrowserApp {
                     refresh_frame(ctx, self, tab);
                 }
                 EngineEvent::ScrollChanged { tab, scroll_y } => {
-                if let Some(t) = self.tabs.iter_mut().find(|t| t.id == tab) {
-                    t.scroll_y = scroll_y;
+                    if let Some(t) = self.tabs.iter_mut().find(|t| t.id == tab) {
+                        t.scroll_y = scroll_y;
+                    }
                 }
-            }
-            EngineEvent::NavigationStarted { tab, url } => {
+                EngineEvent::NavigationStarted { tab, url } => {
                     if let Some(t) = self.tabs.iter_mut().find(|t| t.id == tab) {
                         t.url = url.clone();
                         t.loading = true;

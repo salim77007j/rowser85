@@ -317,7 +317,11 @@ fn interpolate_keyframes(
     let mut k0: Option<&rowser_parsing::css::KeyframeRaw> = None;
     let mut k1: Option<&rowser_parsing::css::KeyframeRaw> = None;
     let mut sorted: Vec<&rowser_parsing::css::KeyframeRaw> = frames.iter().collect();
-    sorted.sort_by(|a, b| a.offset.partial_cmp(&b.offset).unwrap_or(std::cmp::Ordering::Equal));
+    sorted.sort_by(|a, b| {
+        a.offset
+            .partial_cmp(&b.offset)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     for f in &sorted {
         if f.offset <= frac {
             k0 = Some(f);
@@ -365,16 +369,29 @@ fn interp_transform(
 ) -> rowser_parsing::cascade::TransformOp {
     use rowser_parsing::cascade::TransformOp as T;
     match (a, b) {
-        (T::Translate { px: (ax, ay), pct: (apx, apy) }, T::Translate { px: (bx, by), pct: (bpx, bpy) }) => T::Translate {
+        (
+            T::Translate {
+                px: (ax, ay),
+                pct: (apx, apy),
+            },
+            T::Translate {
+                px: (bx, by),
+                pct: (bpx, bpy),
+            },
+        ) => T::Translate {
             px: (ax + (bx - ax) * t, ay + (by - ay) * t),
             pct: (apx + (bpx - apx) * t, apy + (bpy - apy) * t),
         },
-        (T::Scale(ax, ay), T::Scale(bx, by)) => {
-            T::Scale(ax + (bx - ax) * t, ay + (by - ay) * t)
-        }
+        (T::Scale(ax, ay), T::Scale(bx, by)) => T::Scale(ax + (bx - ax) * t, ay + (by - ay) * t),
         (T::Rotate(a), T::Rotate(b)) => T::Rotate(a + (b - a) * t),
         (T::Skew(a1, a2), T::Skew(b1, b2)) => T::Skew(a1 + (b1 - a1) * t, a2 + (b2 - a2) * t),
-        _ => if t < 0.5 { *a } else { *b },
+        _ => {
+            if t < 0.5 {
+                *a
+            } else {
+                *b
+            }
+        }
     }
 }
 
@@ -1392,9 +1409,15 @@ impl Page {
         if delta == 0.0 {
             return;
         }
-        let Some(layout) = self.layout.clone() else { return };
-        let Some(styles) = self.style_map.clone() else { return };
-        let Some(dom_rc) = self.dom.clone() else { return };
+        let Some(layout) = self.layout.clone() else {
+            return;
+        };
+        let Some(styles) = self.style_map.clone() else {
+            return;
+        };
+        let Some(dom_rc) = self.dom.clone() else {
+            return;
+        };
         let chain: Vec<NodeId> = {
             let dom = dom_rc.borrow();
             let mut chain = Vec::new();
@@ -1409,11 +1432,15 @@ impl Page {
         let mut remaining = delta;
         let dom = dom_rc.borrow();
         for node in &chain {
-            let Some(style) = styles.get(*node) else { continue };
+            let Some(style) = styles.get(*node) else {
+                continue;
+            };
             if !(style.overflow_x.scrollable() || style.overflow_y.scrollable()) {
                 continue;
             }
-            let Some(rect) = layout.rects.get(node) else { continue };
+            let Some(rect) = layout.rects.get(node) else {
+                continue;
+            };
             let b = &style.borders;
             let clip_h = (rect.h - b.top.width - b.bottom.width).max(1.0);
             // Content extent: max bottom over the subtree's rects.
@@ -1439,10 +1466,7 @@ impl Page {
             }
             let consumed = next - current;
             remaining -= consumed;
-            self.element_scroll
-                .entry(*node)
-                .or_insert((0.0, 0.0))
-                .1 = next;
+            self.element_scroll.entry(*node).or_insert((0.0, 0.0)).1 = next;
             self.repaint();
             if remaining.abs() < 0.5 {
                 return; // fully consumed
@@ -1469,7 +1493,9 @@ impl Page {
     /// Collects background-image URLs from computed styles and requests
     /// the not-yet-fetched ones (data: URLs decode synchronously).
     fn collect_background_images(&mut self, styles: &StyleMap) {
-        let Some(dom_rc) = self.dom.clone() else { return };
+        let Some(dom_rc) = self.dom.clone() else {
+            return;
+        };
         let dom = dom_rc.borrow();
         // Pass 1 (immutable): decide which (node, layer) need fetching.
         let mut wanted: Vec<(NodeId, usize, String)> = Vec::new();
@@ -1488,9 +1514,7 @@ impl Page {
                 if url.is_empty() {
                     continue;
                 }
-                if already.is_some_and(|layers| {
-                    layers.get(i).is_some_and(|img| img.is_some())
-                }) {
+                if already.is_some_and(|layers| layers.get(i).is_some_and(|img| img.is_some())) {
                     continue;
                 }
                 if self.bg_requested.contains(url) {
@@ -1520,10 +1544,7 @@ impl Page {
         }
         for (node, i, url) in data_decodes {
             if let Some(image) = DecodedImage::decode(extract_data_payload(&url).as_bytes()) {
-                let entry = self
-                    .background_images
-                    .entry(node)
-                    .or_insert_with(Vec::new);
+                let entry = self.background_images.entry(node).or_default();
                 while entry.len() <= i {
                     entry.push(None);
                 }
@@ -1786,10 +1807,7 @@ impl Page {
                 let mut delivered_bg = !layer_hits.is_empty();
                 for (node, layer_index) in layer_hits {
                     if let Some(image) = DecodedImage::decode(&body) {
-                        let entry = self
-                            .background_images
-                            .entry(node)
-                            .or_insert_with(Vec::new);
+                        let entry = self.background_images.entry(node).or_default();
                         while entry.len() <= layer_index {
                             entry.push(None);
                         }
@@ -2356,7 +2374,6 @@ impl Page {
         }
         // Transitions: diff prev vs new paint props.
         if let Some(prev) = &self.prev_styles {
-            let now = now;
             for (node, style) in &styles.styles {
                 let Some(before) = prev.styles.get(node) else {
                     continue;
@@ -2364,7 +2381,9 @@ impl Page {
                 let relevant: Vec<&rowser_parsing::cascade::TransitionSpec> = style
                     .transitions
                     .iter()
-                    .filter(|t| t.duration > 0.0 && (t.property == "all" || t.property == "opacity"))
+                    .filter(|t| {
+                        t.duration > 0.0 && (t.property == "all" || t.property == "opacity")
+                    })
                     .collect();
                 if relevant.is_empty() {
                     continue;
@@ -2375,9 +2394,8 @@ impl Page {
                         .map(|t| t.duration)
                         .fold(f32::INFINITY, f32::min);
                     // Replace any running transition on this property.
-                    self.transitions.retain(|t| {
-                        !(t.node == *node && t.prop == TransitionProp::Opacity)
-                    });
+                    self.transitions
+                        .retain(|t| !(t.node == *node && t.prop == TransitionProp::Opacity));
                     self.transitions.push(TransitionEntry {
                         node: *node,
                         prop: TransitionProp::Opacity,
@@ -2405,8 +2423,7 @@ impl Page {
         }
         let now = std::time::Instant::now();
         // Animations: compute the override per node.
-        let mut overrides: HashMap<NodeId, rowser_parsing::cascade::ComputedStyle> =
-            HashMap::new();
+        let mut overrides: HashMap<NodeId, rowser_parsing::cascade::ComputedStyle> = HashMap::new();
         self.anim_active.retain(|entry| {
             let spec = &entry.spec;
             let t = now.duration_since(entry.start).as_secs_f32() - spec.delay;

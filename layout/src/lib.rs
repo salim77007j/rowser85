@@ -227,8 +227,10 @@ impl LayoutEngine {
         // taffy reports root-relative locations, so seed the walk with the
         // margin offset (mirrors CSS: the body content box is inset by its
         // margins within the html canvas).
-        let mut result = LayoutResult::default();
-        result.pseudo_ids = pseudo_alloc.ids.clone();
+        let mut result = LayoutResult {
+            pseudo_ids: pseudo_alloc.ids.clone(),
+            ..Default::default()
+        };
         let abs = (root_margin.0, root_margin.1);
         extract(
             dom,
@@ -243,13 +245,12 @@ impl LayoutEngine {
         // Pass 2 (conditional): resolve calc(<%> + <px>) lengths against the
         // ACTUAL containing-block sizes from pass 1, then re-layout. Only
         // documents that use percentage calc pay the second pass.
-        let needs_calc_pass = styles
-            .styles
-            .values()
-            .any(|cs| style_has_calc(cs));
+        let needs_calc_pass = styles.styles.values().any(style_has_calc);
         if needs_calc_pass {
             for (node, taffy) in dom_to_taffy.iter() {
-                let Some(cs) = styles.get(*node) else { continue };
+                let Some(cs) = styles.get(*node) else {
+                    continue;
+                };
                 if !style_has_calc(cs) {
                     continue;
                 }
@@ -282,7 +283,9 @@ impl LayoutEngine {
                         (pr.w - bw - pw, pr.h - bh - ph)
                     })
                     .unwrap_or((viewport.width, 0.0));
-                let Ok(style) = tree.style(*taffy) else { continue };
+                let Ok(style) = tree.style(*taffy) else {
+                    continue;
+                };
                 let mut style = (*style).clone();
                 let mut changed = false;
                 let resolve_dim = |l: &rowser_parsing::cascade::LengthOrAuto,
@@ -291,9 +294,7 @@ impl LayoutEngine {
                     match l {
                         rowser_parsing::cascade::LengthOrAuto::Length(
                             rowser_parsing::cascade::Length::Calc { pct, px },
-                        ) => Some(Dimension::length(
-                            (pct * containing + px).max(0.0),
-                        )),
+                        ) => Some(Dimension::length((pct * containing + px).max(0.0))),
                         _ => None,
                     }
                 };
@@ -306,15 +307,13 @@ impl LayoutEngine {
                     changed = true;
                 }
                 let resolve_lpa =
-                    |l: &rowser_parsing::cascade::LengthOrAuto, containing: f32| {
-                        match l {
-                            rowser_parsing::cascade::LengthOrAuto::Length(
-                                rowser_parsing::cascade::Length::Calc { pct, px },
-                            ) => Some(LengthPercentageAuto::length(
-                                (pct * containing + px).max(0.0),
-                            )),
-                            _ => None,
-                        }
+                    |l: &rowser_parsing::cascade::LengthOrAuto, containing: f32| match l {
+                        rowser_parsing::cascade::LengthOrAuto::Length(
+                            rowser_parsing::cascade::Length::Calc { pct, px },
+                        ) => Some(LengthPercentageAuto::length(
+                            (pct * containing + px).max(0.0),
+                        )),
+                        _ => None,
                     };
                 if let Some(d) = resolve_lpa(&cs.min_width, parent_content.0) {
                     style.min_size.width = d;
@@ -340,13 +339,13 @@ impl LayoutEngine {
                 tree.compute_layout_with_measure(
                     taffy_root,
                     available,
-                    |input, _node, context, _style| {
-                        measure_leaf(input, context, font_system)
-                    },
+                    |input, _node, context, _style| measure_leaf(input, context, font_system),
                 )
                 .ok();
-                let mut result2 = LayoutResult::default();
-                result2.pseudo_ids = pseudo_alloc.ids.clone();
+                let mut result2 = LayoutResult {
+                    pseudo_ids: pseudo_alloc.ids.clone(),
+                    ..Default::default()
+                };
                 extract(
                     dom,
                     &tree,
@@ -367,9 +366,7 @@ impl LayoutEngine {
 /// True when the computed style carries any percentage calc() length.
 fn style_has_calc(cs: &ComputedStyle) -> bool {
     use rowser_parsing::cascade::{Length, LengthOrAuto};
-    let any = |v: &LengthOrAuto| {
-        matches!(v, LengthOrAuto::Length(Length::Calc { .. }))
-    };
+    let any = |v: &LengthOrAuto| matches!(v, LengthOrAuto::Length(Length::Calc { .. }));
     any(&cs.width)
         || any(&cs.height)
         || any(&cs.min_width)
@@ -542,9 +539,7 @@ fn taffy_style(cs: &ComputedStyle) -> Style {
             // calc(pct + px): pass 1 uses the percent component; the
             // two-pass calc resolution replaces it with the exact px once
             // the containing block is known.
-            LengthOrAuto::Length(Length::Calc { pct, .. }) => {
-                LengthPercentageAuto::percent(pct)
-            }
+            LengthOrAuto::Length(Length::Calc { pct, .. }) => LengthPercentageAuto::percent(pct),
         }
     };
     let dim = |l: rowser_parsing::cascade::LengthOrAuto| -> Dimension {
@@ -835,7 +830,6 @@ fn length_pct(l: rowser_parsing::cascade::LengthOrAuto, font_size: f32) -> Lengt
 /// `parent_areas` carries the parent grid's named areas for
 /// `grid-area: name` placement of this node.
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 fn build_box(
     dom: &Dom,
     styles: &StyleMap,
@@ -870,10 +864,7 @@ fn build_box(
     let mut pseudo_after_box: Option<TaffyNode> = None;
     if let Some(pb) = styles.pseudo_before.get(&node) {
         if let Some(rowser_parsing::cascade::ContentSpec::Text(content)) = &pb.content {
-            let inline = matches!(
-                pb.display,
-                DisplayMode::Inline | DisplayMode::Contents
-            );
+            let inline = matches!(pb.display, DisplayMode::Inline | DisplayMode::Contents);
             if inline {
                 if !content.is_empty() {
                     let start = text.len();
@@ -887,10 +878,7 @@ fn build_box(
     }
     if let Some(pa) = styles.pseudo_after.get(&node) {
         if let Some(rowser_parsing::cascade::ContentSpec::Text(_content)) = &pa.content {
-            if !matches!(
-                pa.display,
-                DisplayMode::Inline | DisplayMode::Contents
-            ) {
+            if !matches!(pa.display, DisplayMode::Inline | DisplayMode::Contents) {
                 pseudo_after_box = build_pseudo_box(tree, node, pa, pseudo_alloc, false);
             }
             // Inline ::after text appends AFTER the children (below).
@@ -1188,7 +1176,6 @@ fn flush_text_leaf(
 /// span styles still flow through them). Block-level children FLUSH the
 /// inline text accumulated so far into its own leaf first (CSS 2.1
 /// anonymous block boxes around runs of inline content).
-#[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_arguments)]
 fn collect_children(
     dom: &Dom,

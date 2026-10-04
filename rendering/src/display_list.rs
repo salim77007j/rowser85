@@ -6,8 +6,8 @@ use std::sync::Arc;
 use rowser_dom::{Dom, NodeId};
 use rowser_layout::LayoutResult;
 use rowser_parsing::cascade::{
-    BackgroundImageSpec, BackgroundSizeMode, BorderRadius, ComputedStyle, DisplayMode, PositionMode,
-    StyleMap, TransformOp,
+    BackgroundImageSpec, BackgroundSizeMode, BorderRadius, ComputedStyle, DisplayMode,
+    PositionMode, StyleMap, TransformOp,
 };
 
 use crate::{DecodedImage, Rect};
@@ -142,8 +142,7 @@ pub struct DisplayList {
 pub type ImageMap = std::collections::HashMap<NodeId, Arc<DecodedImage>>;
 
 /// Decoded background-layer images per node (one entry per layer).
-pub type BackgroundImageMap =
-    std::collections::HashMap<NodeId, Vec<Option<Arc<DecodedImage>>>>;
+pub type BackgroundImageMap = std::collections::HashMap<NodeId, Vec<Option<Arc<DecodedImage>>>>;
 
 /// Per-element scroll offsets (overflow: scroll/auto containers).
 pub type ElementScrollMap = std::collections::HashMap<NodeId, (f32, f32)>;
@@ -425,8 +424,7 @@ fn walk(dom: &Dom, ctx: &mut WalkCtx<'_>, node: NodeId, list: &mut DisplayList) 
     // Clip chain: an overflow-clipping element confines its descendants to
     // its PADDING box (border box inset by border widths). Scrollable
     // elements also translate their content by the element scroll offset.
-    let scrollable =
-        style.overflow_x.scrollable() || style.overflow_y.scrollable();
+    let scrollable = style.overflow_x.scrollable() || style.overflow_y.scrollable();
     let clip_rect = if style.overflow_x.clips() || style.overflow_y.clips() {
         let b = &style.borders;
         Some(Rect {
@@ -439,7 +437,11 @@ fn walk(dom: &Dom, ctx: &mut WalkCtx<'_>, node: NodeId, list: &mut DisplayList) 
         None
     };
     let element_scroll = if scrollable {
-        ctx.inputs.element_scroll.get(&node).copied().unwrap_or((0.0, 0.0))
+        ctx.inputs
+            .element_scroll
+            .get(&node)
+            .copied()
+            .unwrap_or((0.0, 0.0))
     } else {
         (0.0, 0.0)
     };
@@ -530,7 +532,10 @@ fn walk(dom: &Dom, ctx: &mut WalkCtx<'_>, node: NodeId, list: &mut DisplayList) 
             let max_scroll = (content_h - clip_h).max(1.0);
             let thumb_y = clip_y + (scroll / max_scroll).clamp(0.0, 1.0) * scrollable_h;
             let track_radius = BorderRadius {
-                top_left: rowser_parsing::cascade::RadiusLength { px: track_w / 2.0, pct: 0.0 },
+                top_left: rowser_parsing::cascade::RadiusLength {
+                    px: track_w / 2.0,
+                    pct: 0.0,
+                },
                 ..BorderRadius::default()
             };
             list.commands.push(DrawCmd::Rect {
@@ -568,7 +573,9 @@ fn push_groups(list: &mut DisplayList, style: &ComputedStyle, rect: Rect) {
         });
     }
     if (0.01..0.99).contains(&style.opacity) {
-        list.commands.push(DrawCmd::PushOpacity { alpha: style.opacity });
+        list.commands.push(DrawCmd::PushOpacity {
+            alpha: style.opacity,
+        });
     }
     if !style.filters.is_empty() {
         let blur_pad = style
@@ -613,11 +620,7 @@ fn resolved_inset(
 ) -> Option<f32> {
     match inset {
         rowser_parsing::cascade::LengthOrAuto::Length(l) => {
-            let font = ctx
-                .styles
-                .get(node)
-                .map(|s| s.font_size)
-                .unwrap_or(16.0);
+            let font = ctx.styles.get(node).map(|s| s.font_size).unwrap_or(16.0);
             match l {
                 rowser_parsing::cascade::Length::Px(n) => Some(n),
                 rowser_parsing::cascade::Length::Em(n) => Some(n * font),
@@ -632,11 +635,7 @@ fn resolved_inset(
 }
 
 /// Computes the affine matrix for a transform op list against a rect.
-pub fn transform_matrix(
-    ops: &[TransformOp],
-    origin: (f32, f32),
-    rect: Rect,
-) -> [f32; 6] {
+pub fn transform_matrix(ops: &[TransformOp], origin: (f32, f32), rect: Rect) -> [f32; 6] {
     // Start at identity translated so the origin maps to (0,0).
     let ox = rect.x + origin.0 * rect.w;
     let oy = rect.y + origin.1 * rect.h;
@@ -911,9 +910,10 @@ fn background_dest_rect(
     let iw = image.width.max(1) as f32;
     let ih = image.height.max(1) as f32;
     let (w, h) = match size {
-        BackgroundSizeMode::Explicit(w, h) => {
-            (if w > 0.0 { w } else { box_rect.w }, if h > 0.0 { h } else { box_rect.w * ih / iw })
-        }
+        BackgroundSizeMode::Explicit(w, h) => (
+            if w > 0.0 { w } else { box_rect.w },
+            if h > 0.0 { h } else { box_rect.w * ih / iw },
+        ),
         BackgroundSizeMode::Cover => {
             let scale = (box_rect.w / iw).max(box_rect.h / ih);
             (iw * scale, ih * scale)

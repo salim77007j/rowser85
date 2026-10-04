@@ -403,27 +403,20 @@ impl<'a> Element for ElementRef<'a> {
     ) -> bool {
         match pc {
             PseudoClass::Hover => self.dom.is_hovered(self.node),
-            PseudoClass::Active => {
-                self.dom.interaction_state.borrow().active == Some(self.node)
-            }
-            PseudoClass::Focus => {
-                self.dom.interaction_state.borrow().focus == Some(self.node)
-            }
+            PseudoClass::Active => self.dom.interaction_state.borrow().active == Some(self.node),
+            PseudoClass::Focus => self.dom.interaction_state.borrow().focus == Some(self.node),
             PseudoClass::FocusVisible => {
                 self.dom.interaction_state.borrow().focus == Some(self.node)
             }
             PseudoClass::FocusWithin => self.dom.is_focus_within(self.node),
-            PseudoClass::Visited => {
-                self.dom
-                    .interaction_state
-                    .borrow()
-                    .visited
-                    .contains(&self.node)
-            }
+            PseudoClass::Visited => self
+                .dom
+                .interaction_state
+                .borrow()
+                .visited
+                .contains(&self.node),
             PseudoClass::Link => self.is_link(),
-            PseudoClass::Disabled => {
-                self.dom.get_attr(self.node, "disabled").is_some()
-            }
+            PseudoClass::Disabled => self.dom.get_attr(self.node, "disabled").is_some(),
             PseudoClass::Enabled => {
                 let form_control = self.has_local_name("input")
                     || self.has_local_name("button")

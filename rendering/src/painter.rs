@@ -69,10 +69,7 @@ fn apply(m: Affine, x: f32, y: f32) -> (f32, f32) {
 
 /// True when the matrix is a pure translation (rects stay axis-aligned).
 fn is_translation(m: Affine) -> bool {
-    (m[0] - 1.0).abs() < 1e-6
-        && (m[3] - 1.0).abs() < 1e-6
-        && m[1].abs() < 1e-6
-        && m[2].abs() < 1e-6
+    (m[0] - 1.0).abs() < 1e-6 && (m[3] - 1.0).abs() < 1e-6 && m[1].abs() < 1e-6 && m[2].abs() < 1e-6
 }
 
 fn to_skia_transform(m: Affine) -> Transform {
@@ -162,7 +159,13 @@ impl Painter {
         let mut state = PaintState::new(options.scroll_y);
         let viewport = (pixmap.width() as f32, pixmap.height() as f32);
         self.mask_cache = None;
-        self.paint_commands(&list.commands, &mut pixmap, &mut state, font_system, viewport);
+        self.paint_commands(
+            &list.commands,
+            &mut pixmap,
+            &mut state,
+            font_system,
+            viewport,
+        );
         self.paint_find_highlights(&mut pixmap, &options);
         self.frame_id += 1;
         Some(crate::Frame {
@@ -209,7 +212,11 @@ impl Painter {
         let mut i = 0usize;
         while i < cmds.len() {
             match &cmds[i] {
-                DrawCmd::PushClip { rect, radius, scroll } => {
+                DrawCmd::PushClip {
+                    rect,
+                    radius,
+                    scroll,
+                } => {
                     // The clip shape stays fixed; the content inside may
                     // translate by the element scroll offset.
                     let screen = transform_rect(state.transform, *rect).clipped(viewport);
@@ -218,10 +225,8 @@ impl Painter {
                         radius: *radius,
                     });
                     if scroll != &(0.0, 0.0) {
-                        state.transform = mul(
-                            [1.0, 0.0, 0.0, 1.0, -scroll.0, -scroll.1],
-                            state.transform,
-                        );
+                        state.transform =
+                            mul([1.0, 0.0, 0.0, 1.0, -scroll.0, -scroll.1], state.transform);
                     }
                 }
                 DrawCmd::PopClip => {
@@ -306,22 +311,43 @@ impl Painter {
                     i = end;
                 }
                 DrawCmd::PopFilter => {}
-                DrawCmd::Rect { rect, color, radius } => {
+                DrawCmd::Rect {
+                    rect,
+                    color,
+                    radius,
+                } => {
                     self.paint_rect(pixmap, state, *rect, *color, *radius, viewport);
                 }
                 DrawCmd::Gradient { rect, radius, spec } => {
                     self.paint_gradient(pixmap, state, *rect, *radius, spec, viewport);
                 }
-                DrawCmd::BgImage { rect, image, radius } => {
+                DrawCmd::BgImage {
+                    rect,
+                    image,
+                    radius,
+                } => {
                     self.paint_image(pixmap, state, *rect, image, *radius, viewport);
                 }
-                DrawCmd::Image { rect, image, radius } => {
+                DrawCmd::Image {
+                    rect,
+                    image,
+                    radius,
+                } => {
                     self.paint_image(pixmap, state, *rect, image, *radius, viewport);
                 }
-                DrawCmd::Border { rect, widths, colors, radius } => {
+                DrawCmd::Border {
+                    rect,
+                    widths,
+                    colors,
+                    radius,
+                } => {
                     self.paint_border(pixmap, state, *rect, *widths, *colors, *radius, viewport);
                 }
-                DrawCmd::BoxShadow { rect, radius, shadow } => {
+                DrawCmd::BoxShadow {
+                    rect,
+                    radius,
+                    shadow,
+                } => {
                     self.paint_box_shadow(pixmap, state, *rect, *radius, shadow, viewport);
                 }
                 DrawCmd::Text { run, shadows } => {
@@ -359,9 +385,11 @@ impl Painter {
             return;
         }
         let path = rounded_rect_path(rect, &radius);
-        let mut paint = Paint::default();
-        paint.anti_alias = true;
-        paint.shader = Shader::SolidColor(to_skia_color(color));
+        let paint = Paint {
+            anti_alias: true,
+            shader: Shader::SolidColor(to_skia_color(color)),
+            ..Paint::default()
+        };
         let mask = self.build_mask(state, viewport, None);
         pixmap.fill_path(
             &path,
@@ -439,9 +467,11 @@ impl Painter {
             }
         };
         let Some(shader) = shader else { return };
-        let mut paint = Paint::default();
-        paint.anti_alias = true;
-        paint.shader = shader;
+        let paint = Paint {
+            anti_alias: true,
+            shader,
+            ..Paint::default()
+        };
         let path = rounded_rect_path(rect, &radius);
         let mask = self.build_mask(state, viewport, None);
         pixmap.fill_path(
@@ -494,10 +524,7 @@ impl Painter {
         let local = Transform::from_scale(scale_x, scale_y).pre_translate(rect.x, rect.y);
         let full = to_skia_transform(mul(state.transform, matrix_of(local)));
         // Fast path: translation-only, no radius, rect clips.
-        if is_translation(state.transform)
-            && radius.is_zero()
-            && !state.has_mask_clips()
-        {
+        if is_translation(state.transform) && radius.is_zero() && !state.has_mask_clips() {
             let screen = transform_rect(state.transform, rect);
             let screen = match state.clip() {
                 Some(c) => intersect(&screen.clipped(viewport), &c),
@@ -511,8 +538,10 @@ impl Painter {
             let src_w = screen.w / scale_x.max(1e-6);
             let src_h = screen.h / scale_y.max(1e-6);
             if let Some(mut sub) = Pixmap::new(src_w as u32, src_h as u32) {
-                let crop_x = (screen.x - (rect.x + state.transform[4])).max(0.0) / scale_x.max(1e-6);
-                let crop_y = (screen.y - (rect.y + state.transform[5])).max(0.0) / scale_y.max(1e-6);
+                let crop_x =
+                    (screen.x - (rect.x + state.transform[4])).max(0.0) / scale_x.max(1e-6);
+                let crop_y =
+                    (screen.y - (rect.y + state.transform[5])).max(0.0) / scale_y.max(1e-6);
                 let inner = Transform::from_scale(scale_x, scale_y)
                     .pre_translate(-crop_x * scale_x, -crop_y * scale_y);
                 sub.draw_pixmap(0, 0, src.as_ref(), &paint, inner, None);
@@ -533,6 +562,7 @@ impl Painter {
 
     /// Border ring: uniform color → single ring path; mixed colors → ring
     /// in the first color plus straight per-edge bands (corners blended).
+    #[allow(clippy::too_many_arguments)]
     fn paint_border(
         &mut self,
         pixmap: &mut Pixmap,
@@ -560,8 +590,10 @@ impl Painter {
         }
         let uniform = colors.iter().all(|c| *c == colors[0]);
         if let Some(path) = border_ring_path(rect, widths, &radius) {
-            let mut paint = Paint::default();
-            paint.anti_alias = true;
+            let mut paint = Paint {
+                anti_alias: true,
+                ..Paint::default()
+            };
             paint.shader = Shader::SolidColor(to_skia_color(colors[0]));
             let mask = self.build_mask(state, viewport, None);
             pixmap.fill_path(
@@ -597,7 +629,10 @@ impl Painter {
                     x: rect.right() - r,
                     y: rect.y + resolved(radius.top_right, rect).min(t),
                     w: r,
-                    h: (rect.h - resolved(radius.top_right, rect).min(t) - resolved(radius.bottom_right, rect).min(b)).max(0.0),
+                    h: (rect.h
+                        - resolved(radius.top_right, rect).min(t)
+                        - resolved(radius.bottom_right, rect).min(b))
+                    .max(0.0),
                 },
                 colors[1],
             ),
@@ -615,7 +650,10 @@ impl Painter {
                     x: rect.x,
                     y: rect.y + resolved(radius.top_left, rect).min(t),
                     w: l,
-                    h: (rect.h - resolved(radius.top_left, rect).min(t) - resolved(radius.bottom_left, rect).min(b)).max(0.0),
+                    h: (rect.h
+                        - resolved(radius.top_left, rect).min(t)
+                        - resolved(radius.bottom_left, rect).min(b))
+                    .max(0.0),
                 },
                 colors[3],
             ),
@@ -625,8 +663,10 @@ impl Painter {
                 continue;
             }
             let path = rounded_rect_path(edge, &BorderRadius::default());
-            let mut paint = Paint::default();
-            paint.anti_alias = true;
+            let mut paint = Paint {
+                anti_alias: true,
+                ..Paint::default()
+            };
             paint.shader = Shader::SolidColor(to_skia_color(color));
             let mask = self.build_mask(state, viewport, None);
             pixmap.fill_path(
@@ -702,8 +742,10 @@ impl Painter {
         let Some(mut layer) = Pixmap::new(bounds.w as u32, bounds.h as u32) else {
             return;
         };
-        let mut paint = Paint::default();
-        paint.anti_alias = true;
+        let mut paint = Paint {
+            anti_alias: true,
+            ..Paint::default()
+        };
         paint.shader = Shader::SolidColor(to_skia_color(shadow.color));
         // doc → layer coords: current transform then translate -bounds.xy.
         let layer_transform = to_skia_transform(mul(
@@ -776,7 +818,7 @@ impl Painter {
                     blit_glyph(
                         pixmap,
                         glyph,
-                        &image,
+                        image,
                         (x + ox) as i32,
                         (y + oy) as i32,
                         clip,
@@ -794,7 +836,7 @@ impl Painter {
             let Some(image) = self.swash_cache.get_image(font_system, glyph.cache_key) else {
                 continue;
             };
-            blit_glyph(pixmap, glyph, &image, x as i32, y as i32, clip, None);
+            blit_glyph(pixmap, glyph, image, x as i32, y as i32, clip, None);
         }
     }
 
@@ -843,15 +885,23 @@ impl Painter {
         if let Some(extra) = extra {
             shapes.push(extra);
         }
-        let mut paint = Paint::default();
-        paint.anti_alias = !simple;
-        paint.shader = Shader::SolidColor(tiny_skia::Color::WHITE);
+        let paint = Paint {
+            anti_alias: !simple,
+            shader: Shader::SolidColor(tiny_skia::Color::WHITE),
+            ..Paint::default()
+        };
         for shape in &shapes {
             let Some(mut pix) = Pixmap::new(w, h) else {
                 continue;
             };
             let path = rounded_rect_path(shape.rect, &shape.radius);
-            pix.fill_path(&path, &paint, FillRule::Winding, Transform::identity(), None);
+            pix.fill_path(
+                &path,
+                &paint,
+                FillRule::Winding,
+                Transform::identity(),
+                None,
+            );
             let coverage = pix.take();
             // The pixmap is RGBA premultiplied — white shape → a=255 inside;
             // use the alpha channel as coverage.
@@ -966,19 +1016,25 @@ fn finish_path(pb: tiny_skia::PathBuilder) -> tiny_skia::Path {
         return path;
     }
     let mut fallback = tiny_skia::PathBuilder::new();
-    fallback.push_rect(
-        tiny_skia::Rect::from_xywh(0.0, 0.0, 1.0, 1.0).expect("unit rect"),
-    );
+    fallback.push_rect(tiny_skia::Rect::from_xywh(0.0, 0.0, 1.0, 1.0).expect("unit rect"));
     fallback.finish().expect("unit path")
 }
 
 /// Builds a rounded-rect path (quadratic corner arcs).
 fn rounded_rect_path(rect: Rect, radius: &BorderRadius) -> tiny_skia::Path {
     let mut pb = tiny_skia::PathBuilder::new();
-    let tl = resolved(radius.top_left, rect).min(rect.w / 2.0).min(rect.h / 2.0);
-    let tr = resolved(radius.top_right, rect).min(rect.w / 2.0).min(rect.h / 2.0);
-    let br = resolved(radius.bottom_right, rect).min(rect.w / 2.0).min(rect.h / 2.0);
-    let bl = resolved(radius.bottom_left, rect).min(rect.w / 2.0).min(rect.h / 2.0);
+    let tl = resolved(radius.top_left, rect)
+        .min(rect.w / 2.0)
+        .min(rect.h / 2.0);
+    let tr = resolved(radius.top_right, rect)
+        .min(rect.w / 2.0)
+        .min(rect.h / 2.0);
+    let br = resolved(radius.bottom_right, rect)
+        .min(rect.w / 2.0)
+        .min(rect.h / 2.0);
+    let bl = resolved(radius.bottom_left, rect)
+        .min(rect.w / 2.0)
+        .min(rect.h / 2.0);
     let (x0, y0) = (rect.x, rect.y);
     let (x1, y1) = (rect.right(), rect.bottom());
     if tl <= 0.0 && tr <= 0.0 && br <= 0.0 && bl <= 0.0 {
@@ -1010,7 +1066,11 @@ fn rounded_rect_path(rect: Rect, radius: &BorderRadius) -> tiny_skia::Path {
 
 /// Border ring path: outer rounded rect + inner rounded rect (EvenOdd fill
 /// produces the ring).
-fn border_ring_path(rect: Rect, widths: [f32; 4], radius: &BorderRadius) -> Option<tiny_skia::Path> {
+fn border_ring_path(
+    rect: Rect,
+    widths: [f32; 4],
+    radius: &BorderRadius,
+) -> Option<tiny_skia::Path> {
     let (t, r, b, l) = (widths[0], widths[1], widths[2], widths[3]);
     let inner = Rect {
         x: rect.x + l,
@@ -1041,7 +1101,10 @@ fn merge_paths(a: tiny_skia::Path, b: tiny_skia::Path) -> tiny_skia::Path {
     pb.finish().unwrap_or(a)
 }
 
-fn shrink_radius(radius: rowser_parsing::cascade::RadiusLength, by: f32) -> rowser_parsing::cascade::RadiusLength {
+fn shrink_radius(
+    radius: rowser_parsing::cascade::RadiusLength,
+    by: f32,
+) -> rowser_parsing::cascade::RadiusLength {
     rowser_parsing::cascade::RadiusLength {
         px: (radius.px - by).max(0.0),
         pct: radius.pct,
@@ -1057,7 +1120,10 @@ fn grown_radius(radius: BorderRadius, by: f32) -> BorderRadius {
     }
 }
 
-fn grown_one(radius: rowser_parsing::cascade::RadiusLength, by: f32) -> rowser_parsing::cascade::RadiusLength {
+fn grown_one(
+    radius: rowser_parsing::cascade::RadiusLength,
+    by: f32,
+) -> rowser_parsing::cascade::RadiusLength {
     rowser_parsing::cascade::RadiusLength {
         px: (radius.px + by).max(0.0),
         pct: radius.pct,
@@ -1103,13 +1169,10 @@ fn skia_stops(stops: &[GradientStop]) -> Vec<tiny_skia::GradientStop> {
     let mut i = 0;
     while i < positions.len() {
         if positions[i].is_none() {
-            let prev = positions[..i].iter().flatten().rev().next().copied();
+            let prev = positions[..i].iter().flatten().next_back().copied();
             let mut next = None;
-            for p in &positions[i..] {
-                if let Some(p) = p {
-                    next = Some(*p);
-                    break;
-                }
+            if let Some(p) = positions[i..].iter().flatten().next() {
+                next = Some(*p);
             }
             let (a, b) = (prev.unwrap_or(0.0), next.unwrap_or(1.0));
             let mut j = i;

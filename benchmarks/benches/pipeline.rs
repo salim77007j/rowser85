@@ -163,11 +163,11 @@ fn bench_paint(c: &mut Criterion) {
         &Default::default(),
     );
     let list = build_display_list(
-                &doc.dom,
-                &styles,
-                &layout,
-                &rowser_rendering::PaintInputs::default(),
-            );
+        &doc.dom,
+        &styles,
+        &layout,
+        &rowser_rendering::PaintInputs::default(),
+    );
     // Steady-state paint: warm painter (glyph mask caches alive, the
     // scrolling case) against a warm font system.
     let mut painter = Painter::new();
@@ -219,11 +219,11 @@ fn bench_full_pipeline(c: &mut Criterion) {
                     &Default::default(),
                 );
                 let list = build_display_list(
-                &doc.dom,
-                &styles,
-                &layout,
-                &rowser_rendering::PaintInputs::default(),
-            );
+                    &doc.dom,
+                    &styles,
+                    &layout,
+                    &rowser_rendering::PaintInputs::default(),
+                );
                 painter
                     .render(&list, RenderOptions::default(), &mut engine.font_system)
                     .expect("paint")

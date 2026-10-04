@@ -1258,7 +1258,8 @@ pub fn compute_styles(dom: &Dom, author: &[ParsedStylesheet], media: &MediaConte
                     Some(kind),
                 );
                 // content: attr(...) resolves against the owner element.
-                if let Some(crate::cascade::ContentSpec::Attr(name)) = pseudo_style.content.clone() {
+                if let Some(crate::cascade::ContentSpec::Attr(name)) = pseudo_style.content.clone()
+                {
                     let value = dom.get_attr(*node, &name).unwrap_or_default().to_owned();
                     pseudo_style.content = Some(crate::cascade::ContentSpec::Text(value));
                 }
@@ -1268,9 +1269,7 @@ pub fn compute_styles(dom: &Dom, author: &[ParsedStylesheet], media: &MediaConte
                 ) && pseudo_style.display != DisplayMode::None;
                 if generates_box {
                     match kind {
-                        PseudoKind::Before => {
-                            map.pseudo_before.insert(*node, pseudo_style)
-                        }
+                        PseudoKind::Before => map.pseudo_before.insert(*node, pseudo_style),
                         PseudoKind::After => map.pseudo_after.insert(*node, pseudo_style),
                     };
                 }
@@ -1561,11 +1560,7 @@ fn cascade_element_kind(
                     caches,
                 )
             } else {
-                rowser_dom::selector::matches_with_caches(
-                    &entry.selectors,
-                    &element_ref,
-                    caches,
-                )
+                rowser_dom::selector::matches_with_caches(&entry.selectors, &element_ref, caches)
             }
         })
         .collect();
