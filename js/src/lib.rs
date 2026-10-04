@@ -287,6 +287,15 @@ pub enum JsCommand {
         /// Absolute or page-relative URL.
         url: String,
     },
+    /// Fetch a dynamically-created image (`new Image()` + `.src`, or an
+    /// img whose src changed); the engine decodes it into the image map
+    /// and fires `load`/`error` on the element.
+    ImageFetch {
+        /// DOM handle of the img element.
+        node: u64,
+        /// Absolute URL.
+        url: String,
+    },
     /// Post a message to a worker.
     WorkerPost {
         /// Worker id.
@@ -600,7 +609,15 @@ pub struct PageBridge {
     pub observers: ObserversShared,
     /// Per-tab sessionStorage (survives navigations, dies with the tab).
     pub session: Rc<RefCell<std::collections::HashMap<String, String>>>,
+    /// Live canvas surfaces (Group D), keyed by element handle.
+    pub canvases: rowser_rendering::canvas2d::CanvasRegistryShared,
+    /// Decoded <img> images keyed by element handle (the engine keeps this
+    /// fresh after every decode; canvas drawImage and naturalWidth read it).
+    pub images: ImageMirrorShared,
 }
+
+/// Shared mirror of the engine's decoded-image map.
+pub type ImageMirrorShared = Rc<RefCell<rowser_rendering::display_list::ImageMap>>;
 
 /// Synchronous history state shared with the prelude.
 #[derive(Debug, Clone, Default)]
@@ -1416,6 +1433,9 @@ impl JsRuntime {
 
             // --- DOM ---
             dom_natives(&ctx, &globals, &bridge)?;
+
+            // --- Canvas 2D (Group D) ---
+            canvas_natives(&ctx, &globals, &bridge)?;
 
             // --- media (HTMLMediaElement + MSE) ---
             let b = Rc::clone(&bridge);
@@ -2573,6 +2593,652 @@ fn exception_detail(ctx: &rquickjs::Ctx<'_>) -> Option<String> {
     Some(out)
 }
 
+// ---------------------------------------------------------------------------
+// Canvas 2D natives (Group D)
+// ---------------------------------------------------------------------------
+
+/// Parses a JSON array arg as f32 (0.0 when absent).
+fn jf(v: &[serde_json::Value], i: usize) -> f32 {
+    v.get(i).and_then(|x| x.as_f64()).unwrap_or(0.0) as f32
+}
+
+/// Parses a JSON array arg as bool (JSON booleans; nonzero numbers count).
+fn jb(v: &[serde_json::Value], i: usize) -> bool {
+    v.get(i)
+        .map(|x| {
+            x.as_bool()
+                .unwrap_or_else(|| x.as_f64().unwrap_or(0.0) != 0.0)
+        })
+        .unwrap_or(false)
+}
+
+/// Parses a JSON array arg as String.
+fn js(v: &[serde_json::Value], i: usize) -> Option<String> {
+    v.get(i).and_then(|x| x.as_str()).map(str::to_owned)
+}
+
+/// Lookup helper: borrow the live canvas for a handle.
+fn with_canvas<T>(
+    reg: &rowser_rendering::canvas2d::CanvasRegistryShared,
+    h: u64,
+    f: impl FnOnce(&mut rowser_rendering::canvas2d::Canvas2D) -> T,
+) -> Option<T> {
+    let arc = reg.borrow().get(&(h as u32)).cloned();
+    arc.map(|c| f(&mut c.borrow_mut()))
+}
+
+/// Installs the canvas 2D binding surface. One JSON-op dispatcher keeps the
+/// native count low; the prelude wraps it in a real
+/// CanvasRenderingContext2D class.
+fn canvas_natives<'js>(
+    ctx: &rquickjs::Ctx<'js>,
+    globals: &rquickjs::Object<'js>,
+    bridge: &Rc<PageBridge>,
+) -> Result<(), rquickjs::Error> {
+    use rowser_rendering::canvas2d::{Cap, CompositeOp, Join, PatternRepeat};
+
+    // --- lifecycle ---------------------------------------------------------
+    let canvases = Rc::clone(&bridge.canvases);
+    let b2 = Rc::clone(bridge);
+    globals.set(
+        "__native_canvas_ensure",
+        Function::new(ctx.clone(), move |h: u64, w: u32, hgt: u32| -> bool {
+            let mut reg = canvases.borrow_mut();
+            let entry = reg.entry(h as u32).or_insert_with(|| {
+                Rc::new(RefCell::new(rowser_rendering::canvas2d::Canvas2D::new(
+                    300, 150,
+                )))
+            });
+            let mut canvas = entry.borrow_mut();
+            if canvas.width() != w.max(1) || canvas.height() != hgt.max(1) {
+                canvas.resize(w.max(1), hgt.max(1));
+            }
+            // A backing-store resize changes the intrinsic layout size.
+            if let Some(out) = &b2.outgoing {
+                let _ = out.send(JsCommand::MarkDirty);
+            }
+            true
+        })?,
+    )?;
+
+    let canvases = Rc::clone(&bridge.canvases);
+    globals.set(
+        "__native_canvas_size",
+        Function::new(ctx.clone(), move |h: u64| -> String {
+            with_canvas(&canvases, h, |c| format!("[{},{}]", c.width(), c.height()))
+                .unwrap_or_else(|| "null".into())
+        })?,
+    )?;
+
+    // --- the 2D op dispatcher ----------------------------------------------
+    let dirty_flag = Rc::clone(bridge);
+    let canvases = Rc::clone(&bridge.canvases);
+    let canvases_draw = Rc::clone(&bridge.canvases);
+    let images_draw = Rc::clone(&bridge.images);
+    globals.set(
+        "__native_canvas2d_call",
+        Function::new(
+            ctx.clone(),
+            move |h: u64, op: String, args: String| -> String {
+                let a: Vec<serde_json::Value> = serde_json::from_str(&args).unwrap_or_default();
+                let reg = Rc::clone(&canvases);
+                let out = with_canvas(&reg, h, |c| -> String {
+                    match op.as_str() {
+                        "save" => {
+                            c.save();
+                            "1".into()
+                        }
+                        "restore" => {
+                            c.restore();
+                            "1".into()
+                        }
+                        "beginPath" => {
+                            c.begin_path();
+                            "1".into()
+                        }
+                        "moveTo" => {
+                            c.move_to(jf(&a, 0), jf(&a, 1));
+                            "1".into()
+                        }
+                        "lineTo" => {
+                            c.line_to(jf(&a, 0), jf(&a, 1));
+                            "1".into()
+                        }
+                        "closePath" => {
+                            c.close_path();
+                            "1".into()
+                        }
+                        "quadraticCurveTo" => {
+                            c.quadratic_curve_to(jf(&a, 0), jf(&a, 1), jf(&a, 2), jf(&a, 3));
+                            "1".into()
+                        }
+                        "bezierCurveTo" => {
+                            c.bezier_curve_to(
+                                jf(&a, 0),
+                                jf(&a, 1),
+                                jf(&a, 2),
+                                jf(&a, 3),
+                                jf(&a, 4),
+                                jf(&a, 5),
+                            );
+                            "1".into()
+                        }
+                        "rect" => {
+                            c.rect(jf(&a, 0), jf(&a, 1), jf(&a, 2), jf(&a, 3));
+                            "1".into()
+                        }
+                        "arc" => {
+                            c.arc(
+                                jf(&a, 0),
+                                jf(&a, 1),
+                                jf(&a, 2),
+                                jf(&a, 3),
+                                jf(&a, 4),
+                                jb(&a, 5),
+                            );
+                            "1".into()
+                        }
+                        "ellipse" => {
+                            c.ellipse(
+                                jf(&a, 0),
+                                jf(&a, 1),
+                                jf(&a, 2),
+                                jf(&a, 3),
+                                jf(&a, 4),
+                                jf(&a, 5),
+                                jf(&a, 6),
+                                jb(&a, 7),
+                            );
+                            "1".into()
+                        }
+                        "arcTo" => {
+                            let cur = c.last_path_point();
+                            c.arc_to(jf(&a, 0), jf(&a, 1), jf(&a, 2), jf(&a, 3), jf(&a, 4), cur);
+                            "1".into()
+                        }
+                        "fill" => {
+                            c.fill(jb(&a, 0));
+                            "1".into()
+                        }
+                        "stroke" => {
+                            c.stroke();
+                            "1".into()
+                        }
+                        "clip" => {
+                            c.clip(jb(&a, 0));
+                            "1".into()
+                        }
+                        "fillRect" => {
+                            c.fill_rect(jf(&a, 0), jf(&a, 1), jf(&a, 2), jf(&a, 3));
+                            "1".into()
+                        }
+                        "strokeRect" => {
+                            c.stroke_rect(jf(&a, 0), jf(&a, 1), jf(&a, 2), jf(&a, 3));
+                            "1".into()
+                        }
+                        "clearRect" => {
+                            c.clear_rect(jf(&a, 0), jf(&a, 1), jf(&a, 2), jf(&a, 3));
+                            "1".into()
+                        }
+                        "translate" => {
+                            c.translate(jf(&a, 0), jf(&a, 1));
+                            "1".into()
+                        }
+                        "rotate" => {
+                            c.rotate(jf(&a, 0));
+                            "1".into()
+                        }
+                        "scale" => {
+                            c.scale(jf(&a, 0), jf(&a, 1));
+                            "1".into()
+                        }
+                        "setTransform" => {
+                            c.set_transform_row(
+                                jf(&a, 0),
+                                jf(&a, 1),
+                                jf(&a, 2),
+                                jf(&a, 3),
+                                jf(&a, 4),
+                                jf(&a, 5),
+                            );
+                            "1".into()
+                        }
+                        "transform" => {
+                            c.transform(
+                                jf(&a, 0),
+                                jf(&a, 1),
+                                jf(&a, 2),
+                                jf(&a, 3),
+                                jf(&a, 4),
+                                jf(&a, 5),
+                            );
+                            "1".into()
+                        }
+                        "setLineDash" => {
+                            c.set_line_dash(
+                                a.iter()
+                                    .filter_map(|x| x.as_f64().map(|v| v as f32))
+                                    .collect(),
+                            );
+                            "1".into()
+                        }
+                        "getLineDash" => "[]".into(),
+                        "fillText" => {
+                            let text = js(&a, 0).unwrap_or_default();
+                            c.fill_text(&text, jf(&a, 1), jf(&a, 2), false);
+                            "1".into()
+                        }
+                        "strokeText" => {
+                            let text = js(&a, 0).unwrap_or_default();
+                            c.fill_text(&text, jf(&a, 1), jf(&a, 2), true);
+                            "1".into()
+                        }
+                        "measureText" => {
+                            let text = js(&a, 0).unwrap_or_default();
+                            let (w, ascent, descent) = c.measure_text(&text);
+                            format!(
+                                "{{\"width\":{:.4},\"ascent\":{:.4},\"descent\":{:.4}}}",
+                                w, ascent, descent
+                            )
+                        }
+                        "isPointInPath" => {
+                            let hit = c.is_point_in_path(jf(&a, 0), jf(&a, 1), jb(&a, 2));
+                            if hit {
+                                "1".into()
+                            } else {
+                                "0".into()
+                            }
+                        }
+                        "createLinearGradient" => {
+                            let id = c.create_gradient(
+                                rowser_rendering::canvas2d::GradientDef::Linear {
+                                    x0: jf(&a, 0),
+                                    y0: jf(&a, 1),
+                                    x1: jf(&a, 2),
+                                    y1: jf(&a, 3),
+                                },
+                            );
+                            id.to_string()
+                        }
+                        "createRadialGradient" => {
+                            let id = c.create_gradient(
+                                rowser_rendering::canvas2d::GradientDef::Radial {
+                                    x0: jf(&a, 0),
+                                    y0: jf(&a, 1),
+                                    r0: jf(&a, 2),
+                                    x1: jf(&a, 3),
+                                    y1: jf(&a, 4),
+                                    r1: jf(&a, 5),
+                                },
+                            );
+                            id.to_string()
+                        }
+                        "addColorStop" => {
+                            let id = a.first().and_then(|x| x.as_u64()).unwrap_or(0) as u32;
+                            let offset = jf(&a, 1);
+                            if let Some(col_str) = js(&a, 2) {
+                                if let Some(col) = rowser_rendering::canvas2d::parse_color(&col_str)
+                                {
+                                    c.gradient_add_stop(id, offset, col);
+                                }
+                            }
+                            "1".into()
+                        }
+                        "createPattern" => {
+                            // args: [srcKind("canvas"|"image"), srcH, repeatCode]
+                            let kind_str = js(&a, 0).unwrap_or_else(|| "image".into());
+                            let src_h = a.get(1).and_then(|x| x.as_u64()).unwrap_or(0);
+                            let repeat = match a.get(2).and_then(|x| x.as_u64()).unwrap_or(0) {
+                                1 => PatternRepeat::RepeatX,
+                                2 => PatternRepeat::RepeatY,
+                                3 => PatternRepeat::NoRepeat,
+                                _ => PatternRepeat::Repeat,
+                            };
+                            let img = source_image(&canvases_draw, &images_draw, &kind_str, src_h);
+                            match img {
+                                Some(img) => c.create_pattern(&img, repeat).to_string(),
+                                None => "null".into(),
+                            }
+                        }
+                        "drawImage" => {
+                            // args: [srcKind, srcH, ...coords (2/4/8)]
+                            let kind_str = js(&a, 0).unwrap_or_else(|| "image".into());
+                            let src_h = a.get(1).and_then(|x| x.as_u64()).unwrap_or(0);
+                            let coords: Vec<f64> = a[2.min(a.len())..]
+                                .iter()
+                                .filter_map(|x| x.as_f64())
+                                .collect();
+                            let img = source_image(&canvases_draw, &images_draw, &kind_str, src_h);
+                            if let Some(img) = img {
+                                match coords.len() {
+                                    2 => c.draw_image(&img, coords[0] as f32, coords[1] as f32),
+                                    4 => c.draw_image_scaled(
+                                        &img,
+                                        coords[0] as f32,
+                                        coords[1] as f32,
+                                        coords[2] as f32,
+                                        coords[3] as f32,
+                                    ),
+                                    _ => c.draw_image_9(
+                                        &img,
+                                        coords[0] as f32,
+                                        coords[1] as f32,
+                                        coords[2] as f32,
+                                        coords[3] as f32,
+                                        coords[4] as f32,
+                                        coords[5] as f32,
+                                        coords[6] as f32,
+                                        coords[7] as f32,
+                                    ),
+                                }
+                            }
+                            "1".into()
+                        }
+                        _ => "null".into(),
+                    }
+                });
+                let result = out.unwrap_or_else(|| "null".into());
+                // Drawing changed pixels: schedule a repaint (coalesced by the
+                // page thread's dirty flag).
+                if result != "null" {
+                    if let Some(out) = &dirty_flag.outgoing {
+                        let _ = out.send(JsCommand::MarkDirty);
+                    }
+                }
+                result
+            },
+        )?,
+    )?;
+
+    // --- setters ------------------------------------------------------------
+    let canvases = Rc::clone(&bridge.canvases);
+    globals.set(
+        "__native_canvas2d_set",
+        Function::new(ctx.clone(), move |h: u64, prop: String, value: String| {
+            let v: serde_json::Value =
+                serde_json::from_str(&value).unwrap_or(serde_json::Value::Null);
+            let reg = Rc::clone(&canvases);
+            with_canvas(&reg, h, |c| match prop.as_str() {
+                "fillStyle" | "strokeStyle" => {
+                    let is_fill = prop == "fillStyle";
+                    if let Some(s) = v.as_str() {
+                        let col = rowser_rendering::canvas2d::parse_color(s)
+                            .unwrap_or(rowser_rendering::canvas2d::Color::BLACK);
+                        if is_fill {
+                            c.set_fill_color(col);
+                        } else {
+                            c.set_stroke_color(col);
+                        }
+                    } else if let Some(id) = v.get("g").and_then(|g| g.as_u64()) {
+                        if is_fill {
+                            c.set_fill_gradient(id as u32);
+                        } else {
+                            c.set_stroke_gradient(id as u32);
+                        }
+                    } else if let Some(id) = v.get("p").and_then(|p| p.as_u64()) {
+                        if is_fill {
+                            c.set_fill_pattern(id as u32);
+                        } else {
+                            c.set_stroke_pattern(id as u32);
+                        }
+                    }
+                }
+                "globalAlpha" => c.set_global_alpha(v.as_f64().unwrap_or(1.0) as f32),
+                "lineWidth" => c.set_line_width(v.as_f64().unwrap_or(1.0) as f32),
+                "lineCap" => {
+                    let cap = match v.as_str().unwrap_or("butt") {
+                        "round" => Cap::Round,
+                        "square" => Cap::Square,
+                        _ => Cap::Butt,
+                    };
+                    c.set_line_cap(cap);
+                }
+                "lineJoin" => {
+                    let join = match v.as_str().unwrap_or("miter") {
+                        "round" => Join::Round,
+                        "bevel" => Join::Bevel,
+                        _ => Join::Miter,
+                    };
+                    c.set_line_join(join);
+                }
+                "miterLimit" => c.set_miter_limit(v.as_f64().unwrap_or(10.0) as f32),
+                "lineDashOffset" => c.set_line_dash_offset(v.as_f64().unwrap_or(0.0) as f32),
+                "globalCompositeOperation" => {
+                    if let Some(op) = CompositeOp::parse(v.as_str().unwrap_or("source-over")) {
+                        c.set_composite(op);
+                    }
+                }
+                "shadowColor" => {
+                    let col = rowser_rendering::canvas2d::parse_color(
+                        v.as_str().unwrap_or("transparent"),
+                    )
+                    .unwrap_or(rowser_rendering::canvas2d::Color::TRANSPARENT);
+                    c.set_shadow_color(col);
+                }
+                "shadowBlur" => c.set_shadow_blur(v.as_f64().unwrap_or(0.0) as f32),
+                "shadowOffsetX" => {
+                    let y = c.shadow_offset_y();
+                    c.set_shadow_offset(v.as_f64().unwrap_or(0.0) as f32, y);
+                }
+                "shadowOffsetY" => {
+                    let x = c.shadow_offset_x();
+                    c.set_shadow_offset(x, v.as_f64().unwrap_or(0.0) as f32);
+                }
+                "font" => {
+                    if let Some(spec) = rowser_rendering::canvas2d::parse_font(
+                        v.as_str().unwrap_or("10px sans-serif"),
+                    ) {
+                        c.set_font(spec);
+                    }
+                }
+                "textAlign" => {
+                    let align = match v.as_str().unwrap_or("start") {
+                        "center" => rowser_rendering::canvas2d::TextAlign::Center,
+                        "right" => rowser_rendering::canvas2d::TextAlign::Right,
+                        "end" => rowser_rendering::canvas2d::TextAlign::End,
+                        _ => rowser_rendering::canvas2d::TextAlign::Start,
+                    };
+                    c.set_text_align(align);
+                }
+                "textBaseline" => {
+                    let baseline = match v.as_str().unwrap_or("alphabetic") {
+                        "top" => rowser_rendering::canvas2d::Baseline::Top,
+                        "hanging" => rowser_rendering::canvas2d::Baseline::Hanging,
+                        "middle" => rowser_rendering::canvas2d::Baseline::Middle,
+                        "ideographic" => rowser_rendering::canvas2d::Baseline::Ideographic,
+                        "bottom" => rowser_rendering::canvas2d::Baseline::Bottom,
+                        _ => rowser_rendering::canvas2d::Baseline::Alphabetic,
+                    };
+                    c.set_text_baseline(baseline);
+                }
+                "imageSmoothingEnabled" => c.set_image_smoothing(v.as_bool().unwrap_or(true)),
+                _ => {}
+            });
+        })?,
+    )?;
+
+    // --- getters -------------------------------------------------------------
+    let canvases = Rc::clone(&bridge.canvases);
+    globals.set(
+        "__native_canvas2d_get",
+        Function::new(ctx.clone(), move |h: u64, prop: String| -> String {
+            let reg = Rc::clone(&canvases);
+            with_canvas(&reg, h, |c| match prop.as_str() {
+                "globalAlpha" => format!("{}", c.global_alpha()),
+                "globalCompositeOperation" => "source-over".into(),
+                "font" => format!("{}px {}", c.font().size, c.font().family),
+                "imageSmoothingEnabled" => {
+                    if c.image_smoothing() {
+                        "true".into()
+                    } else {
+                        "false".into()
+                    }
+                }
+                _ => "null".into(),
+            })
+            .unwrap_or_else(|| "null".into())
+        })?,
+    )?;
+
+    // --- image data (ArrayBuffer fast path) -----------------------------------
+    let canvases = Rc::clone(&bridge.canvases);
+    globals.set(
+        "__native_canvas_get_image_data",
+        Function::new(
+            ctx.clone(),
+            move |h: u64,
+                  x: i32,
+                  y: i32,
+                  w: u32,
+                  hgt: u32,
+                  cx: rquickjs::Ctx<'js>|
+                  -> rquickjs::ArrayBuffer<'js> {
+                let reg = Rc::clone(&canvases);
+                let data = with_canvas(&reg, h, |c| {
+                    // Chrome semantics: the full requested rect comes back,
+                    // transparent black outside the bitmap.
+                    let cw = c.width();
+                    let ch = c.height();
+                    let mut out = vec![0u8; (w.max(1) * hgt.max(1) * 4) as usize];
+                    let iw = w.min(cw.saturating_sub(x.max(0) as u32));
+                    let ih = hgt.min(ch.saturating_sub(y.max(0) as u32));
+                    if iw > 0 && ih > 0 {
+                        if let Some((src, _, _)) = c.get_image_data(x, y, iw, ih) {
+                            for row in 0..ih {
+                                for col in 0..iw {
+                                    let sx = ((row * iw + col) * 4) as usize;
+                                    let dx = ((row * w + col) * 4) as usize;
+                                    if dx + 3 < out.len() && sx + 3 < src.len() {
+                                        out[dx..dx + 4].copy_from_slice(&src[sx..sx + 4]);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    out
+                })
+                .unwrap_or_default();
+                match rquickjs::ArrayBuffer::new(cx.clone(), data) {
+                    Ok(ab) => ab,
+                    Err(_) => rquickjs::ArrayBuffer::new(cx, Vec::<u8>::new())
+                        .expect("empty array buffer allocation"),
+                }
+            },
+        )?,
+    )?;
+
+    let canvases = Rc::clone(&bridge.canvases);
+    globals.set(
+        "__native_canvas_put_image_data",
+        Function::new(
+            ctx.clone(),
+            move |h: u64, dx: i32, dy: i32, w: u32, hgt: u32, buf: rquickjs::ArrayBuffer<'js>| {
+                let bytes: Vec<u8> = unsafe { buf.as_bytes() }.unwrap_or(&[]).to_vec();
+                let reg = Rc::clone(&canvases);
+                with_canvas(&reg, h, |c| c.put_image_data(&bytes, w, hgt, dx, dy));
+            },
+        )?,
+    )?;
+
+    // --- toDataURL -------------------------------------------------------------
+    let canvases = Rc::clone(&bridge.canvases);
+    globals.set(
+        "__native_canvas_to_data_url",
+        Function::new(
+            ctx.clone(),
+            move |h: u64, mime: String, quality: f64| -> String {
+                let reg = Rc::clone(&canvases);
+                with_canvas(&reg, h, |c| {
+                    let jpeg = mime.contains("jpeg") || mime.contains("jpg");
+                    let bytes = if jpeg {
+                        let q = (quality.clamp(0.0, 1.0) * 100.0).round() as u8;
+                        c.to_jpeg_bytes(q.max(1))
+                    } else {
+                        c.to_png_bytes()
+                    };
+                    match bytes {
+                        Some(b) => format!(
+                            "data:{};base64,{}",
+                            if jpeg { "image/jpeg" } else { "image/png" },
+                            b64_encode(&b)
+                        ),
+                        None => "data:,".into(),
+                    }
+                })
+                .unwrap_or_else(|| "data:,".into())
+            },
+        )?,
+    )?;
+
+    // --- dynamic image fetch (new Image() + src, drawImage source) --------------
+    let b = Rc::clone(bridge);
+    globals.set(
+        "__native_image_fetch",
+        Function::new(ctx.clone(), move |node: u64, url: String| {
+            if let Some(out) = &b.outgoing {
+                let _ = out.send(JsCommand::ImageFetch { node, url });
+            }
+        })?,
+    )?;
+
+    // --- natural size for <img> / Image() ----------------------------------------
+    let images = Rc::clone(&bridge.images);
+    globals.set(
+        "__native_image_natural",
+        Function::new(ctx.clone(), move |h: u64| -> String {
+            images
+                .borrow()
+                .get(&(h as u32))
+                .map(|img| format!("[{},{}]", img.width, img.height))
+                .unwrap_or_else(|| "null".into())
+        })?,
+    )?;
+
+    Ok(())
+}
+
+/// Resolves a drawImage/createPattern source: another canvas (registry) or
+/// a decoded image (engine mirror).
+fn source_image(
+    canvases: &rowser_rendering::canvas2d::CanvasRegistryShared,
+    images: &ImageMirrorShared,
+    kind: &str,
+    h: u64,
+) -> Option<rowser_rendering::DecodedImage> {
+    if kind == "canvas" {
+        with_canvas(canvases, h, |src| src.snapshot())
+    } else {
+        images.borrow().get(&(h as u32)).map(|img| (**img).clone())
+    }
+}
+
+/// Minimal standard base64 encoder (toDataURL payloads only).
+fn b64_encode(data: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for chunk in data.chunks(3) {
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
+        let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
+        out.push(TABLE[(n >> 18) as usize & 63] as char);
+        out.push(TABLE[(n >> 12) as usize & 63] as char);
+        out.push(if chunk.len() > 1 {
+            TABLE[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            TABLE[n as usize & 63] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2621,6 +3287,8 @@ mod tests {
                 history: Default::default(),
                 observers: Default::default(),
                 session: Default::default(),
+                canvases: rowser_rendering::canvas2d::new_registry(),
+                images: Rc::new(RefCell::new(rowser_rendering::display_list::ImageMap::new())),
             },
         )
         .unwrap();
@@ -2871,6 +3539,8 @@ mod tests {
                 history: Default::default(),
                 observers: Default::default(),
                 session: Default::default(),
+                canvases: rowser_rendering::canvas2d::new_registry(),
+                images: Rc::new(RefCell::new(rowser_rendering::display_list::ImageMap::new())),
             },
         )
         .unwrap();

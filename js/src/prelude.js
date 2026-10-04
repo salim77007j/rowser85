@@ -665,6 +665,262 @@
     });
   }
 
+  // ------------------------------------------------------------------ Canvas 2D (Group D)
+  // CanvasGradient / CanvasPattern / TextMetrics / ImageData: the object
+  // surface of the 2D context; all rasterization lives engine-side.
+  class CanvasGradient {
+    constructor(canvas, id) { this.__canvas = canvas; this.__id = id; }
+    addColorStop(offset, color) {
+      __native_canvas2d_call(this.__canvas._h, 'addColorStop',
+        JSON.stringify([this.__id, Number(offset), String(color)]));
+    }
+  }
+
+  class CanvasPattern {
+    constructor(canvas, id) { this.__canvas = canvas; this.__id = id; }
+    setTransform(t) { /* pattern transform: not yet supported */ }
+  }
+
+  class TextMetrics {
+    constructor(width, ascent, descent) {
+      this.width = width;
+      this.actualBoundingBoxAscent = ascent;
+      this.actualBoundingBoxDescent = descent;
+    }
+  }
+
+  class ImageData {
+    constructor(dataOrWidth, heightOrUndefined) {
+      if (arguments.length >= 2 && typeof dataOrWidth === 'number') {
+        // new ImageData(w, h)
+        const w = Math.max(1, Math.floor(dataOrWidth));
+        const h = Math.max(1, Math.floor(heightOrUndefined));
+        this.width = w;
+        this.height = h;
+        this.data = new Uint8ClampedArray(w * h * 4);
+      } else {
+        // new ImageData(u8clampedArray, w, h?)
+        const arr = dataOrWidth;
+        this.data = arr instanceof Uint8ClampedArray ? arr : new Uint8ClampedArray(arr || []);
+        const w = Math.floor(Number(heightOrUndefined) || 0);
+        this.width = w > 0 ? w : Math.max(1, Math.floor(Math.sqrt(this.data.length / 4)));
+        this.height = Math.max(1, Math.floor(this.data.length / 4 / this.width));
+      }
+      this.colorSpace = 'srgb';
+    }
+  }
+
+  // CanvasRenderingContext2D: a thin JS facade over the native op
+  // dispatcher; the full state machine (transforms, paths, gradients,
+  // compositing, shadows) lives in the Rust canvas2d module.
+  const STYLE_SERIALIZE = (v) => {
+    if (typeof v === 'string') return JSON.stringify(v);
+    if (v && v instanceof CanvasGradient) return JSON.stringify({ g: v.__id });
+    if (v && v instanceof CanvasPattern) return JSON.stringify({ p: v.__id });
+    return JSON.stringify(String(v));
+  };
+
+  class CanvasRenderingContext2D {
+    constructor(canvas) {
+      this.canvas = canvas;
+      this._h = canvas._h;
+    }
+    // Backing-store dims (read-only here; canvas.width/height own them).
+    get _w() { return this.canvas.width; }
+    get _h2() { return this.canvas.height; }
+
+    // -- state --
+    save() { __native_canvas2d_call(this._h, 'save', '[]'); }
+    restore() { __native_canvas2d_call(this._h, 'restore', '[]'); }
+
+    // -- paths --
+    beginPath() { this.__call('beginPath'); }
+    moveTo(x, y) { this.__call('moveTo', x, y); }
+    lineTo(x, y) { this.__call('lineTo', x, y); }
+    closePath() { this.__call('closePath'); }
+    quadraticCurveTo(cx, cy, x, y) { this.__call('quadraticCurveTo', cx, cy, x, y); }
+    bezierCurveTo(c1x, c1y, c2x, c2y, x, y) { this.__call('bezierCurveTo', c1x, c1y, c2x, c2y, x, y); }
+    rect(x, y, w, h) { this.__call('rect', x, y, w, h); }
+    arc(cx, cy, r, start, end, anticlockwise) {
+      this.__call('arc', cx, cy, Math.max(0, r), start, end, !!anticlockwise);
+    }
+    ellipse(cx, cy, rx, ry, rotation, start, end, anticlockwise) {
+      this.__call('ellipse', cx, cy, Math.max(0, rx), Math.max(0, ry), rotation, start, end, !!anticlockwise);
+    }
+    arcTo(x0, y0, x1, y1, r) { this.__call('arcTo', x0, y0, x1, y1, r); }
+
+    // -- drawing --
+    fill(fillRule) { this.__call('fill', fillRule === 'evenodd'); }
+    stroke() { this.__call('stroke'); }
+    clip(fillRule) { this.__call('clip', fillRule === 'evenodd'); }
+    isPointInPath(x, y, fillRule) { return this.__call('isPointInPath', x, y, fillRule === 'evenodd') === '1'; }
+    fillRect(x, y, w, h) { this.__call('fillRect', x, y, w, h); }
+    strokeRect(x, y, w, h) { this.__call('strokeRect', x, y, w, h); }
+    clearRect(x, y, w, h) { this.__call('clearRect', x, y, w, h); }
+
+    // -- transforms --
+    translate(x, y) { this.__call('translate', x, y); }
+    rotate(a) { this.__call('rotate', a); }
+    scale(x, y) { this.__call('scale', x, y); }
+    setTransform(a, b, c, d, e, f) {
+      if (a && typeof a === 'object' && 'a' in a) {
+        const m = a; this.__call('setTransform', m.a, m.b, m.c, m.d, m.e, m.f);
+      } else {
+        this.__call('setTransform', a, b, c, d, e, f);
+      }
+    }
+    transform(a, b, c, d, e, f) { this.__call('transform', a, b, c, d, e, f); }
+    resetTransform() { this.__call('setTransform', 1, 0, 0, 1, 0, 0); }
+    getTransform() {
+      // The Rust side keeps the CTM; expose an identity DOMMatrix stand-in.
+      return { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0, is2D: true, isIdentity: true };
+    }
+
+    // -- dashing --
+    setLineDash(dash) {
+      __native_canvas2d_call(this._h, 'setLineDash', JSON.stringify(Array.from(dash || [])));
+    }
+    getLineDash() { return []; }
+
+    // -- text (string args bypass the numeric __call marshalling) --
+    fillText(text, x, y, maxWidth) {
+      __native_canvas2d_call(this._h, 'fillText',
+        JSON.stringify([String(text), Number(x) || 0, Number(y) || 0]));
+    }
+    strokeText(text, x, y, maxWidth) {
+      __native_canvas2d_call(this._h, 'strokeText',
+        JSON.stringify([String(text), Number(x) || 0, Number(y) || 0]));
+    }
+    measureText(text) {
+      const json = __native_canvas2d_call(this._h, 'measureText', JSON.stringify([String(text)]));
+      let m = { width: 0, ascent: 0, descent: 0 };
+      try { m = JSON.parse(json) || m; } catch (e) {}
+      return new TextMetrics(m.width, m.ascent, m.descent);
+    }
+
+    // -- images --
+    drawImage(src, dx, dy, dw, dh, sx, sy, sw, sh) {
+      // Accept both (img, dx, dy[, dw, dh]) and the 9-arg form
+      // (img, sx, sy, sw, sh, dx, dy, dw, dh).
+      let coords;
+      if (arguments.length <= 5) {
+        coords = [dx, dy, dw, dh];
+      } else {
+        coords = [dx, dy, dw, dh, sx, sy, sw, sh];
+      }
+      this.__draw(src, coords);
+    }
+    __draw(src, coords) {
+      let kind = 'image', handle = 0;
+      if (src && src._h !== undefined) {
+        handle = src._h;
+        if (src instanceof HTMLCanvasElement || src._isCanvas) kind = 'canvas';
+      }
+      const args = [kind, handle].concat(coords.map((c) => Number(c) || 0));
+      __native_canvas2d_call(this._h, 'drawImage', JSON.stringify(args));
+    }
+    createPattern(image, repetition) {
+      let kind = 'image', handle = 0;
+      if (image && image._h !== undefined) {
+        handle = image._h;
+        if (image instanceof HTMLCanvasElement || image._isCanvas) kind = 'canvas';
+      }
+      const repCode = { 'repeat': 0, 'repeat-x': 1, 'repeat-y': 2, 'no-repeat': 3 }[String(repetition || 'repeat')];
+      const id = __native_canvas2d_call(this._h, 'createPattern',
+        JSON.stringify([kind, handle, repCode === undefined ? 0 : repCode]));
+      return id === 'null' ? null : new CanvasPattern(this.canvas, Number(id));
+    }
+    createImageData(w, h) {
+      if (w && w.width !== undefined) { return w; }
+      return new ImageData(Math.max(1, Math.floor(w || 1)), Math.max(1, Math.floor(h || 1)));
+    }
+    getImageData(x, y, w, h) {
+      w = Math.max(1, Math.floor(w)); h = Math.max(1, Math.floor(h));
+      const buf = __native_canvas_get_image_data(this._h, Math.floor(x), Math.floor(y), w, h);
+      return new ImageData(new Uint8ClampedArray(buf), w, h);
+    }
+    putImageData(imagedata, dx, dy, dirtyX, dirtyY, dirtyW, dirtyH) {
+      if (!imagedata || !imagedata.data) return;
+      const d = imagedata.data;
+      const buf = d.buffer instanceof ArrayBuffer ? d.buffer : new Uint8ClampedArray(d).buffer;
+      __native_canvas_put_image_data(this._h, Math.floor(dx || 0), Math.floor(dy || 0),
+        imagedata.width, imagedata.height, buf);
+    }
+
+    // -- gradients --
+    createLinearGradient(x0, y0, x1, y1) {
+      const id = __native_canvas2d_call(this._h, 'createLinearGradient',
+        JSON.stringify([Number(x0) || 0, Number(y0) || 0, Number(x1) || 0, Number(y1) || 0]));
+      return new CanvasGradient(this.canvas, Number(id));
+    }
+    createRadialGradient(x0, y0, r0, x1, y1, r1) {
+      const id = __native_canvas2d_call(this._h, 'createRadialGradient',
+        JSON.stringify([Number(x0) || 0, Number(y0) || 0, Number(r0) || 0,
+                         Number(x1) || 0, Number(y1) || 0, Number(r1) || 0]));
+      return new CanvasGradient(this.canvas, Number(id));
+    }
+    createConicGradient(startAngle, x, y) {
+      // Conic: approximated as a radial gradient (documented gap).
+      return this.createRadialGradient(x, y, 0, x, y, 1);
+    }
+
+    // -- properties (engine-side state, marshalled on write) --
+    get fillStyle() { return this._fillStyle === undefined ? '#000000' : this._fillStyle; }
+    set fillStyle(v) {
+      this._fillStyle = v;
+      __native_canvas2d_set(this._h, 'fillStyle', STYLE_SERIALIZE(v));
+    }
+    get strokeStyle() { return this._strokeStyle === undefined ? '#000000' : this._strokeStyle; }
+    set strokeStyle(v) {
+      this._strokeStyle = v;
+      __native_canvas2d_set(this._h, 'strokeStyle', STYLE_SERIALIZE(v));
+    }
+    get globalAlpha() { return parseFloat(__native_canvas2d_get(this._h, 'globalAlpha')) || 0; }
+    set globalAlpha(v) { __native_canvas2d_set(this._h, 'globalAlpha', JSON.stringify(Number(v) || 0)); }
+    get lineWidth() { return this._lineWidth === undefined ? 1 : this._lineWidth; }
+    set lineWidth(v) { this._lineWidth = Number(v) || 0; __native_canvas2d_set(this._h, 'lineWidth', JSON.stringify(this._lineWidth)); }
+    get lineCap() { return this._lineCap === undefined ? 'butt' : this._lineCap; }
+    set lineCap(v) { this._lineCap = String(v); __native_canvas2d_set(this._h, 'lineCap', JSON.stringify(this._lineCap)); }
+    get lineJoin() { return this._lineJoin === undefined ? 'miter' : this._lineJoin; }
+    set lineJoin(v) { this._lineJoin = String(v); __native_canvas2d_set(this._h, 'lineJoin', JSON.stringify(this._lineJoin)); }
+    get miterLimit() { return this._miterLimit === undefined ? 10 : this._miterLimit; }
+    set miterLimit(v) { this._miterLimit = Number(v) || 0; __native_canvas2d_set(this._h, 'miterLimit', JSON.stringify(this._miterLimit)); }
+    get lineDashOffset() { return this._lineDashOffset === undefined ? 0 : this._lineDashOffset; }
+    set lineDashOffset(v) { this._lineDashOffset = Number(v) || 0; __native_canvas2d_set(this._h, 'lineDashOffset', JSON.stringify(this._lineDashOffset)); }
+    get globalCompositeOperation() { return this._gco === undefined ? 'source-over' : this._gco; }
+    set globalCompositeOperation(v) { this._gco = String(v); __native_canvas2d_set(this._h, 'globalCompositeOperation', JSON.stringify(this._gco)); }
+    get shadowColor() { return this._shadowColor === undefined ? 'rgba(0,0,0,0)' : this._shadowColor; }
+    set shadowColor(v) { this._shadowColor = String(v); __native_canvas2d_set(this._h, 'shadowColor', JSON.stringify(this._shadowColor)); }
+    get shadowBlur() { return this._shadowBlur === undefined ? 0 : this._shadowBlur; }
+    set shadowBlur(v) { this._shadowBlur = Number(v) || 0; __native_canvas2d_set(this._h, 'shadowBlur', JSON.stringify(this._shadowBlur)); }
+    get shadowOffsetX() { return this._shadowOffsetX === undefined ? 0 : this._shadowOffsetX; }
+    set shadowOffsetX(v) { this._shadowOffsetX = Number(v) || 0; __native_canvas2d_set(this._h, 'shadowOffsetX', JSON.stringify(this._shadowOffsetX)); }
+    get shadowOffsetY() { return this._shadowOffsetY === undefined ? 0 : this._shadowOffsetY; }
+    set shadowOffsetY(v) { this._shadowOffsetY = Number(v) || 0; __native_canvas2d_set(this._h, 'shadowOffsetY', JSON.stringify(this._shadowOffsetY)); }
+    get font() { return __native_canvas2d_get(this._h, 'font') || '10px sans-serif'; }
+    set font(v) { __native_canvas2d_set(this._h, 'font', JSON.stringify(String(v))); }
+    get textAlign() { return this._textAlign === undefined ? 'start' : this._textAlign; }
+    set textAlign(v) { this._textAlign = String(v); __native_canvas2d_set(this._h, 'textAlign', JSON.stringify(this._textAlign)); }
+    get textBaseline() { return this._textBaseline === undefined ? 'alphabetic' : this._textBaseline; }
+    set textBaseline(v) { this._textBaseline = String(v); __native_canvas2d_set(this._h, 'textBaseline', JSON.stringify(this._textBaseline)); }
+    get direction() { return this._direction === undefined ? 'ltr' : this._direction; }
+    set direction(v) { this._direction = String(v); }
+    get filter() { return 'none'; }
+    set filter(v) { /* canvas filters: documented gap */ }
+    get imageSmoothingEnabled() {
+      return (__native_canvas2d_get(this._h, 'imageSmoothingEnabled') === 'true');
+    }
+    set imageSmoothingEnabled(v) { __native_canvas2d_set(this._h, 'imageSmoothingEnabled', JSON.stringify(!!v)); }
+    get imageSmoothingQuality() { return 'low'; }
+    set imageSmoothingQuality(v) {}
+
+    // Internal: one dispatcher call.
+    __call(op, ...args) {
+      return __native_canvas2d_call(this._h, op,
+        JSON.stringify(args.map((a) => (typeof a === 'boolean' ? (a ? 1 : 0) : (Number(a) || 0)))));
+    }
+  }
+
   // ------------------------------------------------------------------ DOM classes
   // `class X extends HTMLElement` is ubiquitous; without the HTML* element
   // classes every modern framework's class registration throws.
@@ -737,7 +993,53 @@
     HTMLDivElement: class HTMLDivElement extends HTMLElementBase {},
     HTMLSpanElement: class HTMLSpanElement extends HTMLElementBase {},
     HTMLAnchorElement: class HTMLAnchorElement extends HTMLElementBase {},
-    HTMLImageElement: class HTMLImageElement extends HTMLElementBase {},
+    HTMLImageElement: class HTMLImageElement extends HTMLElementBase {
+      get src() { return this.getAttribute('src') || ''; }
+      set src(v) {
+        v = String(v);
+        this.setAttribute('src', v);
+        this.__startLoad();
+      }
+      get naturalWidth() {
+        const j = __native_image_natural(this._h);
+        if (!j) return 0;
+        try { return JSON.parse(j)[0]; } catch (e) { return 0; }
+      }
+      get naturalHeight() {
+        const j = __native_image_natural(this._h);
+        if (!j) return 0;
+        try { return JSON.parse(j)[1]; } catch (e) { return 0; }
+      }
+      get width() {
+        const a = parseFloat(this.getAttribute('width'));
+        if (!isNaN(a)) return a;
+        return this.naturalWidth;
+      }
+      set width(v) { this.setAttribute('width', String(Math.floor(Number(v) || 0))); }
+      get height() {
+        const a = parseFloat(this.getAttribute('height'));
+        if (!isNaN(a)) return a;
+        return this.naturalHeight;
+      }
+      set height(v) { this.setAttribute('height', String(Math.floor(Number(v) || 0))); }
+      get complete() { return !!this._loaded; }
+      // Image loading works for connected <img> AND detached Image()
+      // objects (canvas loaders keep them unconnected): a native fetch
+      // drives both, firing load/error on the element.
+      __startLoad() {
+        if (this._loading) return;
+        const raw = this.getAttribute('src');
+        if (!raw) return;
+        this._loading = true;
+        let abs = raw;
+        if (!/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(abs) && typeof env !== 'undefined') {
+          try { abs = new URL(abs, env.location).href; } catch (e) {}
+        }
+        this.addEventListener('load', () => { this._loaded = true; this._loading = false; });
+        this.addEventListener('error', () => { this._loading = false; });
+        __native_image_fetch(this._h, abs);
+      }
+    },
     // Script elements: `src` assignment/attribute on a connected element
     // prepares the script (fetch + execute + load/error events), matching
     // the `s.src = url; head.appendChild(s)` and
@@ -780,7 +1082,53 @@
     },
     HTMLVideoElement: class HTMLVideoElement extends HTMLMediaElement {},
     HTMLAudioElement: class HTMLAudioElement extends HTMLMediaElement {},
-    HTMLCanvasElement: class HTMLCanvasElement extends HTMLElementBase {},
+    HTMLCanvasElement: class HTMLCanvasElement extends HTMLElementBase {
+      // Backing-store size (attributes per spec). Setting them resizes the
+      // bitmap (contents reset, like Chrome).
+      get width() {
+        const v = parseFloat(this.getAttribute('width'));
+        return isNaN(v) ? 300 : v;
+      }
+      set width(v) {
+        v = Math.max(0, Math.floor(Number(v) || 0));
+        this.setAttribute('width', String(v));
+        __native_canvas_ensure(this._h, v, this.height);
+      }
+      get height() {
+        const v = parseFloat(this.getAttribute('height'));
+        return isNaN(v) ? 150 : v;
+      }
+      set height(v) {
+        v = Math.max(0, Math.floor(Number(v) || 0));
+        this.setAttribute('height', String(v));
+        __native_canvas_ensure(this._h, this.width, v);
+      }
+      getContext(type, attrs) {
+        type = String(type || '').toLowerCase();
+        if (type === '' || type === '2d') {
+          if (!this._ctx2d) {
+            __native_canvas_ensure(this._h, this.width, this.height);
+            this._ctx2d = new CanvasRenderingContext2D(this);
+          }
+          return this._ctx2d;
+        }
+        if (type === 'webgl' || type === 'webgl2' || type === 'experimental-webgl'
+            || type === 'webgpu') {
+          return null; // honest: no GPU context (documented deferral)
+        }
+        return null;
+      }
+      toDataURL(type, quality) {
+        return __native_canvas_to_data_url(this._h, String(type || 'image/png'), Number(quality) || 0.92);
+      }
+      toBlob(callback, type, quality) {
+        const url = this.toDataURL(type, quality);
+        // Minimal Blob: enough for URL.createObjectURL round-trips below.
+        const blob = new Blob([url], { type: String(type || 'image/png') });
+        if (typeof callback === 'function') callback(blob);
+        return undefined;
+      }
+    },
     HTMLIFrameElement: class HTMLIFrameElement extends HTMLElementBase {},
     HTMLUnknownElement: class HTMLUnknownElement extends HTMLElementBase {},
     // The rest of the HTML element family: feature detection ("textarea"
@@ -826,6 +1174,9 @@
     SVGElement: class SVGElement extends Element {},
   };
   for (const name of Object.keys(htmlClasses)) globalThis[name] = htmlClasses[name];
+  // Mark canvas objects for drawImage source detection (the class is in
+  // scope only after the map is built).
+  Object.defineProperty(htmlClasses.HTMLCanvasElement.prototype, '_isCanvas', { value: true });
   __htmlClassesRef = htmlClasses;
   // Extra constructor globals probed by polyfills and framework feature
   // detection (documented as classes, not just instances). The WebComponents
@@ -833,6 +1184,14 @@
   // patching window[name].prototype — every one of these must exist.
   globalThis.HTMLElement = HTMLElementBase;
   globalThis.HTMLSlotElement = class HTMLSlotElement extends HTMLElementBase {};
+  // `new Image(w, h)` — the classic canvas image loader.
+  globalThis.Image = class Image extends htmlClasses.HTMLImageElement {
+    constructor(w, h) {
+      super(__native_dom_createElement('img'));
+      if (w !== undefined) this.setAttribute('width', String(Math.floor(Number(w) || 0)));
+      if (h !== undefined) this.setAttribute('height', String(Math.floor(Number(h) || 0)));
+    }
+  };
   globalThis.HTMLContentElement = class HTMLContentElement extends HTMLElementBase {};
   globalThis.HTMLUnknownElement = htmlClasses.HTMLUnknownElement;
   globalThis.CharacterData = class CharacterData extends Element {};
@@ -882,6 +1241,102 @@
     removeEventListener() {}
     dispatchEvent() { return true; }
   };
+
+  // EventSource (SSE): finite-response semantics. The response body is
+  // delivered complete (the engine's fetch is buffered), so events fire
+  // when the stream ENDS — true incremental streaming is a documented
+  // Group D gap (needs chunked delivery in the networking crate).
+  // Self-contained listener store (the EventTarget base is a stub).
+  globalThis.EventSource = class EventSource {
+    constructor(url) {
+      this._ls = {};
+      this.url = String(url);
+      this.readyState = 0; // CONNECTING
+      this.withCredentials = false;
+      this.lastEventId = '';
+      const self = this;
+      fetch(this.url, { headers: { Accept: 'text/event-stream' } })
+        .then((r) => r.text())
+        .then((text) => {
+          if (self.readyState === 2) return;
+          self.readyState = 1; // OPEN
+          self.__emit('open', { type: 'open' });
+          self.__feed(text);
+          self.readyState = 2; // CLOSED (finite stream ended)
+        })
+        .catch(() => {
+          self.readyState = 2;
+          self.__emit('error', { type: 'error' });
+        });
+    }
+    close() { this.readyState = 2; }
+    addEventListener(type, fn) {
+      if (typeof fn !== 'function') return;
+      (this._ls[type] = this._ls[type] || []).push(fn);
+    }
+    removeEventListener(type, fn) {
+      const l = this._ls[type];
+      if (l) this._ls[type] = l.filter((f) => f !== fn);
+    }
+    dispatchEvent(ev) {
+      this.__emit(ev && ev.type, ev);
+      return true;
+    }
+    // Emits to both the on<type> property and registered listeners.
+    __emit(type, init) {
+      if (!type) return;
+      let ev;
+      try {
+        ev = new Event(type);
+      } catch (e) {
+        ev = { type };
+      }
+      if (init) {
+        for (const k of ['data', 'lastEventId', 'origin']) {
+          if (k in init) ev[k] = init[k];
+        }
+      }
+      const onProp = this['on' + type];
+      if (typeof onProp === 'function') {
+        try { onProp.call(this, ev); } catch (e) {}
+      }
+      for (const fn of (this._ls[type] || []).slice()) {
+        try { fn.call(this, ev); } catch (e) {}
+      }
+    }
+    __feed(text) {
+      // text/event-stream framing: blank-line separated blocks, `data:`
+      // lines joined by \n, optional `event:` and `id:`.
+      const blocks = String(text).split(/\r?\n\r?\n/);
+      for (const block of blocks) {
+        let data = [];
+        let eventName = '';
+        let lastId = '';
+        for (const line of block.split(/\r?\n/)) {
+          if (line.startsWith(':')) continue;
+          const colon = line.indexOf(':');
+          const field = colon === -1 ? line : line.slice(0, colon);
+          let value = colon === -1 ? '' : line.slice(colon + 1);
+          if (value.startsWith(' ')) value = value.slice(1);
+          if (field === 'data') data.push(value);
+          else if (field === 'event') eventName = value;
+          else if (field === 'id') lastId = value;
+        }
+        if (!data.length && !eventName) continue;
+        if (lastId) this.lastEventId = lastId;
+        this.__emit(eventName || 'message', {
+          type: eventName || 'message',
+          data: data.join('\n'),
+          lastEventId: this.lastEventId,
+          origin: this.url,
+        });
+      }
+    }
+  };
+  globalThis.EventSource.CONNECTING = 0;
+  globalThis.EventSource.OPEN = 1;
+  globalThis.EventSource.CLOSED = 2;
+
 
   // WebComponents: the custom-element registry. Definitions upgrade
   // matching elements (parser-inserted and JS-created), fire the v1

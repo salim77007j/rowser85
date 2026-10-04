@@ -1091,9 +1091,13 @@ fn build_box(
             }
         }
     }
-    // `<img>`: natural-size replaced sizing (decoded dimensions arrive via
-    // `intrinsic` from the engine — raster and SVG sources alike).
-    if dom.element(node).is_some_and(|el| &*el.name.local == "img") {
+    // `<img>` and `<canvas>`: replaced-element sizing (decoded dimensions
+    // arrive via `intrinsic` from the engine — raster, SVG and canvas
+    // sources alike; canvas intrinsic = its width/height attributes).
+    if dom
+        .element(node)
+        .is_some_and(|el| &*el.name.local == "img" || &*el.name.local == "canvas")
+    {
         if let Some(cs) = styles.get(node) {
             use rowser_parsing::cascade::{Length, LengthOrAuto};
             let auto_w = matches!(cs.width, LengthOrAuto::Auto);

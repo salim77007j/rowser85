@@ -1301,6 +1301,28 @@ fn handle_page_command(state: &EngineLoop, tab: TabId, command: JsCommand) {
                 );
             });
         }
+        JsCommand::ImageFetch { node, url } => {
+            // A dynamically-created image (new Image() + src, or an img
+            // src set from JS): fetch the bytes, decode on the page thread
+            // and fire load/error on the element.
+            let request = rowser_networking::FetchRequest {
+                url: url.clone(),
+                resource_type: rowser_networking::ResourceKind::Image,
+                source_url: state.source_url(tab),
+                top_site: None,
+                ..rowser_networking::FetchRequest::default()
+            };
+            let network = Arc::clone(&state.network);
+            let cmd_tx = state.cmd_tx.clone();
+            state.runtime.spawn(async move {
+                let outcome = rowser_networking::fetch(&network, request).await;
+                let (body, ok) = match outcome {
+                    Ok(response) if response.is_success() => (response.body.to_vec(), true),
+                    _ => (Vec::new(), false),
+                };
+                send_page_direct(cmd_tx, tab, page::Message::ImageFetched { node, body, ok });
+            });
+        }
         JsCommand::WorkerPost { .. } | JsCommand::WorkerTerminate { .. } => {
             // Handled locally by the page thread.
         }

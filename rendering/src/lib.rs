@@ -11,6 +11,7 @@
 //! A GPU backend (vello/wgpu) can slot in behind the same display list via
 //! the documented backend trait — see `docs/ARCHITECTURE.md`.
 
+pub mod canvas2d;
 pub mod display_list;
 pub mod painter;
 

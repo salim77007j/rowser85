@@ -5153,6 +5153,7 @@ dependencies = [
  "rowser-dom",
  "rowser-parsing",
  "rowser-privacy",
+ "rowser-rendering",
  "rowser-storage",
  "rquickjs",
  "serde",

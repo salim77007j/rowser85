@@ -69,6 +69,16 @@ pub enum Message {
         /// Fetch success — `true` fires `load`, `false` fires `error`.
         ok: bool,
     },
+    /// A dynamically-created image finished fetching; decode it into the
+    /// image map and fire the element's `load` (or `error`) event.
+    ImageFetched {
+        /// DOM handle of the img element.
+        node: u64,
+        /// Image bytes.
+        body: Vec<u8>,
+        /// Fetch success — `true` fires `load`, `false` fires `error`.
+        ok: bool,
+    },
     /// A command from JavaScript (timers, fetches, ...).
     JsCommand(JsCommand),
     /// An event to dispatch into JavaScript.
@@ -478,6 +488,10 @@ struct Page {
     layout: Option<LayoutResult>,
     display_list: Option<rowser_rendering::DisplayList>,
     images: ImageMap,
+    /// Live canvas surfaces shared with the JS runtime (Group D).
+    canvas_registry: rowser_rendering::canvas2d::CanvasRegistryShared,
+    /// Mirror of `images` shared with the JS bridge (drawImage + naturalWidth).
+    image_mirror: rowser_js::ImageMirrorShared,
     /// Decoded background-image layers per node (one slot per layer).
     background_images: rowser_rendering::display_list::BackgroundImageMap,
     /// URL → (node, layer) requests in flight for background images.
@@ -603,6 +617,8 @@ impl Page {
             layout: None,
             display_list: None,
             images: ImageMap::new(),
+            canvas_registry: rowser_rendering::canvas2d::new_registry(),
+            image_mirror: Rc::new(RefCell::new(ImageMap::new())),
             svg_rasters: HashMap::new(),
             device_pixel_ratio: std::env::var("ROWSER_DPR")
                 .ok()
@@ -725,6 +741,9 @@ impl Page {
             }
             Message::ScriptCodeFetched { node, code, ok } => {
                 self.run_dynamic_script(node, code, ok);
+            }
+            Message::ImageFetched { node, body, ok } => {
+                self.image_fetched(node, body, ok);
             }
             Message::JsEvent(event) => {
                 if let Some(js) = &self.js {
@@ -1817,6 +1836,7 @@ impl Page {
                     if let Some(node) = owner {
                         self.images.insert(node, Arc::new(image));
                     }
+                    self.sync_image_mirror();
                     self.dirty = true;
                 }
                 // Background-image layer delivery: the fetch URL matches
@@ -2165,6 +2185,29 @@ impl Page {
             for (node, image) in &self.images {
                 if image.width > 0 && image.height > 0 {
                     intrinsic.insert(*node, (image.width as f32, image.height as f32));
+                }
+            }
+            // <canvas> elements size from their width/height attributes
+            // (default 300x150, the spec's intrinsic size).
+            if let Some(dom_rc) = &self.dom {
+                let dom = dom_rc.borrow();
+                for node in dom.subtree_elements(dom.document()) {
+                    let is_canvas = dom
+                        .element(node)
+                        .is_some_and(|el| &*el.name.local == "canvas");
+                    if !is_canvas {
+                        continue;
+                    }
+                    let attr = |name: &str| -> f32 {
+                        dom.get_attr(node, name)
+                            .and_then(|v| v.trim().parse::<f32>().ok())
+                            .filter(|v| *v >= 0.0)
+                            .unwrap_or(match name {
+                                "width" => 300.0,
+                                _ => 150.0,
+                            })
+                    };
+                    intrinsic.insert(node, (attr("width"), attr("height")));
                 }
             }
             let (styles, layout) = self.layout_engine.layout_document(
@@ -2741,10 +2784,16 @@ impl Page {
     /// The image map the display list sees: decoded `<img>`s overlaid with
     /// inline-SVG rasters (both paint through the same DrawCmd::Image path).
     fn merged_images(&self) -> ImageMap {
-        if self.svg_rasters.is_empty() {
+        // Canvas snapshots first (cheapest when nothing drew).
+        let canvases = self.canvas_registry.borrow();
+        if canvases.is_empty() && self.svg_rasters.is_empty() {
             return self.images.clone();
         }
         let mut merged = self.images.clone();
+        for (node, canvas) in canvases.iter() {
+            let snapshot = canvas.borrow().snapshot();
+            merged.insert(NodeId::try_from(*node).unwrap_or(0), Arc::new(snapshot));
+        }
         for (node, raster) in &self.svg_rasters {
             merged.insert(*node, Arc::clone(&raster.image));
         }
@@ -2818,6 +2867,8 @@ impl Page {
                 history: Rc::clone(&self.history_mirror),
                 observers: Rc::clone(&self.observers_state),
                 session: Rc::clone(&self.session_store),
+                canvases: Rc::clone(&self.canvas_registry),
+                images: Rc::clone(&self.image_mirror),
             };
             *self.viewport_mirror.borrow_mut() =
                 (self.scroll_y, self.viewport.width, self.viewport.height);
@@ -2982,6 +3033,8 @@ impl Page {
             history: Default::default(),
             observers: Default::default(),
             session: Default::default(),
+            canvases: rowser_rendering::canvas2d::new_registry(),
+            images: Rc::new(RefCell::new(ImageMap::new())),
         };
         if let Ok(runtime) = JsRuntime::new(JsConfig::default(), bridge) {
             runtime
@@ -2991,6 +3044,44 @@ impl Page {
             let _ = runtime.eval(&code, "worker.js");
             self.workers.insert(worker, runtime);
         }
+    }
+
+    /// A dynamically-created image (`new Image()` + `.src`) finished
+    /// fetching: decode into the image map, fire load/error, refresh the
+    /// JS-side mirror, repaint.
+    fn image_fetched(&mut self, node: u64, body: Vec<u8>, ok: bool) {
+        let node_id = NodeId::try_from(node).unwrap_or(0);
+        if self
+            .dom
+            .as_ref()
+            .is_none_or(|d| !d.borrow().is_valid(node_id))
+        {
+            return; // the element was removed while fetching
+        }
+        if ok {
+            if let Some(image) =
+                DecodedImage::decode(&body).or_else(|| rowser_rendering::decode_svg_bytes(&body))
+            {
+                self.images.insert(node_id, Arc::new(image));
+            }
+        }
+        // Refresh the JS-visible image mirror FIRST — onload handlers
+        // read naturalWidth (the classic image-loader bootstrap).
+        self.sync_image_mirror();
+        // Then fire load/error on the element.
+        if let Some(js) = &self.js {
+            let event = if ok { "load" } else { "error" };
+            js.dispatch(JsEngineEvent::DomEvent {
+                node,
+                event_type: event.to_owned(),
+            });
+        }
+        self.dirty = true;
+    }
+
+    /// Refreshes the JS-visible mirror of decoded images.
+    fn sync_image_mirror(&mut self) {
+        *self.image_mirror.borrow_mut() = self.images.clone();
     }
 
     // ------------------------------------------------------------------

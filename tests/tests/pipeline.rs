@@ -787,3 +787,317 @@ async fn script_load_events_end_to_end() {
     );
     assert_eq!(saw.len(), 8, "exactly the expected markers: {saw:?}");
 }
+
+// ---------------------------------------------------------------------------
+// Canvas 2D (Group D)
+// ---------------------------------------------------------------------------
+
+const CANVAS_HTML: &str = r#"<!DOCTYPE html>
+<html>
+<head><title>Canvas E2E</title></head>
+<body style="margin:0">
+  <canvas id="c" width="240" height="160" style="border:1px solid #333"></canvas>
+  <canvas id="c2" width="60" height="60" style="display:none"></canvas>
+  <img id="logo" src="/pixel.png" style="position:absolute;left:-9999px">
+  <script>
+    const c = document.getElementById('c');
+    const ctx = c.getContext('2d');
+    // 1. Basic fill + clear.
+    ctx.fillStyle = '#ff0000';
+    ctx.fillRect(10, 10, 40, 30);
+    // 2. Gradient.
+    const g = ctx.createLinearGradient(100, 0, 200, 0);
+    g.addColorStop(0, '#0000ff');
+    g.addColorStop(1, '#ffffff');
+    ctx.fillStyle = g;
+    ctx.fillRect(100, 10, 100, 30);
+    // 3. Path + arc + stroke.
+    ctx.strokeStyle = '#00aa00';
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    ctx.arc(60, 90, 20, 0, Math.PI * 2);
+    ctx.stroke();
+    // 4. Text.
+    ctx.fillStyle = '#111111';
+    ctx.font = '16px sans-serif';
+    ctx.fillText('Rrowser', 120, 90);
+    // 5. Save/restore + transform discipline.
+    ctx.save();
+    ctx.translate(200, 120);
+    ctx.rotate(Math.PI / 2);
+    ctx.fillStyle = '#ff00ff';
+    ctx.fillRect(-10, -5, 20, 10);
+    ctx.restore();
+    // 6. isPointInPath.
+    ctx.beginPath();
+    ctx.rect(0, 0, 20, 20);
+    const hit = ctx.isPointInPath(10, 10);
+    const miss = ctx.isPointInPath(50, 50);
+    // 7. measureText sanity.
+    const m = ctx.measureText('Rrowser');
+    // 8. drawImage from another canvas.
+    const c2 = document.getElementById('c2');
+    const ctx2 = c2.getContext('2d');
+    ctx2.fillStyle = '#ffff00';
+    ctx2.fillRect(0, 0, 60, 60);
+    ctx.drawImage(c2, 10, 120, 30, 30);
+    // 9. getImageData round-trip: repaint the whole 5x5 block green.
+    const im = ctx.getImageData(15, 20, 5, 5);
+    const red = im.data[0] === 255 && im.data[1] === 0 && im.data[3] === 255;
+    for (let i = 0; i < im.data.length; i += 4) {
+      im.data[i] = 0; im.data[i+1] = 255; im.data[i+2] = 0; im.data[i+3] = 255;
+    }
+    ctx.putImageData(im, 10, 10);
+    const im2 = ctx.getImageData(12, 12, 1, 1);
+    const green = im2.data[1] === 255 && im2.data[3] === 255;
+    // 10. toDataURL PNG.
+    const url = c.toDataURL();
+    const png = url.startsWith('data:image/png;base64,');
+    // Report markers.
+    console.log('CV:HIT=' + (hit && !miss));
+    console.log('CV:MEASURE=' + (m.width > 40));
+    console.log('CV:GOTDATA=' + red);
+    console.log('CV:PUTDATA=' + green);
+    console.log('CV:DATAURL=' + png);
+    // 11. Async: Image() load + drawImage (fires later).
+    const img = new Image();
+    img.onload = () => {
+      try {
+        ctx.drawImage(img, 150, 120, 20, 20);
+        console.log('CV:IMGLOADED nw=' + img.naturalWidth);
+      } catch (e) {
+        console.log('CV:IMGERR ' + e);
+      }
+    };
+    img.onerror = () => console.log('CV:IMGERR onerror');
+    img.src = '/pixel.png';
+  </script>
+</body>
+</html>"#;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn canvas2d_end_to_end() {
+    let mut routes: HashMap<String, (u16, String, Vec<u8>)> = HashMap::new();
+    routes.insert(
+        "/".to_owned(),
+        (200, "text/html".to_owned(), CANVAS_HTML.as_bytes().to_vec()),
+    );
+    use base64::Engine;
+    let png = base64::engine::general_purpose::STANDARD
+        .decode(PIXEL_PNG)
+        .expect("test png");
+    routes.insert("/pixel.png".to_owned(), (200, "image/png".to_owned(), png));
+    let mut server = LocalServer::start(routes);
+    let url = server.url();
+    server.serve();
+
+    let browser = BrowserApi::start(test_config("canvas2d")).expect("engine start");
+    let _tab = browser.new_tab(Some(url));
+    let mut events = browser.events();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(wait_seconds());
+    let mut saw = std::collections::HashSet::new();
+    while saw.len() < 6 {
+        let event = tokio::time::timeout_at(deadline, events.recv())
+            .await
+            .expect("timeout waiting for canvas markers")
+            .expect("event channel alive");
+        if let EngineEvent::ConsoleMessage { text, .. } = event {
+            if text.starts_with("CV:") {
+                saw.insert(text.trim().to_owned());
+            }
+        }
+    }
+    browser.shutdown();
+    drop(server);
+
+    // JS-visible API behavior.
+    assert!(saw.contains("CV:HIT=true"), "isPointInPath: {saw:?}");
+    assert!(saw.contains("CV:MEASURE=true"), "measureText: {saw:?}");
+    assert!(saw.contains("CV:GOTDATA=true"), "getImageData: {saw:?}");
+    assert!(saw.contains("CV:PUTDATA=true"), "putImageData: {saw:?}");
+    assert!(saw.contains("CV:DATAURL=true"), "toDataURL: {saw:?}");
+    assert!(
+        saw.iter().any(|t| t.starts_with("CV:IMGLOADED nw=")),
+        "Image() load + drawImage: {saw:?}"
+    );
+    assert!(
+        !saw.iter().any(|t| t.contains("CV:IMGERR")),
+        "no image errors: {saw:?}"
+    );
+    assert_eq!(saw.len(), 6, "exactly the expected markers: {saw:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn canvas2d_paints_pixels() {
+    let mut routes: HashMap<String, (u16, String, Vec<u8>)> = HashMap::new();
+    routes.insert(
+        "/".to_owned(),
+        (200, "text/html".to_owned(), CANVAS_HTML.as_bytes().to_vec()),
+    );
+    use base64::Engine;
+    let png = base64::engine::general_purpose::STANDARD
+        .decode(PIXEL_PNG)
+        .expect("test png");
+    routes.insert("/pixel.png".to_owned(), (200, "image/png".to_owned(), png));
+    let mut server = LocalServer::start(routes);
+    let url = server.url();
+    server.serve();
+
+    let browser = BrowserApi::start(test_config("canvas-pixels")).expect("engine start");
+    let tab = browser.new_tab(Some(url));
+    let mut events = browser.events();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(wait_seconds());
+    loop {
+        let event = tokio::time::timeout_at(deadline, events.recv())
+            .await
+            .expect("timeout waiting for image load")
+            .expect("event channel alive");
+        if let EngineEvent::ConsoleMessage { text, .. } = event {
+            if text.starts_with("CV:IMGLOADED") {
+                break;
+            }
+        }
+    }
+    // Allow the final draw + repaint to land.
+    tokio::time::sleep(Duration::from_millis(600)).await;
+
+    let frame = browser.frame(tab).expect("frame");
+    let straight = frame.straight_rgba();
+    let (w, _) = (frame.width as usize, frame.height as usize);
+    let at = |x: usize, y: usize| -> [u8; 4] {
+        let i = (y * w + x) * 4;
+        [
+            straight[i],
+            straight[i + 1],
+            straight[i + 2],
+            straight[i + 3],
+        ]
+    };
+    // Border-1px + body margin 0: the canvas starts at (1,1). Red fill
+    // covers canvas pixels (11..49, 11..39) => viewport (12..50, 12..40).
+    // putImageData painted green INSIDE the red rect at canvas (10..15)².
+    let green = at(13, 13);
+    assert!(
+        green[1] >= 200 && green[0] < 60 && green[3] >= 250,
+        "putImageData green at (13,13): {green:?}"
+    );
+    let red = at(30, 30);
+    assert!(red[0] >= 240 && red[1] < 32, "red fill at (30,30): {red:?}");
+    // Gradient blue -> white horizontally at canvas y 10..40.
+    let blue = at(112, 20);
+    let white = at(195, 20);
+    assert!(
+        blue[2] >= 200 && blue[0] < 60,
+        "gradient blue end: {blue:?}"
+    );
+    assert!(
+        white[0] >= 230 && white[2] >= 230,
+        "gradient white end: {white:?}"
+    );
+    // Yellow 30x30 drawImage(c2) at canvas (10,120) => viewport ~ (11..41, 121..151).
+    let yellow = at(25, 135);
+    assert!(
+        yellow[0] >= 230 && yellow[1] >= 230 && yellow[2] < 60,
+        "drawImage canvas->canvas yellow: {yellow:?}"
+    );
+    // Text: some dark pixels in the band canvas (120..190, 75..95).
+    let mut dark = 0usize;
+    for x in 121..190 {
+        for y in 76..95 {
+            let p = at(x, y);
+            if p[0] < 90 && p[1] < 90 && p[2] < 90 && p[3] > 200 {
+                dark += 1;
+            }
+        }
+    }
+    assert!(dark > 10, "fillText dark pixels: {dark}");
+    // The magenta rotated square near canvas (200,120): some magenta.
+    let mut magenta = 0usize;
+    for x in 160..240 {
+        for y in 100..160 {
+            let p = at(x, y);
+            if p[0] >= 200 && p[2] >= 200 && p[1] < 90 && p[3] > 200 {
+                magenta += 1;
+            }
+        }
+    }
+    assert!(magenta > 10, "rotated transform square: {magenta}");
+    browser.shutdown();
+}
+
+// ---------------------------------------------------------------------------
+// EventSource (SSE, finite-response semantics)
+// ---------------------------------------------------------------------------
+
+const SSE_HTML: &str = r#"<!DOCTYPE html>
+<html><body>
+<script>
+  window.onerror = function (m) { console.log('SSE:ERR ' + m); };
+  console.log('SSE:START typeof=' + typeof EventSource);
+  const es = new EventSource('/events');
+  let got = 0, custom = 0;
+  const datas = [];
+  es.onmessage = (e) => { got++; datas.push(e.data); if (got >= 2) console.log('SSE:DATA ok=' + (datas.join(',') === 'hello,world')); };
+  es.addEventListener('tick', (e) => { custom++; if (custom >= 1) console.log('SSE:TICK ok=' + (e.data === '1')); });
+  es.onerror = () => console.log('SSE:ERROR');
+  es.onopen = () => console.log('SSE:OPEN');
+  setTimeout(() => {
+    console.log('SSE:SUMMARY g=' + got + ' c=' + custom + ' rs=' + es.readyState);
+  }, 900);
+</script>
+</body></html>"#;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn eventsource_finite_stream() {
+    let sse = "retry: 1000\n\nid: 1\ndata: hello\n\ndata: world\n\nevent: tick\ndata: 1\n\n: keepalive\n\n";
+    let mut routes: HashMap<String, (u16, String, Vec<u8>)> = HashMap::new();
+    routes.insert(
+        "/".to_owned(),
+        (200, "text/html".to_owned(), SSE_HTML.as_bytes().to_vec()),
+    );
+    routes.insert(
+        "/events".to_owned(),
+        (200, "text/event-stream".to_owned(), sse.as_bytes().to_vec()),
+    );
+    let mut server = LocalServer::start(routes);
+    let url = server.url();
+    server.serve();
+
+    let browser = BrowserApi::start(test_config("sse")).expect("engine start");
+    let _tab = browser.new_tab(Some(url));
+    let mut events = browser.events();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(wait_seconds());
+    let mut saw = std::collections::HashSet::new();
+    while saw.len() < 5 {
+        let event = tokio::time::timeout_at(deadline, events.recv())
+            .await
+            .expect("timeout waiting for SSE markers")
+            .expect("event channel alive");
+        if let EngineEvent::ConsoleMessage { text, .. } = event {
+            if text.starts_with("SSE:") {
+                saw.insert(text.trim().to_owned());
+            }
+        }
+    }
+    browser.shutdown();
+    drop(server);
+
+    assert!(saw.contains("SSE:OPEN"), "open event: {saw:?}");
+    assert!(
+        saw.contains("SSE:DATA ok=true"),
+        "message events (one per blank-line block): {saw:?}"
+    );
+    assert!(
+        saw.contains("SSE:TICK ok=true"),
+        "custom event name: {saw:?}"
+    );
+    assert!(
+        saw.iter().any(|t| t.starts_with("SSE:SUMMARY")),
+        "summary: {saw:?}"
+    );
+    // Summary must show both handlers fired (g=2, c=1) — the wait loop
+    // exits at 5 distinct markers which includes SUMMARY.
+    let summary = saw.iter().find(|t| t.starts_with("SSE:SUMMARY")).unwrap();
+    assert!(summary.contains("g=2"), "two message events: {summary}");
+    assert!(summary.contains("c=1"), "one custom event: {summary}");
+}

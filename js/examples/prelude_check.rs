@@ -27,6 +27,10 @@ fn main() {
         history: Default::default(),
         observers: Default::default(),
         session: Default::default(),
+        canvases: rowser_rendering::canvas2d::new_registry(),
+        images: std::rc::Rc::new(std::cell::RefCell::new(
+            rowser_rendering::display_list::ImageMap::new(),
+        )),
     };
     let t0 = Instant::now();
     println!("creating runtime (evals prelude)…");

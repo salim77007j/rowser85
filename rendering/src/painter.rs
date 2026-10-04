@@ -1271,7 +1271,7 @@ fn skia_stops(stops: &[GradientStop]) -> Vec<tiny_skia::GradientStop> {
 // ---------------------------------------------------------------------------
 
 /// Box blur on a premultiplied RGBA8 pixmap (3 passes ≈ Gaussian).
-fn blur_pixmap(pixmap: &mut Pixmap, radius: usize) {
+pub(crate) fn blur_pixmap(pixmap: &mut Pixmap, radius: usize) {
     let w = pixmap.width() as usize;
     let h = pixmap.height() as usize;
     if w == 0 || h == 0 || radius == 0 {
